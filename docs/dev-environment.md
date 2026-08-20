@@ -12,6 +12,13 @@
 | CIXpress namespace | `cixpress` |
 | CIXpress URL | <https://cixpress.virtomat.dev> |
 | Operator namespace | `coriolis` |
+| Coriolis environment source | [New Coriolis environments](https://cloudbasedev.atlassian.net/wiki/spaces/CDS/pages/2706014209/New+Coriolis+environments) |
+| Appliance Jenkins URL | <http://10.8.1.121:8080> |
+| Appliance setup job | `1_coriolis-appliance-setup` |
+| `2608.0-rc4` reference build | [Build 868](http://10.8.1.121:8080/job/1_coriolis-appliance-setup/868/) |
+
+!!! warning
+    Treat the Confluence environment page as the source of truth for appliance build infrastructure, but never copy credentials from it into this repository, commands, logs, or reports. Record only non-secret identifiers such as URLs, Jenkins job names, Jenkins credential IDs, and Kubernetes Secret names.
 
 ## :material-book-open-page-variant-outline: Workstation Access
 

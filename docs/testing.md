@@ -13,19 +13,16 @@ For the controller skeleton, these local validations have passed:
 - Container image build and non-root runtime identity.
 - `git diff --check`.
 
-Live-cluster smoke validation has not been run.
+Live-cluster controller lifecycle validation passed for release `0.5.2` in the approved `coriolis` namespace.
 
-The approved dev cluster is `infra-dev-buc-hq` (`virt-infra-dev-buc-hq`) for read-only pipeline troubleshooting and monitoring only. Operator deployment and live validation remain forbidden until a dedicated operator namespace is defined and approved. See [Development Environment](dev-environment.md).
+The approved dev cluster is `infra-dev-buc-hq` (`virt-infra-dev-buc-hq`); CIXpress remains approved for read-only pipeline troubleshooting and monitoring only. The dedicated operator namespace is `coriolis`. See [Development Environment](dev-environment.md).
 
-After that approval, the future smoke test must:
+The completed `0.5.2` lifecycle validation covered:
 
-- Install the chart.
-- Apply the sample.
-- Wait for and check resource status.
-- Validate marker ConfigMap ownership and configuration data.
-- Restart the controller.
-- Update `spec.version`.
-- Delete the resource and verify garbage collection; this remains a pending verification, not a proven behavior.
+- Apply the sample and check status, ownership, and marker configuration data.
+- Replace the controller pod and verify reconciliation resumes without changing ownership, marker uniqueness, or condition transition times.
+- Update `spec.version` and verify generation, observed generation, status, and marker data.
+- Delete the resource and verify normal garbage collection.
 
 The local controller coverage includes:
 

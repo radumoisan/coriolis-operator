@@ -27,7 +27,7 @@ Each pipeline has a six-character pipeline ID. Job names are `<step>-job-<pipeli
 
 The build derives its next version from `helm/values.yaml`. For `main`, `x.y.z` becomes `x.(y+1).0`. For `dev` and other branches, `x.y.z` becomes `x.y.(z+1)`. A `dev` build fails early when its Helm version trails the highest repository tag.
 
-Chart version, application version, and image tag are synchronized at release `0.4.0`. The selected image repository is `cr.virtomat.io/virtomat/coriolis/operator`. CIXpress, not developers, owns future release-version edits.
+Chart version, application version, and image tag are synchronized at release `0.5.2`. The selected image repository is `cr.virtomat.io/virtomat/coriolis/operator`. CIXpress, not developers, owns future release-version edits.
 
 ## :material-book-open-page-variant-outline: Status and Observability
 
@@ -41,4 +41,4 @@ Start with the pipeline ID and identify the last step that changed state using [
 
 A successful pipeline produces a versioned image and `latest`, an OCI chart at the same version, updated `helm/values.yaml` and `helm/Chart.yaml`, a source commit containing the version bump, a Git tag for `main` or `dev`, all four steps in `SUCCEEDED`, and removal of the temporary PVC. Publication is not deployment; deployment remains a separate GitOps or promotion action.
 
-CIXpress is experimental and non-transactional: artifacts published by earlier steps are not rolled back if a later step fails. CI image push and OCI chart publication are validated through release `0.4.0`; Argo image pull and deployment are also validated for that release. CIXpress configuration and manifests are not yet in this repository. Promotion policy, exact integration artifacts and trigger/monitoring credentials, and Argo CRD pre-upgrade automation remain separate work.
+CIXpress is experimental and non-transactional: artifacts published by earlier steps are not rolled back if a later step fails. CI image push and OCI chart publication are validated through release `0.5.2`; pipeline `5ly5kg` completed all expected steps as `SUCCEEDED`. Argo image pull and deployment are also validated for `0.5.2`. CIXpress configuration and manifests are not yet in this repository. Promotion policy, exact integration artifacts/templates/triggers/credentials, and Argo CRD pre-upgrade automation remain separate work.

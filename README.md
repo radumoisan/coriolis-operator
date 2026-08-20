@@ -6,7 +6,7 @@ The operator is built with Python 3.12, uv, and Kopf. Existing Coriolis componen
 
 `CoriolisAppliance` is a namespaced API at `coriolis.cloudbase.it/v1alpha1`.
 
-The bootstrap/controller skeleton is implemented locally. Live-cluster smoke validation remains pending.
+The bootstrap/controller skeleton is implemented and release `0.5.2` controller lifecycle validation passed in the approved `coriolis` namespace. `Ready=False/RuntimeNotImplemented` is expected until the recorded Kubernetes-native core runtime is implemented.
 
 ## Layout
 
@@ -18,4 +18,4 @@ The bootstrap/controller skeleton is implemented locally. Live-cluster smoke val
 
 ## Open Details
 
-CIXpress is the known CI/release automation model and owns future chart version, application version, and image-tag synchronization. The provisional `0.0.0` image repository is `cr.virtomat.io/virtomat/coriolis/operator`; publication/authentication validation and promotion, the exact CIXpress integration files and trigger, Argo CRD pre-upgrade automation, and licensing remain open.
+CIXpress is the known CI/release automation model and owns future chart version, application version, and image-tag synchronization. Release `0.5.2` uses image repository `cr.virtomat.io/virtomat/coriolis/operator`; publication, authentication, and deployment are validated. The Kubernetes-native `core` runtime contract is recorded; its active first gate is the `2608.0-rc4` image and registry inventory, using appliance Jenkins Build `868` as the initial provenance source. Promotion, exact CIXpress configuration/templates/triggers/credentials, Argo CRD pre-upgrade automation, and licensing as applicable remain open.
