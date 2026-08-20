@@ -30,7 +30,17 @@ For the local metadata-only helper slice, these local validations passed:
 - `uv run mypy src`.
 - `git diff --check`.
 
-The helper slice is committed locally at `fbab6e5` on `dev`, but not pushed or deployed; the deployed marker `0.5.3` is unchanged and carries no standard labels. Collision pre-read/enforcement, legacy marker migration, retained-resource adoption, and all runtime resource construction remain deferred to the separate collision/migration API-layer slice.
+The helper slice is committed locally at `fbab6e5` on `dev`, but not pushed or deployed; the deployed marker `0.5.3` is unchanged and carries no standard labels. The collision/migration marker API-layer slice is described below; retained-resource adoption and all runtime resource construction remain deferred.
+
+For the local collision/migration marker API-layer slice, these local validations passed:
+
+- 70 unit tests covering the pre-read classification (404 create; fully matching managed marker proceeds with unchanged body; compatible legacy `0.5.2`/`0.5.3` marker normalization in place with stale generation updated, including dotted/long names; `ResourceCollision` for partial/conflicting standard metadata, owner mismatch, incompatible legacy data, and owner-plus-retention metadata, never patching/adopting/deleting/renaming; preservation of a prior `acceptedVersion` and condition transition time), non-404 read error propagation without patching, `V1ConfigMap` object handling, and deterministic `ResourceCollision` conditions.
+- `uv run ruff check .` and `uv run ruff format --check .`.
+- `uv run mypy src`.
+- `helm lint helm/` and `helm template coriolis-operator helm/ --include-crds`.
+- `git diff --check`.
+
+This slice is **committed locally at `d8df00f` on `dev`, but not pushed or deployed**; the deployed marker `0.5.3` is unchanged and lacks these pre-read/collision semantics. ConfigMap RBAC gains only `get`. Retained-resource adoption remains an unresolved authorization safety gate and is NOT implemented; all runtime resources remain unimplemented/undeployed, and a MariaDB vertical slice remains blocked by unresolved Secret/configuration/storage/readiness gates.
 
 Live-cluster controller lifecycle validation passed for release `0.5.2` in the approved `coriolis` namespace. The currently deployed `0.5.3` retains the marker-only controller behavior and predates this local API slice; full lifecycle validation was not repeated for `0.5.3`.
 
