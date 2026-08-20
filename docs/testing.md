@@ -40,7 +40,17 @@ For the local collision/migration marker API-layer slice, these local validation
 - `helm lint helm/` and `helm template coriolis-operator helm/ --include-crds`.
 - `git diff --check`.
 
-This slice is **committed locally at `d8df00f` on `dev`, but not pushed or deployed**; the deployed marker `0.5.3` is unchanged and lacks these pre-read/collision semantics. ConfigMap RBAC gains only `get`. Retained-resource adoption remains an unresolved authorization safety gate and is NOT implemented; all runtime resources remain unimplemented/undeployed, and a MariaDB vertical slice remains blocked by unresolved Secret/configuration/storage/readiness gates.
+This slice is **committed locally at `d8df00f` on `dev`, but not pushed or deployed**; the deployed marker `0.5.3` is unchanged and lacks these pre-read/collision semantics. ConfigMap RBAC gains only `get`.
+
+For the local retained-resource authorization/classification slice, these local validations passed:
+
+- 94 unit tests (24 new for this slice) covering the pure `classify_retained_resource` classifier returning `RetainedClassification.ABSENT/REUSE/COLLISION`: absent resource eligible for creation; exact matching PVC/state Secret/CA-state reuse; changed creating-appliance UID with otherwise exact retained identity is `REUSE` (UID is deliberately ignored; a stale `coriolis.cloudbase.it/appliance-uid` annotation is treated as unrelated); name/namespace/appliance/component/retention mismatches collide; missing/partial labels and annotations collide; any owner reference collides (even a matching owner UID); unrelated extra labels/annotations are allowed; the external `coriolis-appliance-registry` Secret fails closed as `COLLISION` both when absent and when forged with exact matching metadata; mapping-shaped dict and real `V1Secret`/`V1PersistentVolumeClaim` model representations; and no input mutation.
+- `uv run ruff check .` and `uv run ruff format --check .`.
+- `uv run mypy src`.
+- `helm lint helm/` and `helm template coriolis-operator helm/ --include-crds`.
+- `git diff --check`.
+
+This slice is **committed locally at `1b73045` on `dev`, but not pushed or deployed**; the deployed marker `0.5.3` is unchanged. It constructs/reconciles/patch/reads/adopts no runtime resource and adds no adoption mutations; external/pre-existing resources such as `coriolis-appliance-registry` fail closed as `COLLISION` and remain read-only and outside this classifier/reconciliation policy. A MariaDB vertical slice remains blocked by unresolved Secret/configuration/storage/readiness gates.
 
 Live-cluster controller lifecycle validation passed for release `0.5.2` in the approved `coriolis` namespace. The currently deployed `0.5.3` retains the marker-only controller behavior and predates this local API slice; full lifecycle validation was not repeated for `0.5.3`.
 
