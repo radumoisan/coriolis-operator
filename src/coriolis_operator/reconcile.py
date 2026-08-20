@@ -27,6 +27,27 @@ RECONCILED_MESSAGE = (
     "The accepted profile/version controller state marker was recorded in Kubernetes."
 )
 UPGRADE_NOT_SUPPORTED_MESSAGE = "The core profile has no supported upgrade path."
+RESOURCE_COLLISION_MESSAGE = (
+    "The existing ConfigMap '{namespace}/{name}' conflicts with the operator's "
+    "managed state marker and was not modified."
+)
+
+MARKER_MANAGED = "managed"
+MARKER_LEGACY = "legacy"
+MARKER_COLLISION = "collision"
+
+OPERATOR_MANAGEMENT_LABELS = (
+    "app.kubernetes.io/name",
+    "app.kubernetes.io/instance",
+    "app.kubernetes.io/version",
+    "app.kubernetes.io/component",
+    "app.kubernetes.io/part-of",
+    "app.kubernetes.io/managed-by",
+    "coriolis.cloudbase.it/appliance",
+    "coriolis.cloudbase.it/component",
+)
+APPLIANCE_NAME_ANNOTATION = "coriolis.cloudbase.it/appliance-name"
+RETENTION_ANNOTATION = "coriolis.cloudbase.it/retention"
 
 Condition = tuple[str, str, str, str]
 
@@ -179,6 +200,153 @@ def build_state_config_map(
             "generation": str(generation),
         },
     }
+
+
+def _mapping_value(value: Any) -> dict[str, Any]:
+    if isinstance(value, Mapping):
+        return {str(k): str(v) for k, v in value.items()}
+    return {}
+
+
+def _snake_case(name: str) -> str:
+    return re.sub(r"(?<!^)(?=[A-Z])", "_", name).lower()
+
+
+def _field(obj: Any, name: str) -> Any:
+    if isinstance(obj, Mapping):
+        return obj.get(name)
+    value = getattr(obj, name, None)
+    if value is None:
+        value = getattr(obj, _snake_case(name), None)
+    return value
+
+
+def _owner_reference_dict(ref: Any) -> dict[str, Any]:
+    if isinstance(ref, Mapping):
+        return {
+            "apiVersion": str(ref.get("apiVersion") or ""),
+            "kind": str(ref.get("kind") or ""),
+            "name": str(ref.get("name") or ""),
+            "uid": str(ref.get("uid") or ""),
+            "controller": ref.get("controller"),
+        }
+    return {
+        "apiVersion": str(getattr(ref, "api_version", "") or ""),
+        "kind": str(getattr(ref, "kind", "") or ""),
+        "name": str(getattr(ref, "name", "") or ""),
+        "uid": str(getattr(ref, "uid", "") or ""),
+        "controller": getattr(ref, "controller", None),
+    }
+
+
+def _controller_owner_reference(owner_references: Any) -> dict[str, Any] | None:
+    refs = owner_references if isinstance(owner_references, list) else []
+    for ref in refs:
+        normalized = _owner_reference_dict(ref)
+        if normalized["controller"] is True:
+            return normalized
+    return None
+
+
+def _owner_references_match(
+    existing: dict[str, Any] | None, desired: dict[str, Any] | None
+) -> bool:
+    if existing is None or desired is None:
+        return False
+    return (
+        all(
+            existing.get(key) == desired.get(key)
+            for key in ("apiVersion", "kind", "name", "uid")
+        )
+        and existing.get("controller") is True
+        and desired.get("controller") is True
+    )
+
+
+def _normalize_marker(existing: Any) -> dict[str, Any]:
+    metadata = _field(existing, "metadata")
+    if metadata is None:
+        metadata = {}
+    return {
+        "labels": _mapping_value(_field(metadata, "labels")),
+        "annotations": _mapping_value(_field(metadata, "annotations")),
+        "ownerReferences": _controller_owner_reference(
+            _field(metadata, "ownerReferences")
+        ),
+        "data": _mapping_value(_field(existing, "data")),
+    }
+
+
+def classify_existing_marker(
+    *,
+    existing: Any,
+    desired: Mapping[str, Any],
+) -> str:
+    """Classify an existing marker ConfigMap as managed, legacy, or collision."""
+    existing_norm = _normalize_marker(existing)
+    desired_metadata = _field(desired, "metadata")
+    if not isinstance(desired_metadata, Mapping):
+        return MARKER_COLLISION
+    desired_labels = _mapping_value(desired_metadata.get("labels"))
+    desired_annotations = _mapping_value(desired_metadata.get("annotations"))
+    desired_data = _mapping_value(desired.get("data"))
+    desired_owner = _controller_owner_reference(desired_metadata.get("ownerReferences"))
+
+    labels = existing_norm["labels"]
+    annotations = existing_norm["annotations"]
+    existing_owner = existing_norm["ownerReferences"]
+    existing_data = existing_norm["data"]
+
+    management_present = (
+        any(key in labels for key in OPERATOR_MANAGEMENT_LABELS)
+        or APPLIANCE_NAME_ANNOTATION in annotations
+        or RETENTION_ANNOTATION in annotations
+    )
+
+    if management_present:
+        if RETENTION_ANNOTATION in annotations:
+            return MARKER_COLLISION
+        for key, expected in desired_labels.items():
+            if labels.get(key) != expected:
+                return MARKER_COLLISION
+        if annotations.get(APPLIANCE_NAME_ANNOTATION) != desired_annotations.get(
+            APPLIANCE_NAME_ANNOTATION
+        ):
+            return MARKER_COLLISION
+        if not _owner_references_match(existing_owner, desired_owner):
+            return MARKER_COLLISION
+        return MARKER_MANAGED
+
+    if not _owner_references_match(existing_owner, desired_owner):
+        return MARKER_COLLISION
+    if existing_data.get("acceptedVersion") != desired_data.get("acceptedVersion"):
+        return MARKER_COLLISION
+    if existing_data.get("profile") != desired_data.get("profile"):
+        return MARKER_COLLISION
+    return MARKER_LEGACY
+
+
+def collision_conditions(namespace: str, name: str) -> list[Condition]:
+    """Conditions when an existing marker conflicts and blocks reconciliation."""
+    message = RESOURCE_COLLISION_MESSAGE.format(namespace=namespace, name=name)
+    return [
+        (
+            "Accepted",
+            "True",
+            "Accepted",
+            "The requested profile and version are supported.",
+        ),
+        ("Progressing", "False", "ResourceCollision", message),
+        ("Reconciled", "False", "ResourceCollision", message),
+        ("Ready", "False", "ResourceCollision", message),
+        ("Degraded", "True", "ResourceCollision", message),
+        (
+            "Upgradeable",
+            "False",
+            "UpgradeNotSupported",
+            UPGRADE_NOT_SUPPORTED_MESSAGE,
+        ),
+    ]
 
 
 def accepted_conditions() -> list[Condition]:

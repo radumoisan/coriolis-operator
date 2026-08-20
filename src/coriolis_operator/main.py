@@ -10,12 +10,15 @@ import kopf
 from kubernetes import client  # type: ignore[import-untyped]
 
 from coriolis_operator.reconcile import (
+    MARKER_COLLISION,
     SUPPORTED_INITIAL_VERSION,
     SUPPORTED_PROFILE,
     accepted_conditions,
     blocked_conditions,
     build_state_config_map,
     build_status,
+    classify_existing_marker,
+    collision_conditions,
     rejected_conditions,
 )
 
@@ -118,7 +121,23 @@ def reconcile_appliance(
         generation=generation,
         owner=owner,
     )
+    target_name = body["metadata"]["name"]
     api = core_api if core_api is not None else client.CoreV1Api()
+    try:
+        existing = api.read_namespaced_config_map(name=target_name, namespace=namespace)
+    except client.ApiException as exc:
+        if exc.status != 404:
+            raise
+        existing = None
+    if existing is not None:
+        classification = classify_existing_marker(existing=existing, desired=body)
+        if classification == MARKER_COLLISION:
+            return build_status(
+                generation,
+                accepted_version=accepted_version,
+                conditions=collision_conditions(namespace, target_name),
+                prior_conditions=_prior_conditions(status),
+            )
     api.api_client.default_headers["Content-Type"] = "application/apply-patch+yaml"
     api.patch_namespaced_config_map(
         name=body["metadata"]["name"],

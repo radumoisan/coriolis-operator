@@ -1,13 +1,20 @@
+import copy
 import hashlib
 import re
 from datetime import UTC, datetime
 from unittest.mock import MagicMock
 
 import pytest
+from kubernetes import client
 
 from coriolis_operator import main
 from coriolis_operator.main import reconcile_appliance
 from coriolis_operator.reconcile import (
+    APPLIANCE_NAME_ANNOTATION,
+    MARKER_COLLISION,
+    MARKER_LEGACY,
+    MARKER_MANAGED,
+    RETENTION_ANNOTATION,
     SUPPORTED_INITIAL_VERSION,
     SUPPORTED_PROFILE,
     accepted_conditions,
@@ -17,6 +24,8 @@ from coriolis_operator.reconcile import (
     build_resource_metadata,
     build_state_config_map,
     build_status,
+    classify_existing_marker,
+    collision_conditions,
     rejected_conditions,
     state_config_map_name,
 )
@@ -45,6 +54,88 @@ def sample_meta(generation: int = 7) -> dict:
         "generation": generation,
         "uid": "abc-123",
     }
+
+
+def _api_exception(status: int) -> Exception:
+    return client.ApiException(status=status)
+
+
+def make_core_api(existing=None) -> MagicMock:
+    api = MagicMock()
+    api.api_client.default_headers = {}
+    if existing is None:
+        api.read_namespaced_config_map.side_effect = _api_exception(404)
+    else:
+        api.read_namespaced_config_map.return_value = existing
+    return api
+
+
+def desired_body(meta=None) -> dict:
+    meta = meta or sample_meta()
+    owner = {
+        "apiVersion": OWNER["apiVersion"],
+        "kind": OWNER["kind"],
+        "name": meta["name"],
+        "uid": meta["uid"],
+    }
+    return build_state_config_map(
+        name=meta["name"],
+        namespace=meta["namespace"],
+        profile=SUPPORTED_PROFILE,
+        accepted_version=SUPPORTED_INITIAL_VERSION,
+        generation=meta["generation"],
+        owner=owner,
+    )
+
+
+def legacy_marker(meta=None, *, generation: str = "1") -> dict:
+    meta = meta or sample_meta()
+    owner = {
+        "apiVersion": OWNER["apiVersion"],
+        "kind": OWNER["kind"],
+        "name": meta["name"],
+        "uid": meta["uid"],
+    }
+    return {
+        "metadata": {
+            "name": state_config_map_name(meta["name"]),
+            "namespace": meta["namespace"],
+            "ownerReferences": [dict(owner, controller=True)],
+        },
+        "data": {
+            "acceptedVersion": SUPPORTED_INITIAL_VERSION,
+            "profile": SUPPORTED_PROFILE,
+            "generation": generation,
+        },
+    }
+
+
+def to_v1_config_map(body: dict) -> client.V1ConfigMap:
+    meta = body["metadata"]
+    owner_refs = [
+        client.V1OwnerReference(
+            api_version=ref["apiVersion"],
+            kind=ref["kind"],
+            name=ref["name"],
+            uid=ref["uid"],
+            controller=ref.get("controller"),
+        )
+        for ref in meta.get("ownerReferences", [])
+    ]
+    return client.V1ConfigMap(
+        metadata=client.V1ObjectMeta(
+            name=meta["name"],
+            namespace=meta["namespace"],
+            labels=meta.get("labels"),
+            annotations=meta.get("annotations"),
+            owner_references=owner_refs or None,
+        ),
+        data=body.get("data"),
+    )
+
+
+def to_v1_legacy_marker(meta=None, *, generation: str = "1") -> client.V1ConfigMap:
+    return to_v1_config_map(legacy_marker(meta=meta, generation=generation))
 
 
 def condition(
@@ -492,8 +583,7 @@ def test_status_preserves_transition_time_across_reason_change() -> None:
 
 
 def test_reconcile_appliance_server_side_applies_state_and_returns_status() -> None:
-    core_api = MagicMock()
-    core_api.api_client.default_headers = {}
+    core_api = make_core_api()
 
     status = reconcile_appliance(
         spec={"profile": "core", "version": "2603.4"},
@@ -501,41 +591,11 @@ def test_reconcile_appliance_server_side_applies_state_and_returns_status() -> N
         core_api=core_api,
     )
 
-    expected_body = {
-        "apiVersion": "v1",
-        "kind": "ConfigMap",
-        "metadata": {
-            "name": "example-operator-state",
-            "namespace": "operators",
-            "labels": {
-                "app.kubernetes.io/name": "coriolis",
-                "app.kubernetes.io/instance": "example",
-                "app.kubernetes.io/version": "2603.4",
-                "app.kubernetes.io/component": "operator-state",
-                "app.kubernetes.io/part-of": "coriolis-appliance",
-                "app.kubernetes.io/managed-by": "coriolis-operator",
-                "coriolis.cloudbase.it/appliance": "example",
-                "coriolis.cloudbase.it/component": "operator-state",
-            },
-            "annotations": {
-                "coriolis.cloudbase.it/appliance-name": "example",
-            },
-            "ownerReferences": [
-                {
-                    "apiVersion": "coriolis.cloudbase.it/v1alpha1",
-                    "kind": "CoriolisAppliance",
-                    "name": "example",
-                    "uid": "abc-123",
-                    "controller": True,
-                }
-            ],
-        },
-        "data": {
-            "acceptedVersion": "2603.4",
-            "profile": "core",
-            "generation": "7",
-        },
-    }
+    expected_body = desired_body()
+    core_api.read_namespaced_config_map.assert_called_once_with(
+        name="example-operator-state",
+        namespace="operators",
+    )
     core_api.patch_namespaced_config_map.assert_called_once_with(
         name="example-operator-state",
         namespace="operators",
@@ -562,8 +622,7 @@ def test_reconcile_appliance_server_side_applies_state_and_returns_status() -> N
 
 
 def test_reconcile_omitted_profile_defaults_to_core() -> None:
-    core_api = MagicMock()
-    core_api.api_client.default_headers = {}
+    core_api = make_core_api()
 
     status = reconcile_appliance(
         spec={"version": "2603.4"},
@@ -578,8 +637,7 @@ def test_reconcile_omitted_profile_defaults_to_core() -> None:
 
 
 def test_reconcile_treats_empty_accepted_version_as_absent() -> None:
-    core_api = MagicMock()
-    core_api.api_client.default_headers = {}
+    core_api = make_core_api()
 
     status = reconcile_appliance(
         spec={"version": "2603.4"},
@@ -714,8 +772,7 @@ def test_reconcile_blocks_version_change_without_instantiation(
 
 
 def test_reconcile_with_accepted_version_matching_requested_applies_normally() -> None:
-    core_api = MagicMock()
-    core_api.api_client.default_headers = {}
+    core_api = make_core_api()
 
     status = reconcile_appliance(
         spec={"profile": "core", "version": "2603.4"},
@@ -792,7 +849,7 @@ def test_profile_field_handler_routes_through_reconcile(
 def test_handler_propagates_reconcile_failure_without_patching_status(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    core_api = MagicMock()
+    core_api = make_core_api()
     core_api.patch_namespaced_config_map.side_effect = RuntimeError("API failed")
     monkeypatch.setattr(main.client, "CoreV1Api", MagicMock(return_value=core_api))
     patch = MagicMock()
@@ -810,3 +867,358 @@ def test_handler_propagates_reconcile_failure_without_patching_status(
         )
 
     patch.status.update.assert_not_called()
+
+
+def _mutate_label(key: str, value: str):
+    def mutate(body: dict) -> dict:
+        existing = copy.deepcopy(body)
+        existing["metadata"]["labels"][key] = value
+        return existing
+
+    return mutate
+
+
+def _mutate_annotation(value: str):
+    def mutate(body: dict) -> dict:
+        existing = copy.deepcopy(body)
+        existing["metadata"]["annotations"][APPLIANCE_NAME_ANNOTATION] = value
+        return existing
+
+    return mutate
+
+
+def _drop_label(key: str):
+    def mutate(body: dict) -> dict:
+        existing = copy.deepcopy(body)
+        del existing["metadata"]["labels"][key]
+        return existing
+
+    return mutate
+
+
+def _mutate_owner(key: str, value: str):
+    def mutate(body: dict) -> dict:
+        existing = copy.deepcopy(body)
+        existing["metadata"]["ownerReferences"][0][key] = value
+        return existing
+
+    return mutate
+
+
+def _mutate_owner_controller(value: bool):
+    def mutate(body: dict) -> dict:
+        existing = copy.deepcopy(body)
+        existing["metadata"]["ownerReferences"][0]["controller"] = value
+        return existing
+
+    return mutate
+
+
+def _legacy_incompatible(accepted_version: str, profile: str):
+    def mutate(body: dict) -> dict:
+        existing = legacy_marker()
+        existing["data"]["acceptedVersion"] = accepted_version
+        existing["data"]["profile"] = profile
+        return existing
+
+    return mutate
+
+
+COLLISION_MUTATORS = [
+    (
+        "appliance-identity-label",
+        _mutate_label("coriolis.cloudbase.it/appliance", "other"),
+    ),
+    ("component-label", _mutate_label("coriolis.cloudbase.it/component", "other")),
+    ("managed-by-label", _mutate_label("app.kubernetes.io/managed-by", "other")),
+    ("full-name-annotation", _mutate_annotation("other")),
+    ("partial-managed-metadata", _drop_label("coriolis.cloudbase.it/component")),
+    ("owner-uid-mismatch", _mutate_owner("uid", "other")),
+    ("owner-controller-false", _mutate_owner_controller(False)),
+    ("owner-name-mismatch", _mutate_owner("name", "other")),
+    ("incompatible-legacy-data", _legacy_incompatible("2026.9.0", SUPPORTED_PROFILE)),
+]
+
+
+def test_reconcile_matching_managed_marker_proceeds_with_unchanged_body() -> None:
+    core_api = make_core_api(existing=desired_body())
+
+    status = reconcile_appliance(
+        spec={"profile": "core", "version": "2603.4"},
+        meta=sample_meta(),
+        core_api=core_api,
+    )
+
+    core_api.read_namespaced_config_map.assert_called_once_with(
+        name="example-operator-state", namespace="operators"
+    )
+    core_api.patch_namespaced_config_map.assert_called_once_with(
+        name="example-operator-state",
+        namespace="operators",
+        body=desired_body(),
+        field_manager="coriolis-operator",
+        force=True,
+    )
+    assert status["acceptedVersion"] == "2603.4"
+
+
+def test_reconcile_compatible_legacy_marker_normalizes_stale_generation() -> None:
+    core_api = make_core_api(existing=legacy_marker(generation="1"))
+
+    status = reconcile_appliance(
+        spec={"profile": "core", "version": "2603.4"},
+        meta=sample_meta(),
+        core_api=core_api,
+    )
+
+    body = core_api.patch_namespaced_config_map.call_args.kwargs["body"]
+    assert body["data"]["generation"] == "7"
+    assert body["data"]["acceptedVersion"] == "2603.4"
+    assert body["data"]["profile"] == "core"
+    assert status["acceptedVersion"] == "2603.4"
+
+
+@pytest.mark.parametrize(
+    "appliance_name",
+    [
+        "example.domain",
+        f"{'a' * 40}.{'b' * 40}.{'c' * 40}." + "d" * 40,
+    ],
+)
+def test_reconcile_compatible_legacy_dotted_and_long_names_proceed(
+    appliance_name: str,
+) -> None:
+    meta = sample_meta()
+    meta["name"] = appliance_name
+    core_api = make_core_api(existing=legacy_marker(meta=meta, generation="1"))
+
+    status = reconcile_appliance(
+        spec={"profile": "core", "version": "2603.4"},
+        meta=meta,
+        core_api=core_api,
+    )
+
+    core_api.patch_namespaced_config_map.assert_called_once()
+    assert status["acceptedVersion"] == "2603.4"
+
+
+@pytest.mark.parametrize(
+    "mutate",
+    [case[1] for case in COLLISION_MUTATORS],
+    ids=[case[0] for case in COLLISION_MUTATORS],
+)
+def test_reconcile_collision_blocks_and_never_patches(mutate) -> None:
+    core_api = make_core_api(existing=mutate(desired_body()))
+
+    status = reconcile_appliance(
+        spec={"profile": "core", "version": "2603.4"},
+        meta=sample_meta(),
+        core_api=core_api,
+    )
+
+    core_api.read_namespaced_config_map.assert_called_once()
+    core_api.patch_namespaced_config_map.assert_not_called()
+    assert "acceptedVersion" not in status
+    assert [c["type"] for c in status["conditions"]] == CONDITION_TYPES
+    statuses = {c["type"]: c for c in status["conditions"]}
+    assert statuses["Accepted"]["status"] == "True"
+    assert statuses["Accepted"]["reason"] == "Accepted"
+    assert statuses["Progressing"]["status"] == "False"
+    assert statuses["Progressing"]["reason"] == "ResourceCollision"
+    assert statuses["Reconciled"]["status"] == "False"
+    assert statuses["Reconciled"]["reason"] == "ResourceCollision"
+    assert statuses["Ready"]["status"] == "False"
+    assert statuses["Ready"]["reason"] == "ResourceCollision"
+    assert statuses["Degraded"]["status"] == "True"
+    assert statuses["Degraded"]["reason"] == "ResourceCollision"
+    assert statuses["Upgradeable"]["status"] == "False"
+    assert statuses["Upgradeable"]["reason"] == "UpgradeNotSupported"
+    assert "operators/example-operator-state" in statuses["Reconciled"]["message"]
+
+
+def test_reconcile_collision_preserves_prior_accepted_version_and_transition() -> None:
+    core_api = make_core_api(
+        existing=_mutate_label("coriolis.cloudbase.it/appliance", "other")(
+            desired_body()
+        )
+    )
+    prior_conditions = [
+        {
+            "type": "Degraded",
+            "status": "True",
+            "lastTransitionTime": "2026-08-19T09:00:00Z",
+        }
+    ]
+
+    status = reconcile_appliance(
+        spec={"profile": "core", "version": "2603.4"},
+        meta=sample_meta(generation=8),
+        status={"acceptedVersion": "2603.4", "conditions": prior_conditions},
+        core_api=core_api,
+    )
+
+    core_api.patch_namespaced_config_map.assert_not_called()
+    assert status["acceptedVersion"] == "2603.4"
+    degraded = next(c for c in status["conditions"] if c["type"] == "Degraded")
+    assert degraded["status"] == "True"
+    assert degraded["lastTransitionTime"] == "2026-08-19T09:00:00Z"
+
+
+def test_reconcile_propagates_non_404_api_read_error_without_patch() -> None:
+    core_api = make_core_api()
+    core_api.read_namespaced_config_map.side_effect = client.ApiException(status=403)
+
+    with pytest.raises(client.ApiException) as excinfo:
+        reconcile_appliance(
+            spec={"profile": "core", "version": "2603.4"},
+            meta=sample_meta(),
+            core_api=core_api,
+        )
+
+    assert excinfo.value.status == 403
+    core_api.patch_namespaced_config_map.assert_not_called()
+
+
+def test_reconcile_propagates_generic_read_error_without_patch() -> None:
+    core_api = make_core_api()
+    core_api.read_namespaced_config_map.side_effect = RuntimeError("read failed")
+
+    with pytest.raises(RuntimeError, match="read failed"):
+        reconcile_appliance(
+            spec={"profile": "core", "version": "2603.4"},
+            meta=sample_meta(),
+            core_api=core_api,
+        )
+
+    core_api.patch_namespaced_config_map.assert_not_called()
+
+
+def test_classify_managed_ignores_extra_labels_and_annotations() -> None:
+    existing = copy.deepcopy(desired_body())
+    existing["metadata"]["labels"]["example.com/extra"] = "x"
+    existing["metadata"]["annotations"]["example.com/extra"] = "y"
+
+    assert classify_existing_marker(existing=existing, desired=desired_body()) == (
+        MARKER_MANAGED
+    )
+
+
+@pytest.mark.parametrize(
+    "appliance_name",
+    [
+        "example.domain",
+        f"{'a' * 40}.{'b' * 40}.{'c' * 40}." + "d" * 40,
+    ],
+)
+def test_classify_legacy_dotted_and_long_names(appliance_name: str) -> None:
+    meta = sample_meta()
+    meta["name"] = appliance_name
+
+    assert (
+        classify_existing_marker(
+            existing=legacy_marker(meta=meta, generation="1"),
+            desired=desired_body(meta),
+        )
+        == MARKER_LEGACY
+    )
+
+
+def test_classify_existing_marker_returns_expected_classes() -> None:
+    body = desired_body()
+    assert classify_existing_marker(existing=body, desired=body) == MARKER_MANAGED
+    assert (
+        classify_existing_marker(existing=legacy_marker(), desired=body)
+        == MARKER_LEGACY
+    )
+    collided = _mutate_label("coriolis.cloudbase.it/appliance", "other")(body)
+    assert classify_existing_marker(existing=collided, desired=body) == (
+        MARKER_COLLISION
+    )
+
+
+def test_collision_conditions_are_deterministic_and_identify_marker() -> None:
+    conditions = collision_conditions("operators", "example-operator-state")
+
+    assert [c[0] for c in conditions] == CONDITION_TYPES
+    assert conditions[0] == (
+        "Accepted",
+        "True",
+        "Accepted",
+        "The requested profile and version are supported.",
+    )
+    assert conditions[5] == (
+        "Upgradeable",
+        "False",
+        "UpgradeNotSupported",
+        "The core profile has no supported upgrade path.",
+    )
+    message = (
+        "The existing ConfigMap 'operators/example-operator-state' conflicts "
+        "with the operator's managed state marker and was not modified."
+    )
+    assert conditions[1] == ("Progressing", "False", "ResourceCollision", message)
+    assert conditions[2] == ("Reconciled", "False", "ResourceCollision", message)
+    assert conditions[3] == ("Ready", "False", "ResourceCollision", message)
+    assert conditions[4] == ("Degraded", "True", "ResourceCollision", message)
+
+
+def test_classify_managed_v1_config_map_object() -> None:
+    existing = to_v1_config_map(desired_body())
+
+    assert classify_existing_marker(existing=existing, desired=desired_body()) == (
+        MARKER_MANAGED
+    )
+
+
+def test_classify_legacy_v1_config_map_object() -> None:
+    existing = to_v1_legacy_marker()
+
+    assert classify_existing_marker(existing=existing, desired=desired_body()) == (
+        MARKER_LEGACY
+    )
+
+
+def test_reconcile_matching_managed_v1_config_map_proceeds() -> None:
+    core_api = make_core_api(existing=to_v1_config_map(desired_body()))
+
+    status = reconcile_appliance(
+        spec={"profile": "core", "version": "2603.4"},
+        meta=sample_meta(),
+        core_api=core_api,
+    )
+
+    core_api.patch_namespaced_config_map.assert_called_once()
+    assert status["acceptedVersion"] == "2603.4"
+
+
+def test_reconcile_compatible_legacy_v1_config_map_normalizes_generation() -> None:
+    core_api = make_core_api(existing=to_v1_legacy_marker(generation="1"))
+
+    status = reconcile_appliance(
+        spec={"profile": "core", "version": "2603.4"},
+        meta=sample_meta(),
+        core_api=core_api,
+    )
+
+    body = core_api.patch_namespaced_config_map.call_args.kwargs["body"]
+    assert body["data"]["generation"] == "7"
+    assert body["data"]["acceptedVersion"] == "2603.4"
+    assert status["acceptedVersion"] == "2603.4"
+
+
+def test_reconcile_retention_annotation_collides_and_skips_ssa() -> None:
+    existing = desired_body()
+    existing["metadata"]["annotations"][RETENTION_ANNOTATION] = "daily"
+    core_api = make_core_api(existing=existing)
+
+    status = reconcile_appliance(
+        spec={"profile": "core", "version": "2603.4"},
+        meta=sample_meta(),
+        core_api=core_api,
+    )
+
+    core_api.patch_namespaced_config_map.assert_not_called()
+    statuses = {c["type"]: c for c in status["conditions"]}
+    assert statuses["Reconciled"]["reason"] == "ResourceCollision"
+    assert statuses["Degraded"]["status"] == "True"
+    assert statuses["Degraded"]["reason"] == "ResourceCollision"
