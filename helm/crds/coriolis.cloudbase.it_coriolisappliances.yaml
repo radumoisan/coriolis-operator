@@ -1,0 +1,74 @@
+# Helm installs CRDs from this directory only on initial install. Apply this CRD
+# separately before upgrading the chart whenever its schema changes.
+apiVersion: apiextensions.k8s.io/v1
+kind: CustomResourceDefinition
+metadata:
+  name: coriolisappliances.coriolis.cloudbase.it
+  annotations:
+    coriolis.cloudbase.it/upgrade-note: "Apply this CRD separately before chart upgrades; Helm does not upgrade CRDs in crds/."
+spec:
+  group: coriolis.cloudbase.it
+  scope: Namespaced
+  names:
+    plural: coriolisappliances
+    singular: coriolisappliance
+    kind: CoriolisAppliance
+    shortNames:
+      - ca
+  versions:
+    - name: v1alpha1
+      served: true
+      storage: true
+      schema:
+        openAPIV3Schema:
+          type: object
+          additionalProperties: false
+          properties:
+            apiVersion:
+              type: string
+            kind:
+              type: string
+            metadata:
+              type: object
+            spec:
+              type: object
+              additionalProperties: false
+              required:
+                - version
+              properties:
+                version:
+                  type: string
+                  minLength: 1
+            status:
+              type: object
+              additionalProperties: false
+              properties:
+                observedGeneration:
+                  type: integer
+                  format: int64
+                  minimum: 0
+                conditions:
+                  type: array
+                  items:
+                    type: object
+                    additionalProperties: false
+                    required:
+                      - type
+                      - status
+                    properties:
+                      type:
+                        type: string
+                      status:
+                        type: string
+                      observedGeneration:
+                        type: integer
+                        format: int64
+                      lastTransitionTime:
+                        type: string
+                        format: date-time
+                      reason:
+                        type: string
+                      message:
+                        type: string
+      subresources:
+        status: {}

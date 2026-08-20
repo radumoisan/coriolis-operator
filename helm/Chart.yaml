@@ -1,0 +1,7 @@
+apiVersion: v2
+name: coriolis-operator
+description: Controller skeleton for CoriolisAppliance resources
+type: application
+# TODO: CI must synchronize chart, application, and image versions before releases.
+version: 0.1.0
+appVersion: "0.1.0"

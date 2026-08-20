@@ -1,0 +1,38 @@
+[project]
+name = "coriolis-operator"
+version = "0.1.0"
+description = "Kopf controller for Coriolis appliances"
+requires-python = ">=3.12,<3.13"
+dependencies = [
+    "kopf>=1.37,<2",
+    "kubernetes>=31,<33",
+]
+
+[project.scripts]
+coriolis-operator = "coriolis_operator.main:main"
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[dependency-groups]
+dev = [
+    "mypy>=1.13,<2",
+    "pytest>=8.3,<9",
+    "ruff>=0.8,<1",
+]
+
+[tool.ruff]
+target-version = "py312"
+line-length = 88
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "UP"]
+
+[tool.mypy]
+python_version = "3.12"
+strict = true
+warn_unreachable = true
+
+[tool.pytest.ini_options]
+testpaths = ["tests/unit"]

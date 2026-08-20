@@ -1,0 +1,6 @@
+apiVersion: coriolis.cloudbase.it/v1alpha1
+kind: CoriolisAppliance
+metadata:
+  name: example
+spec:
+  version: development

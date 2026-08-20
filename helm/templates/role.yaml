@@ -1,0 +1,35 @@
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: {{ include "coriolis-operator.fullname" . }}
+  labels:
+    {{- include "coriolis-operator.labels" . | nindent 4 }}
+rules:
+  - apiGroups:
+      - coriolis.cloudbase.it
+    resources:
+      - coriolisappliances
+      - coriolisappliances/status
+    verbs:
+      - get
+      - list
+      - watch
+      - patch
+  - apiGroups:
+      - ""
+    resources:
+      - configmaps
+    verbs:
+      - get
+      - list
+      - watch
+      - create
+      - patch
+      - update
+  - apiGroups:
+      - ""
+    resources:
+      - events
+    verbs:
+      - create
+      - patch
