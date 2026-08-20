@@ -44,13 +44,13 @@ def reconcile_appliance(
         owner=owner,
     )
     api = core_api or client.CoreV1Api()
+    api.api_client.default_headers["Content-Type"] = "application/apply-patch+yaml"
     api.patch_namespaced_config_map(
         name=body["metadata"]["name"],
         namespace=namespace,
         body=body,
         field_manager="coriolis-operator",
         force=True,
-        _content_type="application/apply-patch+yaml",
     )
     prior_conditions = status.get("conditions") if status is not None else None
     return build_status(generation, prior_conditions=prior_conditions)

@@ -130,6 +130,7 @@ def test_status_preserves_transition_time_when_condition_status_is_unchanged() -
 
 def test_reconcile_appliance_server_side_applies_state_and_returns_status() -> None:
     core_api = MagicMock()
+    core_api.api_client.default_headers = {}
 
     status = reconcile_appliance(
         spec={"version": "2026.8.0"},
@@ -166,8 +167,10 @@ def test_reconcile_appliance_server_side_applies_state_and_returns_status() -> N
         body=expected_body,
         field_manager="coriolis-operator",
         force=True,
-        _content_type="application/apply-patch+yaml",
     )
+    assert core_api.api_client.default_headers == {
+        "Content-Type": "application/apply-patch+yaml"
+    }
     assert status["observedGeneration"] == 7
     assert [condition["status"] for condition in status["conditions"]] == [
         "True",
