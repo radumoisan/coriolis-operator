@@ -50,7 +50,15 @@ For the local retained-resource authorization/classification slice, these local 
 - `helm lint helm/` and `helm template coriolis-operator helm/ --include-crds`.
 - `git diff --check`.
 
-This slice is **committed locally at `1b73045` on `dev`, but not pushed or deployed**; the deployed marker `0.5.3` is unchanged. It constructs/reconciles/patch/reads/adopts no runtime resource and adds no adoption mutations; external/pre-existing resources such as `coriolis-appliance-registry` fail closed as `COLLISION` and remain read-only and outside this classifier/reconciliation policy. A MariaDB vertical slice remains blocked by unresolved Secret/configuration/storage/readiness gates.
+This slice is **committed locally at `1b73045` on `dev`, but not pushed or deployed**; the deployed marker `0.5.3` is unchanged. It constructs/reconciles/patch/reads/adopts no runtime resource and adds no adoption mutations; external/pre-existing resources such as `coriolis-appliance-registry` fail closed as `COLLISION` and remain read-only and outside this classifier/reconciliation policy. A MariaDB vertical slice remains blocked by the remaining generators/builders/RBAC, storage, probes/readiness, and rotation gates.
+
+For the local documentation-only Secret/configuration contract slice, these validations passed:
+
+- No code, builders, values, RBAC, CRD, or runtime behavior changed; the change is confined to [docs/foundational-resource-contract.md](foundational-resource-contract.md) and the tracking/docs pages.
+- The modified contract page was reviewed for contradictory claims: concrete Secret/ConfigMap names and key layouts and the primary `coriolis.conf` split are stated as frozen, not unresolved, and the remaining genuinely-unresolved items are listed under the contract's Remaining Unresolved Secret Items and Unresolved Gates.
+- `uv run pytest`; `uv run ruff check .`; `uv run ruff format --check .`; `uv run mypy src`; `helm lint helm/`; `helm template coriolis-operator helm/ --include-crds`; `git diff --check`.
+
+This slice is uncommitted, unpushed, and undeployed; the deployed `0.5.3` remains marker-only and unchanged, and no runtime resources or adoption mutations exist.
 
 Live-cluster controller lifecycle validation passed for release `0.5.2` in the approved `coriolis` namespace. The currently deployed `0.5.3` retains the marker-only controller behavior and predates this local API slice; full lifecycle validation was not repeated for `0.5.3`.
 

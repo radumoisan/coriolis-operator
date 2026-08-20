@@ -3,7 +3,7 @@
 This page freezes the foundational Kubernetes resource contracts for the `core` runtime profile: deterministic naming, metadata labels, ownership/deletion/retention, Secret/configuration classes, and a dependency evidence inventory with a proposed implementation ordering. It records **policy and evidence**, not implementation. A metadata-only helper slice (naming, identity, labels, and owner-or-retention metadata) and a pure retained-resource authorization/classification slice (`classify_retained_resource`) are now implemented locally; no retained resource, configuration, Secret, dependency, or workload **construction or deployment** is implemented, and nothing here changes deployed runtime behavior.
 
 !!! note
-    This is the first Milestone 4 deliverable, a documentation-only contract slice plus the now-implemented local metadata-only helper slice. The deployed operator `0.5.3` remains marker-only; the local API slice is committed at `ab9df83` but not pushed or deployed, the local metadata-only helper slice is committed at `fbab6e5` but not pushed or deployed, and the collision/migration marker API-layer slice is committed at `d8df00f` on `dev` but not pushed or deployed. The pure retained-resource authorization/classification slice is committed locally at `1b73045` on `dev`, but **not pushed or deployed** (see [Current Status And Accuracy](#current-status-and-accuracy)); a MariaDB vertical slice follows only after the unresolved contracts below are approved.
+    This is the first Milestone 4 deliverable, a documentation-only contract slice plus the now-implemented local metadata-only helper slice. The deployed operator `0.5.3` remains marker-only; the local API slice is committed at `ab9df83` but not pushed or deployed, the local metadata-only helper slice is committed at `fbab6e5` but not pushed or deployed, and the collision/migration marker API-layer slice is committed at `d8df00f` on `dev` but not pushed or deployed. The pure retained-resource authorization/classification slice is committed locally at `1b73045` on `dev`, but **not pushed or deployed** (see [Current Status And Accuracy](#current-status-and-accuracy)). A documentation-only Secret/configuration contract slice now freezes the foundational Secret/ConfigMap names and key layouts and the primary `coriolis.conf` split (see [Secrets And Configuration](#secrets-and-configuration)); it changes no runtime behavior or resources. A MariaDB vertical slice still follows only after the remaining gates below (actual generators/builders, RBAC, storage, probes/readiness, rotation) are approved.
 
 ## :material-book-open-page-variant-outline: Evidence And Provenance
 
@@ -110,37 +110,62 @@ The initial design keeps **no destructive finalizer**. Deletion relies on Kubern
 
 ## :material-book-open-page-variant-outline: Secrets And Configuration
 
-Secrets are divided into three classes. **This page never includes credential values**; it records source variable names and evidence only. Concrete Kubernetes Secret names and key layouts remain unresolved.
+Secrets and generated configuration are divided into classes below. **This page never includes credential values**; it records source variable names, evidence, and the now-frozen object/key mapping only. All generated object names below are produced by `appliance_resource_name(<CR name>, <component>)` (single lowercase DNS label, 63-char cap, 12-char SHA-256 overflow), so each `<appliance>-<component>` name is the deterministic result of that helper for the given CR name.
 
 ### :material-application-edit-outline: Class 1 — Generated Retained State Credentials
 
-Credentials that must persist across appliance deletion for recovery, held in retained Secrets (see retention above). Authoritative evidence of the key schema:
+These are **retained, ownerless, operator-generated** Secrets that persist across appliance deletion for recovery (see [Retained Resources](#retained-resources-not-owner-referenced)); they are authorized for exact-match reuse only under the retained classifier policy (see [Generated Credential Reuse](#generated-credential-reuse)). The following concrete Secret names and key layouts are **frozen**:
 
-- **`coriolis-docker/passwords.yml.sample`** defines the authoritative credential key schema (names only, empty values): `coriolis_database_password`, `coriolis_keystone_password`, `coriolis_licensing_server_database_password`, `coriolis_licensing_ui_database_password`, `coriolis_metal_hub_database_password`, `influxdb_admin_password`, `influxdb_user_password`, `temp_keypair_password`.
-- **Step CA init password** — generated with `openssl rand -base64 32` and stored at `/etc/step/init_password` (`coriolis-docker/coriolis_ansible/roles/bootstrap/step-ca/tasks/setup_step_ca_container.yml`). This is retained CA state.
-- **Coriolis database user password** (`coriolis_database_password`) — embedded in `coriolis.conf.j2` and used to create the `coriolis` DB user in `roles/coriolis/common/tasks/setup.yml`.
-- **Coriolis Keystone user password** (`coriolis_keystone_password`) — embedded in the same template and used to create the Keystone user.
-- **`temp_keypair_password`** — in the key schema and embedded in `coriolis.conf.j2`.
+- **`<appliance>-coriolis-credentials`** (component `coriolis-credentials`) contains **exactly**:
+  - `coriolis_database_password` — Coriolis DB user password (embedded in `coriolis.conf.j2` and used to create the `coriolis` DB user in `roles/coriolis/common/tasks/setup.yml`).
+  - `coriolis_keystone_password` — Coriolis Keystone user password (embedded in the same template and used to create the Keystone user).
+  - `temp_keypair_password` — in the `passwords.yml.sample` key schema and embedded in `coriolis.conf.j2`.
+
+  Keys for the licensing server/UI, Metal Hub, and InfluxDB (`coriolis_licensing_server_database_password`, `coriolis_licensing_ui_database_password`, `coriolis_metal_hub_database_password`, `influxdb_admin_password`, `influxdb_user_password`) remain **absent and deferred** until those components are implemented; this contract does not invent their current object/key mapping.
+
+- **`<appliance>-infrastructure-credentials`** (component `infrastructure-credentials`) contains **exactly**:
+  - `database_password` — MariaDB administrative credential.
+  - `rabbitmq_password` — RabbitMQ `openstack` user credential.
+  - `keystone_admin_password` — Keystone `admin` credential.
+
+  These preserve the local Kolla source names read from the host's `/etc/kolla/passwords.yml` by `coriolis-docker/coriolis_ansible/library/kolla_deployment_facts.py` (which exposes MariaDB, RabbitMQ, and Keystone connection facts); they are **not** defined in `coriolis-docker/passwords.yml.sample`. No Barbican or Memcached password is invented because no authoritative evidence exists.
+
+- **`<appliance>-step-ca-credentials`** (component `step-ca-credentials`) contains **exactly** `init_password` (generated with `openssl rand -base64 32` and stored at `/etc/step/init_password` per `coriolis-docker/coriolis_ansible/roles/bootstrap/step-ca/tasks/setup_step_ca_container.yml`). The broader `/etc/step` CA state belongs on retained storage; the TLS/private-key Secret key layout remains **deferred**.
 
 The database and Keystone user/service names are authoritative: `coriolis_database_name: "coriolis"`, `coriolis_database_user: "coriolis"`, `coriolis_keystone_user: "coriolis"` (`coriolis-docker/coriolis_ansible/roles/coriolis/common/vars/main.yml`).
 
 !!! warning
-    `passwords.yml.sample` defines the **empty key schema only**; deployed values are supplied from outside version control (the per-deploy `config.yml` / Kolla passwords file) and are never part of this repository. The concrete Kubernetes Secret object names and exact key layout remain **unresolved**.
+    This page records **key names only**, never values. In legacy/source Ansible deployments, values are supplied from external per-deploy inputs (the per-deploy `config.yml` / Kolla passwords file) and are never part of this repository. In contrast, this approved Kubernetes operator contract **generates** the three retained Secret classes' values once and reuses them under the exact-match retained policy ([Generated Credential Reuse](#generated-credential-reuse)); operator-generated values are **not** supplied externally. No generation algorithm or length is documented because none is evidenced in source.
 
-### :material-application-edit-outline: Sensitive Rendered Configuration Rule
+### :material-application-edit-outline: Sensitive Rendered Configuration Split
 
 `coriolis.conf.j2` embeds credential values directly: RabbitMQ in the transport URL (`coriolis.conf.j2:3`), MariaDB connection (`coriolis.conf.j2:49`), Keystone authtoken password (`coriolis.conf.j2:56`), trustee password (`coriolis.conf.j2:66`), and the temp-keypair password (`coriolis.conf.j2:121`).
 
-Therefore a **complete rendered `coriolis.conf` must never be placed in a ConfigMap**. Any rendered file containing credentials must be mounted from a Secret or safely composed from Secret-backed values at mount time. The exact split between Secret-held and ConfigMap-held configuration, and the mount design, are **unresolved** and require a separately approved design. This page does not claim that all templates rendered by `roles/coriolis/common/tasks/setup.yml` are safe ConfigMaps.
+The primary `coriolis.conf` split is now **frozen**: a complete rendered `coriolis.conf` must never be placed in a ConfigMap. It is held in the rebuildable configuration Secret `<appliance>-coriolis-config-secret` (key `coriolis.conf`) and mounted with the generated ConfigMap as a projected volume (see [Configuration Mount](#configuration-mount)). This page still does not claim that every other template rendered by `roles/coriolis/common/tasks/setup.yml` is safe as a ConfigMap.
 
-### :material-application-edit-outline: Class 2 — Generated/Rebuildable Non-Secret Configuration
+### :material-application-edit-outline: Class 2 — Generated/Rebuildable Configuration
 
-Configuration that is derived from the CR, can be regenerated, and is **verified non-sensitive**, and is therefore safe to owner-reference and garbage-collect (generated ConfigMaps). Authoritative evidence of what is rendered:
+Generated configuration is derived from the CR, can be regenerated, and is owner-referenced so it is garbage-collected with the CR. It is **not** a retained credential store: retained credential values live only in the Class 1 Secrets, and this class is rebuilt from them.
 
-- Rendered from `roles/coriolis/common/tasks/setup.yml` via templates in `roles/coriolis/common/templates/`: `coriolis-api.wsgi`, `wsgi-coriolis.conf`, `coriolis.conf`, `vixdisklib.conf`, `api-paste.ini`, `policy.yml`, and the `coriolis.release` file.
-- Each component also renders its own `Dockerfile.j2` and component-specific templates.
+- **ConfigMap `<appliance>-coriolis-config`** (component `coriolis-config`), owner-referenced and rebuildable, contains **exactly** these source-audited non-secret files/keys:
+  - `coriolis-api.wsgi`
+  - `wsgi-coriolis.conf`
+  - `vixdisklib.conf`
+  - `api-paste.ini`
+  - `policy.yml`
+  - `coriolis.release`
 
-Per the sensitive-rendered-configuration rule above, each candidate file must be verified non-sensitive before it may be stored in a ConfigMap; `coriolis.conf` is explicitly excluded. The exact rendered ConfigMap names, keys, per-file granularity, and the non-sensitive split are **unresolved** (not yet decided).
+  Forbidden in this ConfigMap: `coriolis.conf`, provider fragments, credentials, tokens, private keys, and registry auth. Provider fragments remain Secret-backed and deferred until individually classified; this contract does not assert they are safe.
+
+- **Secret `<appliance>-coriolis-config-secret`** (component `coriolis-config-secret`), owner-referenced and rebuildable, contains **exactly** the key `coriolis.conf` with the complete rendered configuration (it embeds credentials). It is garbage-collected with the CR and regenerated from retained credentials; it is not a retained credential store.
+
+### :material-application-edit-outline: Configuration Mount
+
+Workloads mount the generated ConfigMap `<appliance>-coriolis-config` and the configuration Secret `<appliance>-coriolis-config-secret` together as a single read-only projected volume at `/etc/coriolis`, with explicit `items` paths for each file/key, **no credential environment variables**, and **no `subPath`**. The exact workload rollout/reload mechanism for credential rotation remains deferred, but sensitive values must never appear in Pod template annotations, labels, status, events, or logs.
+
+### :material-application-edit-outline: Generated Credential Reuse
+
+Retained credential values are generated **once** and then reused only under the exact-match retained classifier policy committed at `1b73045` (see [Retained Resources](#retained-resources-not-owner-referenced) and [Current Status And Accuracy](#current-status-and-accuracy)); generation algorithms/lengths not evidenced in source are not documented here. The external `coriolis-appliance-registry` Secret remains read-only and is never copied into operator-owned Secrets.
 
 ### :material-application-edit-outline: Class 3 — External References
 
@@ -149,16 +174,16 @@ Secrets the operator references read-only and must never own:
 - `coriolis-appliance-registry` (registry pull Secret, `kubernetes.io/dockerconfigjson`) — existing external Secret.
 - Any other pre-existing Secret provided by the environment.
 
-### :material-application-edit-outline: Unresolved Secret Items
+### :material-application-edit-outline: Remaining Unresolved Secret Items
 
-The following have **no authoritative evidence** in the repository and must not be guessed:
+The following remain **deferred/unresolved** and must not be guessed:
 
-- The concrete Kubernetes Secret object names and exact key layouts for Class 1 retained credentials (the Ansible host stores them as files and in `/etc/kolla/passwords.yml`, not as Kubernetes Secrets).
-- The deployed values of the `passwords.yml.sample` keys (supplied from outside version control).
-- The Secret for the generated CA/private key material beyond the Step CA init password evidence.
-- The exact split/mount design between Secret-held and ConfigMap-held rendered configuration per the sensitive-rendered-configuration rule.
+- The deployed **values** of the `passwords.yml.sample` keys (supplied from outside version control).
+- The TLS/private-key Secret layout for CA material beyond the Step CA `init_password` key.
+- Optional component credentials (licensing server/UI, Metal Hub, InfluxDB).
+- Provider-fragment Secret-backed layout/classification.
 
-These remain open until a source of truth (per-deploy config, Kolla passwords file mapping, or an approved operator-owned generation design) is provided.
+These remain open until the relevant component or source of truth is provided.
 
 ## :material-book-open-page-variant-outline: Dependency And Resource Plan
 
@@ -183,7 +208,7 @@ The following is **proposed policy** requiring explicit approval and a readiness
 
 ## :material-book-open-page-variant-outline: Out Of Scope
 
-The following are intentionally out of scope for this contract slice and are not decided here: full dependency/workload construction, RBAC, status/readiness changes, cluster validation, Kubernetes Job design, and the complete Secret key layout. Recorded ports, commands, probes, volumes, storage sizes, configuration rendering details, and readiness checks are **not guessed** here; they are listed as unresolved and require authoritative evidence.
+The following are intentionally out of scope for this contract slice and are not decided here: full dependency/workload construction, RBAC, status/readiness changes, cluster validation, Kubernetes Job design, and the actual Secret/ConfigMap generators/builders. The foundational Secret/ConfigMap names, key layouts, and the primary `coriolis.conf` split are frozen above; recorded ports, commands, probes, volumes, storage sizes, and readiness checks are **not guessed** here; they are listed as unresolved and require authoritative evidence.
 
 ## :material-book-open-page-variant-outline: Current Status And Accuracy
 
@@ -197,7 +222,12 @@ The following are intentionally out of scope for this contract slice and are not
 
 ## :material-book-open-page-variant-outline: Unresolved Gates
 
-1. Concrete Class 1 retained Secret names and key layouts (mapping the `passwords.yml.sample` key schema and generated CA material to Kubernetes Secrets).
-2. Concrete generated ConfigMap names and keys for Class 2 configuration rendering, and the Secret/ConfigMap split and mount design for sensitive rendered configuration.
-3. Exact storage sizes, volume layouts, probes, commands, and readiness checks for the bootstrap and workload resources.
-4. **Runtime construction/deployment and any adoption mutations for retained-resource reuse.** The pure authorization/classification policy (exact-match, ownerless, `classify_retained_resource`) is implemented locally and committed at `1b73045` (not pushed/deployed); translating it into runtime resource construction, reconciliation, and adoption remains future, separately approved work.
+The prior unresolved **name/key** mapping and the primary **`coriolis.conf` split** gates are closed by the frozen contract in [Secrets And Configuration](#secrets-and-configuration). Remaining gates:
+
+1. **Actual generators/builders, reconcile reads, SSA application, and RBAC** for the frozen Secrets and ConfigMap above. This contract freezes naming, keys, and mount policy only; construction is separate, future work.
+2. **TLS/CA private material layout** beyond the Step CA `init_password` key.
+3. **Optional component credentials** (licensing server/UI, Metal Hub, InfluxDB) and provider-fragment Secret-backed classification.
+4. **Exact storage sizes and volume layouts** for retained PVCs and CA state.
+5. **Probes, readiness, and bootstrap sequencing** for the bootstrap and workload resources.
+6. **Credential rotation rollout/reload mechanics** (the mount is frozen; rotation is not).
+7. **Runtime construction/deployment and any adoption mutations for retained-resource reuse.** The pure authorization/classification policy (exact-match, ownerless, `classify_retained_resource`) is implemented locally and committed at `1b73045` (not pushed/deployed); translating it into runtime resource construction, reconciliation, and adoption remains future, separately approved work.
