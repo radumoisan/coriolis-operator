@@ -1,20 +1,15 @@
 # CIXpress owns future synchronized release updates.
 image:
   repository: cr.virtomat.io/virtomat/coriolis/operator
-  tag: "0.0.0"
+  tag: "0.1.0"
   pullPolicy: IfNotPresent
-
 imagePullSecrets: []
-
 nameOverride: ""
 fullnameOverride: ""
-
 serviceAccount:
   create: true
   name: ""
-
 logLevel: INFO
-
 resources:
   requests:
     cpu: 100m
@@ -22,14 +17,11 @@ resources:
   limits:
     cpu: 500m
     memory: 512Mi
-
 nodeSelector: {}
 tolerations: []
 affinity: {}
-
 podSecurityContext:
   runAsNonRoot: true
-
 containerSecurityContext:
   allowPrivilegeEscalation: false
   capabilities:
@@ -37,7 +29,6 @@ containerSecurityContext:
       - ALL
   readOnlyRootFilesystem: true
   runAsNonRoot: true
-
 liveness:
   port: 8080
   path: /healthz
