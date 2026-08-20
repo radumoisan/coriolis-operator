@@ -12,7 +12,8 @@
 
 ## Pending Validation
 
-- Run the controller smoke test in an isolated disposable Kubernetes cluster only; never use a shared or production context.
+- Define and approve the dedicated operator namespace in `infra-dev-buc-hq` before any operator deployment or live validation.
+- Run the controller smoke test only after the dedicated operator namespace is approved.
 - Install the chart, apply the sample, check status, validate marker ownership and configuration data, restart the controller, update `spec.version`, then delete the resource and verify garbage collection. Garbage collection is a pending verification, not a proven behavior.
 
 ## Completed Locally: Consistency Sweep
@@ -28,11 +29,11 @@
 - Receive and add the exact CIXpress pipeline configuration, Template, and Job manifests.
 - Validate version-alignment behavior, including the dev branch tag check.
 - Define trigger and monitoring credentials without storing secrets in the repository.
+- Rerun CI with the provisional repository and verify registry access plus success of all expected steps.
 - Integrate Argo CRD pre-upgrade automation into promotion/deployment; the standard build pipeline does not perform it.
 
 ## Pending Decisions
 
 - Define OCI publication and promotion.
 - Define the exact CIXpress repository integration and trigger.
-- Select an image registry and publication workflow.
 - Select a license.

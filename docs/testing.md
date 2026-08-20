@@ -15,7 +15,9 @@ For the controller skeleton, these local validations have passed:
 
 Live-cluster smoke validation has not been run.
 
-The future smoke test must use an isolated disposable Kubernetes cluster only. Never use a shared or production context. It must:
+The approved dev cluster is `infra-dev-buc-hq` (`virt-infra-dev-buc-hq`) for read-only pipeline troubleshooting and monitoring only. Operator deployment and live validation remain forbidden until a dedicated operator namespace is defined and approved. See [Development Environment](dev-environment.md).
+
+After that approval, the future smoke test must:
 
 - Install the chart.
 - Apply the sample.
@@ -37,4 +39,4 @@ The local controller coverage includes:
 
 CIXpress CI behavior is documented but not configured in this repository. Pending integration validation includes receiving the exact pipeline configuration, Template, and Job manifests; validating version alignment and the dev tag check; and defining trigger and monitoring credentials without storing secrets. Argo CRD pre-upgrade automation must be validated as promotion/deployment work, not assumed to be handled by the standard build pipeline.
 
-Do not treat OCI destination/promotion, registry ownership, or licensing decisions as settled test assumptions.
+Do not treat registry publication/authentication validation, promotion, or licensing decisions as settled test assumptions.

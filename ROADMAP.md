@@ -7,7 +7,7 @@
 - Watch the Helm release namespace.
 - Reconcile only an idempotent marker ConfigMap and standard successful status conditions.
 
-Disposable-cluster smoke validation remains pending.
+Define and approve a dedicated dev operator namespace before live validation or deployment. Live-cluster validation remains pending.
 
 ## Later Milestones
 
@@ -20,5 +20,5 @@ Disposable-cluster smoke validation remains pending.
 - OCI publication and promotion.
 - Exact CIXpress repository configuration, templates, Job manifests, trigger, and monitoring credentials.
 - Argo CRD pre-upgrade automation as part of promotion/deployment, not the standard build pipeline.
-- Image registry ownership and publication flow.
+- Validate publication and authentication for the provisional `cr.virtomat.io/virtomat/coriolis/operator` repository.
 - License selection.

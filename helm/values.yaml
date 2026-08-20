@@ -1,7 +1,7 @@
-# TODO: CI/release configuration must replace this non-deployable repository and synchronize the tag with chart and application versions.
+# CIXpress owns future synchronized release updates.
 image:
-  repository: example.invalid/coriolis-operator
-  tag: "0.1.0"
+  repository: cr.virtomat.io/virtomat/coriolis/operator
+  tag: "0.0.0"
   pullPolicy: IfNotPresent
 
 imagePullSecrets: []

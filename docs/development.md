@@ -10,6 +10,8 @@ CIXpress, not local manual updates, owns synchronization of chart version, appli
 
 Exact CIXpress configuration, Template and Job manifests, trigger, and credentials are not present in this repository. Do not infer them or store credentials here. Argo CRD pre-upgrade work belongs to promotion/deployment, not the standard CIXpress build pipeline.
 
+For approved dev-cluster work, including read-only CIXpress observation, see [Development Environment](dev-environment.md). The operator namespace is still TBD and must be approved before deployment or live validation.
+
 ## Local Validation
 
 Run these supported local commands from the repository root:
