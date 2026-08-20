@@ -41,3 +41,11 @@ Recorded the observed result for commit `b824f5c`: pipeline `hlzfy3` using templ
 ## 2026-08-20: Provisional Registry Baseline And Confirmed CI Failure
 
 Confirmed that pipeline `hlzfy3` failed because Kaniko could not resolve `example.invalid` during push-permission checking. Set the provisional synchronized `0.0.0` image baseline to `cr.virtomat.io/virtomat/coriolis/operator`. Registry publication/authentication and promotion remain pending validation.
+
+## :material-book-open-page-variant-outline: 2026-08-20: CIXpress Release 0.2.0 Published
+
+The dummy trigger for commit `c9d9dd5ec3ecfe06f03e0cbfc1eda3ff4b0fd58d` completed as pipeline `jcr0vn` using template `Default`: it started at `2026-08-20T11:18:10+00:00`, completed at `2026-08-20T11:19:27+00:00`, and reported top-level plus `git-clone`, `kaniko-build`, `helm-update`, and `cleanup` states as `SUCCEEDED`. CI image push and OCI chart publication were validated. The generated release commit and tag `0.2.0` resolve to `49cb5dc7dbe247e432e604db19078ecf1c2b5437`; image pull/deployment and promotion remain pending.
+
+## :material-book-open-page-variant-outline: 2026-08-20: Argo Deployment Validated
+
+Configured the `regcred` image pull secret through the source-controlled Helm default and published release `0.3.0`. Its deployment confirmed registry authentication but exposed an invalid CRD schema and a chart command that could not find the virtual-environment console script. Removed the forbidden CRD schema keywords, corrected the command, validated the CRD with Kubernetes server-side dry-run, and published release `0.4.0`. Pipeline `gepx3l` reported all expected steps as `SUCCEEDED`, but one intermediate `INPROGRESS` response already contained a completion timestamp; publication was independently confirmed by release commit and tag `4eee8a9f24eb05640c61ece8fa057ecd49136e85`. Argo synchronized `0.4.0` successfully in `coriolis`; the application is `Healthy`, the CRD is established, and the operator Deployment is `1/1` available with a ready pod and zero restarts.

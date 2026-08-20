@@ -1,6 +1,6 @@
 # Development Environment
 
-## Environment
+## :material-book-open-page-variant-outline: Environment
 
 | Item | Value |
 | --- | --- |
@@ -8,12 +8,12 @@
 | Kubernetes context | `virt-infra-dev-buc-hq` |
 | SSH alias | `virt-infra-dev-buc-hq` |
 | Ingress address | `89.34.101.238` |
-| Main namespaces | `voyager`, `cloudbill`, `keycloak`, `cixpress`, `onboarding`, `argocd` |
+| Main namespaces | `voyager`, `cloudbill`, `keycloak`, `cixpress`, `onboarding`, `argocd`, `coriolis` |
 | CIXpress namespace | `cixpress` |
 | CIXpress URL | <https://cixpress.virtomat.dev> |
-| Operator namespace | TBD; requires approval before deployment or live validation |
+| Operator namespace | `coriolis` |
 
-## Workstation Access
+## :material-book-open-page-variant-outline: Workstation Access
 
 Ask a platform administrator for a dev-cluster kubeconfig, SSH access to the dev host, and any additional credentials required by the assigned role. Install the kubeconfig under `~/.kube/config`, then verify access without changing cluster state:
 
@@ -24,7 +24,7 @@ kubectl --context virt-infra-dev-buc-hq get namespaces
 ssh virt-infra-dev-buc-hq
 ```
 
-## CIXpress Observation
+## :material-book-open-page-variant-outline: CIXpress Observation
 
 CIXpress runs in `cixpress` and is available at <https://cixpress.virtomat.dev>. Its components are frontend, conductor, monitor, Redis/Valkey, and temporary pipeline Job pods.
 
@@ -38,21 +38,20 @@ kubectl --context virt-infra-dev-buc-hq -n cixpress get deployments
 kubectl --context virt-infra-dev-buc-hq -n cixpress get services
 kubectl --context virt-infra-dev-buc-hq -n cixpress get ingress
 kubectl --context virt-infra-dev-buc-hq -n cixpress get jobs
-kubectl --context virt-infra-dev-buc-hq -n cixpress logs deployment/conductor --all-containers --tail=200
 kubectl --context virt-infra-dev-buc-hq -n cixpress get events --sort-by=.lastTimestamp
 ```
 
 Troubleshoot in this order:
 
 1. Pods and readiness.
-2. Recent logs.
+2. Sanitized pipeline log metadata or excerpts from the monitoring procedure.
 3. Pod descriptions and events.
 4. Deployments.
 5. Services and ingress.
 6. Redis/Valkey and pipeline Jobs.
 
-## Safety Boundary
+## :material-book-open-page-variant-outline: Safety Boundary
 
 Read-only investigation is safe. Restarts, deletes, scaling, patches, configuration changes, and new Jobs require explicit approval. Never display Kubernetes Secrets, kubeconfig credentials, tokens, or sensitive log content.
 
-Future operator deployment may use this cluster only in a dedicated namespace that remains TBD. Approval of that namespace is required before any operator deployment or live validation.
+Operator deployment and live validation use the dedicated `coriolis` namespace. Continue to require explicit approval for restarts, deletes, scaling, patches, configuration changes, and test resources.
