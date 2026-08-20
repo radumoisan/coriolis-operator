@@ -51,7 +51,7 @@ RC4 is blocked/OVA-only for Kubernetes: Build `868` exported an OVA, but no `reg
 
 1. Image and runtime inventory. *(complete)*
 2. CRD and runtime API. *(committed locally at `ab9df83`, not pushed/deployed)*
-3. Foundational resource contracts. *(documented in the [Foundational Resource Contract](foundational-resource-contract.md); the metadata-only helper slice `appliance_resource_name`/`appliance_identity`/`build_resource_metadata` is implemented locally and validated — 44 unit tests, `mypy src`, Ruff — but uncommitted and unpushed; next is the separate collision/migration API-layer slice, then a MariaDB vertical slice after the unresolved Secret/configuration/storage/readiness contracts are approved)*
+3. Foundational resource contracts. *(documented in the [Foundational Resource Contract](foundational-resource-contract.md); the metadata-only helper slice `appliance_resource_name`/`appliance_identity`/`build_resource_metadata` is implemented locally and validated — 44 unit tests, `mypy src`, Ruff — and committed locally at `fbab6e5` but not pushed or deployed; next is the separate collision/migration API-layer slice, then a MariaDB vertical slice after the unresolved Secret/configuration/storage/readiness contracts are approved)*
 4. Generated configuration and secrets.
 5. Foundational dependencies and bootstrap Jobs.
 6. Coriolis workloads.

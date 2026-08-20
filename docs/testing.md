@@ -30,7 +30,7 @@ For the local metadata-only helper slice, these local validations passed:
 - `uv run mypy src`.
 - `git diff --check`.
 
-The helper slice is uncommitted and unpushed; the deployed marker `0.5.3` is unchanged and carries no standard labels. Collision pre-read/enforcement, legacy marker migration, retained-resource adoption, and all runtime resource construction remain deferred to the separate collision/migration API-layer slice.
+The helper slice is committed locally at `fbab6e5` on `dev`, but not pushed or deployed; the deployed marker `0.5.3` is unchanged and carries no standard labels. Collision pre-read/enforcement, legacy marker migration, retained-resource adoption, and all runtime resource construction remain deferred to the separate collision/migration API-layer slice.
 
 Live-cluster controller lifecycle validation passed for release `0.5.2` in the approved `coriolis` namespace. The currently deployed `0.5.3` retains the marker-only controller behavior and predates this local API slice; full lifecycle validation was not repeated for `0.5.3`.
 
