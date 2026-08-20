@@ -21,7 +21,16 @@ For the local API-only `core` runtime slice, these local validations passed:
 - Helm lint and Helm template with CRDs.
 - `git diff --check`.
 
-This API slice is local/uncommitted work and is absent from the deployed operator. No cluster or external service was changed by this API slice; the image mirror/pull gate remains passed, and no dependencies, bootstrap Jobs, services, storage, secrets, or Coriolis runtime workloads are implemented or deployed.
+This API slice is committed locally at `ab9df83` (branch `dev`, not pushed/deployed) and is absent from the deployed operator. No cluster or external service was changed by this API slice; the image mirror/pull gate remains passed, and no dependencies, bootstrap Jobs, services, storage, secrets, or Coriolis runtime workloads are implemented or deployed.
+
+For the local metadata-only helper slice, these local validations passed:
+
+- 44 unit tests covering `appliance_resource_name` (single lowercase DNS label <=63; dotted/overflow dot-to-hyphen prefix plus 12-character SHA-256; invalid appliance/component rejection), `appliance_identity`, `build_resource_metadata` (standard `app.kubernetes.io/*` and `coriolis.cloudbase.it/*` labels, full appliance-name annotation, exactly one of owner reference or retention), and `build_state_config_map` (standard metadata with component `operator-state` while retaining the shipped `state_config_map_name`).
+- `uv run ruff check .` and `uv run ruff format --check .`.
+- `uv run mypy src`.
+- `git diff --check`.
+
+The helper slice is uncommitted and unpushed; the deployed marker `0.5.3` is unchanged and carries no standard labels. Collision pre-read/enforcement, legacy marker migration, retained-resource adoption, and all runtime resource construction remain deferred to the separate collision/migration API-layer slice.
 
 Live-cluster controller lifecycle validation passed for release `0.5.2` in the approved `coriolis` namespace. The currently deployed `0.5.3` retains the marker-only controller behavior and predates this local API slice; full lifecycle validation was not repeated for `0.5.3`.
 

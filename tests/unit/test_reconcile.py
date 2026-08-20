@@ -1,3 +1,4 @@
+import hashlib
 import re
 from datetime import UTC, datetime
 from unittest.mock import MagicMock
@@ -10,7 +11,10 @@ from coriolis_operator.reconcile import (
     SUPPORTED_INITIAL_VERSION,
     SUPPORTED_PROFILE,
     accepted_conditions,
+    appliance_identity,
+    appliance_resource_name,
     blocked_conditions,
+    build_resource_metadata,
     build_state_config_map,
     build_status,
     rejected_conditions,
@@ -102,6 +106,203 @@ def test_state_config_map_name_hashes_when_suffix_would_overflow_final_label() -
     assert_dns_subdomain(config_map_name)
 
 
+def test_appliance_resource_name_short_is_unchanged_and_deterministic() -> None:
+    assert appliance_resource_name("appliance", "core") == "appliance-core"
+    assert appliance_resource_name("appliance", "core") == appliance_resource_name(
+        "appliance", "core"
+    )
+
+
+def test_appliance_resource_name_dotted_input_is_hashed_and_label_safe() -> None:
+    name = appliance_resource_name("my.appliance.example.com", "core")
+
+    assert "." not in name
+    assert len(name) <= 63
+    assert re.fullmatch(r"[a-z0-9](?:[-a-z0-9]*[a-z0-9])?", name)
+    desired = "my.appliance.example.com-core"
+    expected_hash = hashlib.sha256(desired.encode()).hexdigest()[:12]
+    assert f"-{expected_hash}-core" in name
+
+
+def test_appliance_resource_name_long_overflow_is_hashed_and_label_safe() -> None:
+    long_name = f"{'a' * 63}.{'b' * 63}"
+    name = appliance_resource_name(long_name, "core")
+
+    assert "." not in name
+    assert len(name) <= 63
+    assert re.fullmatch(r"[a-z0-9](?:[-a-z0-9]*[a-z0-9])?", name)
+    assert name.endswith("-core")
+    desired = f"{long_name}-core"
+    expected_hash = hashlib.sha256(desired.encode()).hexdigest()[:12]
+    assert f"-{expected_hash}-core" in name
+
+
+def test_appliance_resource_name_shared_visible_prefix_differs_by_hash() -> None:
+    shared = f"{'a' * 40}.{'b' * 40}.{'c' * 40}."
+    first = appliance_resource_name(shared + "d" * 40, "core")
+    second = appliance_resource_name(shared + "e" * 40, "core")
+
+    assert first != second
+    assert first[:45] == second[:45]
+
+
+def test_appliance_resource_name_rejects_invalid_appliance_names() -> None:
+    for invalid in ["", "UPPER", "a_b", "-start", "end-", "a..b", "A.b", "a" * 254]:
+        with pytest.raises(ValueError):
+            appliance_resource_name(invalid, "core")
+
+
+def test_appliance_resource_name_rejects_invalid_components() -> None:
+    for invalid in ["", "UPPER", "bad_component", "-bad", "bad-", "c" * 49]:
+        with pytest.raises(ValueError):
+            appliance_resource_name("appliance", invalid)
+
+
+def test_appliance_resource_name_accepts_max_length_component() -> None:
+    assert appliance_resource_name("appliance", "c" * 48).endswith("c" * 48)
+
+
+def test_appliance_identity_short_is_unchanged() -> None:
+    assert appliance_identity("appliance") == "appliance"
+
+
+def test_appliance_identity_dotted_is_hashed_and_label_safe() -> None:
+    identity = appliance_identity("my.appliance.example.com")
+
+    assert "." not in identity
+    assert len(identity) <= 63
+    assert re.fullmatch(r"[a-z0-9](?:[-a-z0-9]*[a-z0-9])?", identity)
+    expected_hash = hashlib.sha256(b"my.appliance.example.com").hexdigest()[:12]
+    assert identity.endswith(f"-{expected_hash}")
+
+
+def test_appliance_identity_long_overflow_is_label_safe() -> None:
+    long_name = f"{'a' * 63}.{'b' * 63}"
+    identity = appliance_identity(long_name)
+
+    assert "." not in identity
+    assert len(identity) <= 63
+    assert re.fullmatch(r"[a-z0-9](?:[-a-z0-9]*[a-z0-9])?", identity)
+    expected_hash = hashlib.sha256(long_name.encode()).hexdigest()[:12]
+    assert identity.endswith(f"-{expected_hash}")
+
+
+def test_appliance_identity_is_deterministic_and_collision_resistant() -> None:
+    assert appliance_identity("a.b.c.d") == appliance_identity("a.b.c.d")
+    assert appliance_identity("a.b.c.d") != appliance_identity("a-b-c-d")
+    assert appliance_identity("x.y") != appliance_identity("x.z")
+
+
+def test_appliance_identity_rejects_invalid_appliance_names() -> None:
+    for invalid in ["", "UPPER", "a_b", "-start", "end-", "a..b", "A.b", "a" * 254]:
+        with pytest.raises(ValueError):
+            appliance_identity(invalid)
+
+
+def test_build_resource_metadata_owner_mode_labels_and_annotation() -> None:
+    metadata = build_resource_metadata(
+        resource_name="example-operator-state",
+        namespace="operators",
+        appliance_name="example",
+        component="operator-state",
+        accepted_version="2603.4",
+        owner=OWNER,
+    )
+
+    assert metadata["name"] == "example-operator-state"
+    assert metadata["namespace"] == "operators"
+    assert metadata["labels"] == {
+        "app.kubernetes.io/name": "coriolis",
+        "app.kubernetes.io/instance": "example",
+        "app.kubernetes.io/version": "2603.4",
+        "app.kubernetes.io/component": "operator-state",
+        "app.kubernetes.io/part-of": "coriolis-appliance",
+        "app.kubernetes.io/managed-by": "coriolis-operator",
+        "coriolis.cloudbase.it/appliance": "example",
+        "coriolis.cloudbase.it/component": "operator-state",
+    }
+    assert metadata["annotations"] == {
+        "coriolis.cloudbase.it/appliance-name": "example"
+    }
+    assert metadata["ownerReferences"] == [
+        {
+            "apiVersion": "coriolis.cloudbase.it/v1alpha1",
+            "kind": "CoriolisAppliance",
+            "name": "example",
+            "uid": "abc-123",
+            "controller": True,
+        }
+    ]
+
+
+def test_build_resource_metadata_retention_mode() -> None:
+    metadata = build_resource_metadata(
+        resource_name="example-backup",
+        namespace="operators",
+        appliance_name="example",
+        component="backup",
+        accepted_version="2603.4",
+        retention="daily",
+    )
+
+    assert "ownerReferences" not in metadata
+    assert metadata["annotations"] == {
+        "coriolis.cloudbase.it/appliance-name": "example",
+        "coriolis.cloudbase.it/retention": "daily",
+    }
+    assert metadata["labels"]["coriolis.cloudbase.it/component"] == "backup"
+    assert metadata["labels"]["app.kubernetes.io/component"] == "backup"
+
+
+def test_build_resource_metadata_rejects_owner_and_retention() -> None:
+    with pytest.raises(ValueError):
+        build_resource_metadata(
+            resource_name="x",
+            namespace="n",
+            appliance_name="a",
+            component="c",
+            accepted_version="v",
+            owner=OWNER,
+            retention="daily",
+        )
+
+
+def test_build_resource_metadata_rejects_neither_owner_nor_retention() -> None:
+    with pytest.raises(ValueError):
+        build_resource_metadata(
+            resource_name="x",
+            namespace="n",
+            appliance_name="a",
+            component="c",
+            accepted_version="v",
+        )
+
+
+def test_build_resource_metadata_rejects_invalid_retention() -> None:
+    for invalid in ["", "UPPER", "bad_class"]:
+        with pytest.raises(ValueError):
+            build_resource_metadata(
+                resource_name="x",
+                namespace="n",
+                appliance_name="a",
+                component="c",
+                accepted_version="v",
+                retention=invalid,
+            )
+
+
+def test_build_resource_metadata_rejects_invalid_component() -> None:
+    with pytest.raises(ValueError):
+        build_resource_metadata(
+            resource_name="x",
+            namespace="n",
+            appliance_name="a",
+            component="UPPER",
+            accepted_version="v",
+            owner=OWNER,
+        )
+
+
 def test_state_config_map_records_accepted_version_profile_and_generation() -> None:
     config_map = build_state_config_map(
         name="example",
@@ -114,6 +315,19 @@ def test_state_config_map_records_accepted_version_profile_and_generation() -> N
 
     assert config_map["metadata"]["name"] == "example-operator-state"
     assert config_map["metadata"]["namespace"] == "operators"
+    assert config_map["metadata"]["labels"] == {
+        "app.kubernetes.io/name": "coriolis",
+        "app.kubernetes.io/instance": "example",
+        "app.kubernetes.io/version": "2603.4",
+        "app.kubernetes.io/component": "operator-state",
+        "app.kubernetes.io/part-of": "coriolis-appliance",
+        "app.kubernetes.io/managed-by": "coriolis-operator",
+        "coriolis.cloudbase.it/appliance": "example",
+        "coriolis.cloudbase.it/component": "operator-state",
+    }
+    assert config_map["metadata"]["annotations"] == {
+        "coriolis.cloudbase.it/appliance-name": "example"
+    }
     assert config_map["data"] == {
         "acceptedVersion": "2603.4",
         "profile": "core",
@@ -128,6 +342,26 @@ def test_state_config_map_records_accepted_version_profile_and_generation() -> N
             "controller": True,
         }
     ]
+
+
+def test_state_config_map_preserves_legacy_dotted_name() -> None:
+    appliance_name = "example.domain"
+    config_map = build_state_config_map(
+        name=appliance_name,
+        namespace="operators",
+        profile="core",
+        accepted_version="2603.4",
+        generation=7,
+        owner=OWNER,
+    )
+
+    assert config_map["metadata"]["name"] == "example.domain-operator-state"
+    assert config_map["metadata"]["labels"][
+        "coriolis.cloudbase.it/appliance"
+    ] == appliance_identity(appliance_name)
+    assert config_map["metadata"]["annotations"] == {
+        "coriolis.cloudbase.it/appliance-name": appliance_name
+    }
 
 
 def test_build_status_reports_accepted_api_only_slice() -> None:
@@ -273,6 +507,19 @@ def test_reconcile_appliance_server_side_applies_state_and_returns_status() -> N
         "metadata": {
             "name": "example-operator-state",
             "namespace": "operators",
+            "labels": {
+                "app.kubernetes.io/name": "coriolis",
+                "app.kubernetes.io/instance": "example",
+                "app.kubernetes.io/version": "2603.4",
+                "app.kubernetes.io/component": "operator-state",
+                "app.kubernetes.io/part-of": "coriolis-appliance",
+                "app.kubernetes.io/managed-by": "coriolis-operator",
+                "coriolis.cloudbase.it/appliance": "example",
+                "coriolis.cloudbase.it/component": "operator-state",
+            },
+            "annotations": {
+                "coriolis.cloudbase.it/appliance-name": "example",
+            },
             "ownerReferences": [
                 {
                     "apiVersion": "coriolis.cloudbase.it/v1alpha1",

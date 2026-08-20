@@ -26,9 +26,11 @@
 - A valid API-only reconcile records only the owned controller-state ConfigMap (`acceptedVersion`, `profile`, `generation`) and reports all six conditions (Accepted, Progressing, Reconciled, Ready, Degraded, Upgradeable); `Ready=False/RuntimeNotImplemented` remains truthful, and profile changes route through the same reconcile path.
 - The sample uses `profile: core`, `version: "2603.4"`. 25 tests pass; Ruff and mypy pass; Helm lint/template pass. No cluster or external service was changed by this API slice, and the image mirror/pull gate remains passed.
 
-## Milestone 4: Foundational Resource Contracts and Construction (Next)
+## Milestone 4: Foundational Resource Contracts and Construction (In Progress)
 
-- Implement naming, ownership, retention, and generated configuration, then foundational dependency and resource construction. No dependencies, bootstrap Jobs, services, storage, secrets, or Coriolis runtime workloads have been implemented or deployed yet.
+- The first Milestone 4 deliverable is a documentation-only contract slice: the [Foundational Resource Contract](docs/foundational-resource-contract.md) freezes deterministic naming, standard labels, appliance identity, collision handling, ownership/deletion/retention (including retained PVCs/CA/state credentials and external Secrets), the three Secret/configuration classes, and an evidence-backed bootstrap order from MariaDB and the appliance roles. It records unresolved Secret names/keys, ports, volumes, probes, and readiness checks rather than guessing.
+- A metadata-only helper slice is now implemented locally and validated (44 unit tests, `mypy src`, Ruff, `git diff --check`): `appliance_resource_name`, `appliance_identity`, and `build_resource_metadata` produce label-safe names/identity and standard labels/annotation. The marker ConfigMap now routes through `build_resource_metadata` while retaining its shipped `state_config_map_name`; the runtime-name helper is not used for the marker. These helpers are uncommitted and unpushed; the deployed marker `0.5.3` is unchanged.
+- Next is the separate collision/migration API-layer slice (collision pre-read/enforcement, legacy marker migration, retained-resource adoption). No dependencies, bootstrap Jobs, services, storage, secrets, or Coriolis runtime workloads have been implemented or deployed yet; a MariaDB vertical slice remains blocked by unresolved Secret/configuration/storage/readiness gates.
 
 ## Later Milestones
 

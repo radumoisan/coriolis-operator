@@ -1,6 +1,7 @@
 """Pure values and Kubernetes resource bodies used by the controller."""
 
 import hashlib
+import re
 from collections.abc import Mapping, Sequence
 from datetime import UTC, datetime
 from typing import Any
@@ -9,6 +10,12 @@ STATE_CONFIG_MAP_SUFFIX = "-operator-state"
 CONFIG_MAP_NAME_MAX_LENGTH = 253
 DNS_LABEL_MAX_LENGTH = 63
 NAME_HASH_LENGTH = 12
+MAX_COMPONENT_LENGTH = DNS_LABEL_MAX_LENGTH - 1 - NAME_HASH_LENGTH - 2
+
+DNS_SUBDOMAIN_RE = re.compile(
+    r"[a-z0-9](?:[-a-z0-9]*[a-z0-9])?(?:\.[a-z0-9](?:[-a-z0-9]*[a-z0-9])?)*"
+)
+DNS_LABEL_RE = re.compile(r"[a-z0-9](?:[-a-z0-9]*[a-z0-9])?")
 
 SUPPORTED_PROFILE = "core"
 SUPPORTED_INITIAL_VERSION = "2603.4"
@@ -40,6 +47,110 @@ def state_config_map_name(resource_name: str) -> str:
     return f"{prefix}.{suffix_label}"
 
 
+def _validate_appliance_name(appliance_name: str) -> None:
+    if not isinstance(appliance_name, str) or not appliance_name:
+        raise ValueError("appliance_name must be a non-empty string")
+    if len(appliance_name) > CONFIG_MAP_NAME_MAX_LENGTH:
+        raise ValueError(
+            "appliance_name must be at most 253 characters (a DNS subdomain)"
+        )
+    if not DNS_SUBDOMAIN_RE.fullmatch(appliance_name):
+        raise ValueError("appliance_name must be a lowercase DNS subdomain")
+
+
+def _validate_component(component: str) -> None:
+    if not isinstance(component, str) or not component:
+        raise ValueError("component must be a non-empty string")
+    if len(component) > MAX_COMPONENT_LENGTH:
+        raise ValueError(
+            "component is too long to fit a hashed resource name within "
+            f"{DNS_LABEL_MAX_LENGTH} characters"
+        )
+    if not DNS_LABEL_RE.fullmatch(component):
+        raise ValueError("component must be a lowercase DNS label token")
+
+
+def appliance_resource_name(appliance_name: str, component: str) -> str:
+    """Return a deterministic, label-safe resource name for a component."""
+    _validate_appliance_name(appliance_name)
+    _validate_component(component)
+    desired_name = f"{appliance_name}-{component}"
+    if "." not in appliance_name and len(desired_name) <= DNS_LABEL_MAX_LENGTH:
+        return desired_name
+    visible_prefix = appliance_name.replace(".", "-")
+    name_hash = hashlib.sha256(desired_name.encode()).hexdigest()[:NAME_HASH_LENGTH]
+    suffix = f"-{name_hash}-{component}"
+    prefix = visible_prefix[: DNS_LABEL_MAX_LENGTH - len(suffix)].rstrip("-")
+    return f"{prefix}{suffix}"
+
+
+def appliance_identity(appliance_name: str) -> str:
+    """Return a label-safe identity token for an appliance."""
+    _validate_appliance_name(appliance_name)
+    if "." not in appliance_name and len(appliance_name) <= DNS_LABEL_MAX_LENGTH:
+        return appliance_name
+    visible_prefix = appliance_name.replace(".", "-")
+    name_hash = hashlib.sha256(appliance_name.encode()).hexdigest()[:NAME_HASH_LENGTH]
+    suffix = f"-{name_hash}"
+    prefix = visible_prefix[: DNS_LABEL_MAX_LENGTH - len(suffix)].rstrip("-")
+    return f"{prefix}{suffix}"
+
+
+def _owner_reference(owner: Mapping[str, Any]) -> dict[str, Any]:
+    return {
+        "apiVersion": str(owner["apiVersion"]),
+        "kind": str(owner["kind"]),
+        "name": str(owner["name"]),
+        "uid": str(owner["uid"]),
+        "controller": True,
+    }
+
+
+def build_resource_metadata(
+    *,
+    resource_name: str,
+    namespace: str,
+    appliance_name: str,
+    component: str,
+    accepted_version: str,
+    owner: Mapping[str, Any] | None = None,
+    retention: str | None = None,
+) -> dict[str, Any]:
+    """Build standard Kubernetes metadata for an owned or retained object."""
+    if (owner is None) == (retention is None):
+        raise ValueError("exactly one of owner or retention must be provided")
+    _validate_component(component)
+    identity = appliance_identity(appliance_name)
+    if retention is not None:
+        if not isinstance(retention, str) or not retention:
+            raise ValueError("retention must be a non-empty string")
+        if not DNS_LABEL_RE.fullmatch(retention):
+            raise ValueError("retention must be a lowercase DNS label class")
+    metadata: dict[str, Any] = {
+        "name": resource_name,
+        "namespace": namespace,
+        "labels": {
+            "app.kubernetes.io/name": "coriolis",
+            "app.kubernetes.io/instance": identity,
+            "app.kubernetes.io/version": accepted_version,
+            "app.kubernetes.io/component": component,
+            "app.kubernetes.io/part-of": "coriolis-appliance",
+            "app.kubernetes.io/managed-by": "coriolis-operator",
+            "coriolis.cloudbase.it/appliance": identity,
+            "coriolis.cloudbase.it/component": component,
+        },
+        "annotations": {
+            "coriolis.cloudbase.it/appliance-name": appliance_name,
+        },
+    }
+    if retention is not None:
+        metadata["annotations"]["coriolis.cloudbase.it/retention"] = retention
+    else:
+        assert owner is not None
+        metadata["ownerReferences"] = [_owner_reference(owner)]
+    return metadata
+
+
 def build_state_config_map(
     *,
     name: str,
@@ -50,22 +161,18 @@ def build_state_config_map(
     owner: Mapping[str, Any],
 ) -> dict[str, Any]:
     """Build the complete server-side apply body for the owned ConfigMap."""
+    metadata = build_resource_metadata(
+        resource_name=state_config_map_name(name),
+        namespace=namespace,
+        appliance_name=name,
+        component="operator-state",
+        accepted_version=accepted_version,
+        owner=owner,
+    )
     return {
         "apiVersion": "v1",
         "kind": "ConfigMap",
-        "metadata": {
-            "name": state_config_map_name(name),
-            "namespace": namespace,
-            "ownerReferences": [
-                {
-                    "apiVersion": str(owner["apiVersion"]),
-                    "kind": str(owner["kind"]),
-                    "name": str(owner["name"]),
-                    "uid": str(owner["uid"]),
-                    "controller": True,
-                }
-            ],
-        },
+        "metadata": metadata,
         "data": {
             "acceptedVersion": accepted_version,
             "profile": profile,

@@ -22,7 +22,7 @@ The first acceptance is complete bootstrap with an internally healthy and reacha
 ## :material-book-open-page-variant-outline: API And Lifecycle Policy
 
 !!! note
-    The API slice below is local/uncommitted work and is absent from the deployed operator. Full controller lifecycle validation remains on release `0.5.2`; the currently deployed `0.5.3` retains the marker-only controller behavior.
+    The API slice below is committed locally at `ab9df83` (branch `dev`, not pushed) and is absent from the deployed operator. Full controller lifecycle validation remains on release `0.5.2`; the currently deployed `0.5.3` retains the marker-only controller behavior.
 
 The `v1alpha1` API defines optional/defaulted `spec.profile` (`core`, the only enum value), required non-empty `spec.version`, and optional non-empty `status.acceptedVersion`. The sample uses `profile: core`, `version: "2603.4"`.
 
@@ -50,9 +50,9 @@ RC4 is blocked/OVA-only for Kubernetes: Build `868` exported an OVA, but no `reg
 ## :material-book-open-page-variant-outline: Ordered Implementation Plan
 
 1. Image and runtime inventory. *(complete)*
-2. CRD and runtime API. *(implemented locally)*
-3. Naming, ownership, and retention. *(next milestone)*
-4. Generated configuration and secrets. *(next milestone)*
+2. CRD and runtime API. *(committed locally at `ab9df83`, not pushed/deployed)*
+3. Foundational resource contracts. *(documented in the [Foundational Resource Contract](foundational-resource-contract.md); the metadata-only helper slice `appliance_resource_name`/`appliance_identity`/`build_resource_metadata` is implemented locally and validated — 44 unit tests, `mypy src`, Ruff — but uncommitted and unpushed; next is the separate collision/migration API-layer slice, then a MariaDB vertical slice after the unresolved Secret/configuration/storage/readiness contracts are approved)*
+4. Generated configuration and secrets.
 5. Foundational dependencies and bootstrap Jobs.
 6. Coriolis workloads.
 7. Server-side apply and controller watches.
