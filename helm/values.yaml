@@ -6,7 +6,7 @@ image:
 imagePullSecrets:
   - name: regcred
 nameOverride: ""
-fullnameOverride: ""
+fullnameOverride: "coriolis-operator"
 serviceAccount:
   create: true
   name: ""

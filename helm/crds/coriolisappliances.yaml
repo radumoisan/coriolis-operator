@@ -34,12 +34,20 @@ spec:
               required:
                 - version
               properties:
+                profile:
+                  type: string
+                  enum:
+                    - core
+                  default: core
                 version:
                   type: string
                   minLength: 1
             status:
               type: object
               properties:
+                acceptedVersion:
+                  type: string
+                  minLength: 1
                 observedGeneration:
                   type: integer
                   format: int64

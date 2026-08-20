@@ -13,7 +13,17 @@ For the controller skeleton, these local validations have passed:
 - Container image build and non-root runtime identity.
 - `git diff --check`.
 
-Live-cluster controller lifecycle validation passed for release `0.5.2` in the approved `coriolis` namespace.
+For the local API-only `core` runtime slice, these local validations passed:
+
+- 25 unit tests covering the CRD schema (profile enum/default, required non-empty `spec.version`, `status.acceptedVersion`, and the absence of CEL immutability rules), controller enforcement of the immutable accepted version, rejection and version-change-blocked conditions, the accepted API-only reconcile, profile defaulting and profile-change routing, and no-resource paths.
+- Ruff lint.
+- mypy.
+- Helm lint and Helm template with CRDs.
+- `git diff --check`.
+
+This API slice is local/uncommitted work and is absent from the deployed operator. No cluster or external service was changed by this API slice; the image mirror/pull gate remains passed, and no dependencies, bootstrap Jobs, services, storage, secrets, or Coriolis runtime workloads are implemented or deployed.
+
+Live-cluster controller lifecycle validation passed for release `0.5.2` in the approved `coriolis` namespace. The currently deployed `0.5.3` retains the marker-only controller behavior and predates this local API slice; full lifecycle validation was not repeated for `0.5.3`.
 
 The approved dev cluster is `infra-dev-buc-hq` (`virt-infra-dev-buc-hq`); CIXpress remains approved for read-only pipeline troubleshooting and monitoring only. The dedicated operator namespace is `coriolis`. See [Development Environment](dev-environment.md).
 

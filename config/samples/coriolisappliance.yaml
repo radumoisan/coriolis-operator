@@ -3,4 +3,5 @@ kind: CoriolisAppliance
 metadata:
   name: example
 spec:
-  version: development
+  profile: core
+  version: "2603.4"

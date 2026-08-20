@@ -9,18 +9,30 @@
 - Publish and deploy release `0.5.2` in the approved `coriolis` namespace.
 - Validate create, controller replacement, update, deletion, and marker garbage collection.
 
-## Milestone 2: RC4 Image And Runtime Inventory (Active)
+## Milestone 2: Image And Runtime Inventory (Complete)
 
-- Use appliance Jenkins job `1_coriolis-appliance-setup` Build `868` as the initial `2608.0-rc4` provenance source.
-- Inventory the complete application and support image set before implementation.
-- Validate registry metadata before pulls; record immutable digests, platforms, runtime configuration, health capabilities, and compatibility.
-- Create a dedicated pull Secret securely from Jenkins credential ID `docker-appliance-creds` without storing or displaying credential values.
-- Stop if the release is OVA-only or lacks a complete compatible Kubernetes image set.
+- RC4 failed: Build `868` exported an OVA, but no `registry.cloudbase.it/appliance/coriolis-*` repository carries a `2608*` tag; RC4 is blocked/OVA-only for Kubernetes.
+- The approved fallback is exact official release `2603.4`; the authoritative [image inventory ledger](docs/image-inventory.md) is complete. All 26 approved images were mirrored to `cr.virtomat.io/virtomat/coriolis` on 2026-08-20 with preserved/verified digests.
+- Validated registry metadata before pulls; recorded immutable digests, platforms, runtime configuration, health capabilities, and compatibility.
+- Configured the destination-registry pull Secret `coriolis-appliance-registry` (type `kubernetes.io/dockerconfigjson`) in `virt-infra-dev-buc-hq` namespace `coriolis`, without storing credential values in the repository.
+- Pull validation passed: all 21 initial-runtime image references (10 application images at `2603.4`, 10 support images at `2023.1-ubuntu-jammy`, and Step CA at `2603.4`) pulled successfully serially with `imagePullPolicy: Always`; each successful Pod was removed and no pull-validation Pods remain. Independent main-agent validation of Step CA repeated successfully.
+- The inventory and pull gate are complete, so runtime implementation is unblocked and is the next phase; no core runtime workloads have been implemented or deployed yet.
+
+## Milestone 3: Core Runtime API Slice (Implemented Locally)
+
+- The `v1alpha1` CRD defines optional/defaulted `spec.profile: core` (enum only `core`), required non-empty `spec.version`, and optional non-empty `status.acceptedVersion`.
+- Immutability is enforced by the controller from the persisted `status.acceptedVersion`, not by CEL/admission rules. Initial acceptance supports exact `2603.4`; an omitted profile defaults to `core`; unsupported initial profiles/versions apply no Kubernetes resources and report rejection conditions.
+- A requested version different from `status.acceptedVersion` applies no resources, preserves the accepted state, advances `observedGeneration`, and reports `Accepted=False/VersionChangeRejected`, `Reconciled=False`, and `Upgradeable=False/UpgradeBlocked`.
+- A valid API-only reconcile records only the owned controller-state ConfigMap (`acceptedVersion`, `profile`, `generation`) and reports all six conditions (Accepted, Progressing, Reconciled, Ready, Degraded, Upgradeable); `Ready=False/RuntimeNotImplemented` remains truthful, and profile changes route through the same reconcile path.
+- The sample uses `profile: core`, `version: "2603.4"`. 25 tests pass; Ruff and mypy pass; Helm lint/template pass. No cluster or external service was changed by this API slice, and the image mirror/pull gate remains passed.
+
+## Milestone 4: Foundational Resource Contracts and Construction (Next)
+
+- Implement naming, ownership, retention, and generated configuration, then foundational dependency and resource construction. No dependencies, bootstrap Jobs, services, storage, secrets, or Coriolis runtime workloads have been implemented or deployed yet.
 
 ## Later Milestones
 
-- Define the `core` CRD/runtime API from the approved inventory.
-- Implement dependencies, bootstrap Jobs, Coriolis workloads, controller watches, status, readiness, tests, and development acceptance.
+- Implement Coriolis dependencies and bootstrap Jobs, workloads, controller watches, status, readiness, tests, and development acceptance.
 - Add safe upgrade and production lifecycle capabilities after explicit contracts and operational review.
 
 ## Pending Decisions

@@ -12,18 +12,23 @@ That limited, non-destructive contract is completed history. It is not the targe
 
 Creating a `CoriolisAppliance` must deploy the complete selected Coriolis stack as Kubernetes workloads directly in namespace `coriolis`. It must not provision an external VM. OpenStack and VMware remain migration endpoints.
 
-The first runtime profile is `core`, targeting Coriolis release `2608.0-rc4`. Its initial components are MariaDB, RabbitMQ, Memcached, Keystone, Barbican, Step CA, InfluxDB/logger compatibility, API, conductor, scheduler, transfer cron, minion manager, deployer manager, privileged worker, compressor, web, and web proxy.
+The first runtime profile is `core`, targeting exact official Coriolis release `2603.4` (not `2603.41`/`2603.42`). Its initial core workload is API, conductor, scheduler, transfer cron, minion manager, deployer manager, privileged worker, compressor, web, and web proxy. `coriolis-common` is a base image, not a workload. Deferred: licensing server, Metal Hub, console editor, and logger/InfluxDB.
 
 The first acceptance is complete bootstrap with an internally healthy and reachable UI and API. It does not include a migration test.
 
-!!! warning
-    The exact component images, immutable digests, and registry availability are not confirmed. Do not implement the runtime until the image gate is passed.
+!!! note
+    The image inventory and pull gate are complete. The exact `2603.4` image set, immutable digests, platform, users, listeners, and health capability are recorded in the [Image Inventory](image-inventory.md) ledger; all 26 approved images are mirrored to `cr.virtomat.io/virtomat/coriolis`, and all 21 initial-runtime image pulls passed in `virt-infra-dev-buc-hq` namespace `coriolis`. Runtime implementation is unblocked and is the next phase.
 
 ## :material-book-open-page-variant-outline: API And Lifecycle Policy
 
-`spec.version` is immutable for the first runtime profile. An attempted version change must leave the current workloads unchanged and set `Upgradeable=False` with reason `UpgradeBlocked` rather than attempt an unsafe upgrade.
+!!! note
+    The API slice below is local/uncommitted work and is absent from the deployed operator. Full controller lifecycle validation remains on release `0.5.2`; the currently deployed `0.5.3` retains the marker-only controller behavior.
 
-The planned status condition types are `Accepted`, `Progressing`, `Reconciled`, `Ready`, `Degraded`, and `Upgradeable`. `Ready=True` is allowed only after mandatory Jobs, dependencies, workloads, and internal UI/API checks pass.
+The `v1alpha1` API defines optional/defaulted `spec.profile` (`core`, the only enum value), required non-empty `spec.version`, and optional non-empty `status.acceptedVersion`. The sample uses `profile: core`, `version: "2603.4"`.
+
+`spec.version` is immutable for the first runtime profile, enforced by the controller rather than admission: no CEL/validation rule rejects a change, so a rejected request remains observable in status. The controller compares the requested version against the persisted `status.acceptedVersion`; a change applies no resources, preserves the accepted state, advances `observedGeneration`, and sets `Upgradeable=False` with reason `UpgradeBlocked` rather than attempt an unsafe upgrade. Unsupported initial profiles/versions apply no resources and report `Accepted=False` rejection conditions.
+
+The implemented status condition types are `Accepted`, `Progressing`, `Reconciled`, `Ready`, `Degraded`, and `Upgradeable`. The API-only reconcile truthfully reports `Ready=False/RuntimeNotImplemented`; `Ready=True` is allowed only after mandatory Jobs, dependencies, workloads, and internal UI/API checks pass.
 
 Deletion removes operator-owned workloads, Services, Jobs, and generated ConfigMaps. It retains PVCs, CA state, and state credentials for recovery. Pre-existing referenced Secrets are never deleted. The initial policy avoids a destructive finalizer.
 
@@ -35,19 +40,19 @@ Console-editor behavior must become declarative Kubernetes or CR configuration, 
 
 Deferred work includes the licensing server and UI, Metal Hub, console editor and VM-host administration, external provider configuration, migration validation, automatic upgrades, and production HA.
 
-## :material-book-open-page-variant-outline: Blocking Image Gate
+## :material-book-open-page-variant-outline: Image Inventory Gate
 
-Before implementation, inventory the complete `2608.0-rc4` application and support image set. Start with sanitized metadata from appliance Jenkins job `1_coriolis-appliance-setup` Build `868`, then verify registry metadata before pulling layers. Record immutable digests, platforms, entrypoints, users, listeners, health capabilities, and compatibility. Verify access to `registry.cloudbase.it/appliance` with a dedicated pull Secret created securely from Jenkins credential ID `docker-appliance-creds`; never store or display credential values.
+RC4 is blocked/OVA-only for Kubernetes: Build `868` exported an OVA, but no `registry.cloudbase.it/appliance/coriolis-*` repository carries a `2608*` tag. The approved fallback is exact official release `2603.4`; its authoritative inventory is the [Image Inventory](image-inventory.md) ledger. The metadata gate is complete and all 26 approved images were mirrored to `cr.virtomat.io/virtomat/coriolis` on 2026-08-20 with preserved/verified digests. Pull validation in `virt-infra-dev-buc-hq` namespace `coriolis` has passed: all 21 initial-runtime image references pulled successfully via `scripts/validate-image-pulls.py` using the destination Secret `coriolis-appliance-registry` (type `kubernetes.io/dockerconfigjson`), and no pull-validation Pods remain. The gate is complete, runtime implementation is unblocked and is the next phase, and no Coriolis core runtime workloads have been implemented or deployed yet.
 
-!!! danger
-    Stop if the release exists only as an OVA or if no complete compatible image set exists.
+!!! note
+    The pull gate has passed; do not claim runtime readiness or bootstrap. Runtime implementation is the next phase and no core runtime workloads exist yet.
 
 ## :material-book-open-page-variant-outline: Ordered Implementation Plan
 
-1. Image and runtime inventory.
-2. CRD and runtime API.
-3. Naming, ownership, and retention.
-4. Generated configuration and secrets.
+1. Image and runtime inventory. *(complete)*
+2. CRD and runtime API. *(implemented locally)*
+3. Naming, ownership, and retention. *(next milestone)*
+4. Generated configuration and secrets. *(next milestone)*
 5. Foundational dependencies and bootstrap Jobs.
 6. Coriolis workloads.
 7. Server-side apply and controller watches.

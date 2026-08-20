@@ -9,13 +9,52 @@ from typing import Any
 import kopf
 from kubernetes import client  # type: ignore[import-untyped]
 
-from coriolis_operator.reconcile import build_state_config_map, build_status
+from coriolis_operator.reconcile import (
+    SUPPORTED_INITIAL_VERSION,
+    SUPPORTED_PROFILE,
+    accepted_conditions,
+    blocked_conditions,
+    build_state_config_map,
+    build_status,
+    rejected_conditions,
+)
 
 GROUP = "coriolis.cloudbase.it"
 VERSION = "v1alpha1"
 PLURAL = "coriolisappliances"
 WATCH_NAMESPACE = os.environ.get("WATCH_NAMESPACE") or None
 LIVENESS_ENDPOINT = os.environ.get("LIVENESS_ENDPOINT", "http://0.0.0.0:8080/healthz")
+
+
+def _accepted_version(status: Mapping[str, Any] | None) -> str | None:
+    if not isinstance(status, Mapping):
+        return None
+    value = status.get("acceptedVersion")
+    if not isinstance(value, str) or not value:
+        return None
+    return value
+
+
+def _prior_conditions(status: Mapping[str, Any] | None) -> object:
+    if not isinstance(status, Mapping):
+        return None
+    return status.get("conditions")
+
+
+def _reject(
+    generation: int,
+    *,
+    reason: str,
+    message: str,
+    accepted_version: str | None = None,
+    status: Mapping[str, Any] | None = None,
+) -> dict[str, Any]:
+    return build_status(
+        generation,
+        accepted_version=accepted_version,
+        conditions=rejected_conditions(reason, message),
+        prior_conditions=_prior_conditions(status),
+    )
 
 
 def reconcile_appliance(
@@ -29,21 +68,57 @@ def reconcile_appliance(
     name = str(meta["name"])
     namespace = str(meta["namespace"])
     generation = int(meta["generation"])
-    version = str(spec["version"])
     owner = {
         "apiVersion": f"{GROUP}/{VERSION}",
         "kind": "CoriolisAppliance",
         "name": name,
         "uid": str(meta["uid"]),
     }
+    if "profile" in spec:
+        profile = str(spec["profile"])
+    else:
+        profile = SUPPORTED_PROFILE
+    requested_version = str(spec["version"])
+    accepted_version = _accepted_version(status)
+
+    if profile != SUPPORTED_PROFILE:
+        return _reject(
+            generation,
+            reason="UnsupportedProfile",
+            message=(
+                f"Profile '{profile}' is not supported; "
+                f"supported profile: {SUPPORTED_PROFILE}."
+            ),
+            accepted_version=accepted_version,
+            status=status,
+        )
+    if accepted_version is not None and requested_version != accepted_version:
+        return build_status(
+            generation,
+            accepted_version=accepted_version,
+            conditions=blocked_conditions(accepted_version, requested_version),
+            prior_conditions=_prior_conditions(status),
+        )
+    if accepted_version is None and requested_version != SUPPORTED_INITIAL_VERSION:
+        return _reject(
+            generation,
+            reason="UnsupportedVersion",
+            message=(
+                f"Version '{requested_version}' is not supported; "
+                f"initial supported version: {SUPPORTED_INITIAL_VERSION}."
+            ),
+            status=status,
+        )
+
     body = build_state_config_map(
         name=name,
         namespace=namespace,
-        version=version,
+        profile=profile,
+        accepted_version=requested_version,
         generation=generation,
         owner=owner,
     )
-    api = core_api or client.CoreV1Api()
+    api = core_api if core_api is not None else client.CoreV1Api()
     api.api_client.default_headers["Content-Type"] = "application/apply-patch+yaml"
     api.patch_namespaced_config_map(
         name=body["metadata"]["name"],
@@ -52,8 +127,12 @@ def reconcile_appliance(
         field_manager="coriolis-operator",
         force=True,
     )
-    prior_conditions = status.get("conditions") if status is not None else None
-    return build_status(generation, prior_conditions=prior_conditions)
+    return build_status(
+        generation,
+        accepted_version=requested_version,
+        conditions=accepted_conditions(),
+        prior_conditions=_prior_conditions(status),
+    )
 
 
 def _handle_reconcile(
@@ -100,6 +179,18 @@ def update_appliance_version(
     **kwargs: Any,
 ) -> None:
     """Reconcile the requested appliance version change."""
+    _handle_reconcile(spec, meta, patch, status, **kwargs)
+
+
+@kopf.on.field(GROUP, VERSION, PLURAL, field="spec.profile")
+def update_appliance_profile(
+    spec: Mapping[str, Any],
+    meta: Mapping[str, Any],
+    patch: kopf.Patch,
+    status: Mapping[str, Any] | None = None,
+    **kwargs: Any,
+) -> None:
+    """Reconcile the requested appliance profile change."""
     _handle_reconcile(spec, meta, patch, status, **kwargs)
 
 
