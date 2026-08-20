@@ -28,7 +28,7 @@ spec:
           image: "{{ .Values.image.repository }}:{{ .Values.image.tag }}"
           imagePullPolicy: {{ .Values.image.pullPolicy }}
           command:
-            - coriolis-operator
+            - /app/.venv/bin/coriolis-operator
           env:
             - name: WATCH_NAMESPACE
               valueFrom:
