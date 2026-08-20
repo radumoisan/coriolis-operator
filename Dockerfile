@@ -14,8 +14,9 @@ RUN uv sync --frozen --no-dev --no-install-project
 COPY src ./src
 RUN uv sync --frozen --no-dev
 
-RUN useradd --create-home --uid 10001 --gid operator operator \
-    && chown -R operator:operator /app
+RUN groupadd --gid 10001 coriolis \
+    && useradd --create-home --uid 10001 --gid coriolis operator \
+    && chown -R operator:coriolis /app
 USER 10001
 
 CMD ["uv", "run", "--no-sync", "coriolis-operator"]

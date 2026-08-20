@@ -9,23 +9,24 @@ rules:
       - coriolis.cloudbase.it
     resources:
       - coriolisappliances
-      - coriolisappliances/status
     verbs:
       - get
       - list
       - watch
       - patch
   - apiGroups:
+      - coriolis.cloudbase.it
+    resources:
+      - coriolisappliances/status
+    verbs:
+      - get
+      - patch
+  - apiGroups:
       - ""
     resources:
       - configmaps
     verbs:
-      - get
-      - list
-      - watch
-      - create
       - patch
-      - update
   - apiGroups:
       - ""
     resources:

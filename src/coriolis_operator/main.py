@@ -22,6 +22,7 @@ def reconcile_appliance(
     *,
     spec: Mapping[str, Any],
     meta: Mapping[str, Any],
+    status: Mapping[str, Any] | None = None,
     core_api: client.CoreV1Api | None = None,
 ) -> dict[str, Any]:
     """Apply appliance state and return the status once Kubernetes accepts it."""
@@ -51,39 +52,55 @@ def reconcile_appliance(
         force=True,
         _content_type="application/apply-patch+yaml",
     )
-    return build_status(generation)
+    prior_conditions = status.get("conditions") if status is not None else None
+    return build_status(generation, prior_conditions=prior_conditions)
 
 
 def _handle_reconcile(
-    spec: Mapping[str, Any], meta: Mapping[str, Any], patch: kopf.Patch, **_: Any
-) -> dict[str, Any]:
-    status = reconcile_appliance(spec=spec, meta=meta)
-    patch.status.update(status)
-    return status
+    spec: Mapping[str, Any],
+    meta: Mapping[str, Any],
+    patch: kopf.Patch,
+    status: Mapping[str, Any] | None = None,
+    **_: Any,
+) -> None:
+    reconciled_status = reconcile_appliance(spec=spec, meta=meta, status=status)
+    patch.status.update(reconciled_status)
 
 
 @kopf.on.create(GROUP, VERSION, PLURAL)
 def create_appliance(
-    spec: Mapping[str, Any], meta: Mapping[str, Any], patch: kopf.Patch, **kwargs: Any
-) -> dict[str, Any]:
+    spec: Mapping[str, Any],
+    meta: Mapping[str, Any],
+    patch: kopf.Patch,
+    status: Mapping[str, Any] | None = None,
+    **kwargs: Any,
+) -> None:
     """Reconcile a newly created appliance."""
-    return _handle_reconcile(spec, meta, patch, **kwargs)
+    _handle_reconcile(spec, meta, patch, status, **kwargs)
 
 
 @kopf.on.resume(GROUP, VERSION, PLURAL)
 def resume_appliance(
-    spec: Mapping[str, Any], meta: Mapping[str, Any], patch: kopf.Patch, **kwargs: Any
-) -> dict[str, Any]:
+    spec: Mapping[str, Any],
+    meta: Mapping[str, Any],
+    patch: kopf.Patch,
+    status: Mapping[str, Any] | None = None,
+    **kwargs: Any,
+) -> None:
     """Reconcile an appliance after controller restart."""
-    return _handle_reconcile(spec, meta, patch, **kwargs)
+    _handle_reconcile(spec, meta, patch, status, **kwargs)
 
 
 @kopf.on.field(GROUP, VERSION, PLURAL, field="spec.version")
 def update_appliance_version(
-    spec: Mapping[str, Any], meta: Mapping[str, Any], patch: kopf.Patch, **kwargs: Any
-) -> dict[str, Any]:
+    spec: Mapping[str, Any],
+    meta: Mapping[str, Any],
+    patch: kopf.Patch,
+    status: Mapping[str, Any] | None = None,
+    **kwargs: Any,
+) -> None:
     """Reconcile the requested appliance version change."""
-    return _handle_reconcile(spec, meta, patch, **kwargs)
+    _handle_reconcile(spec, meta, patch, status, **kwargs)
 
 
 def main() -> None:
