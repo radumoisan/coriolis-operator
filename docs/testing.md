@@ -58,7 +58,7 @@ For the local documentation-only Secret/configuration contract slice, these vali
 - The modified contract page was reviewed for contradictory claims: concrete Secret/ConfigMap names and key layouts and the primary `coriolis.conf` split are stated as frozen, not unresolved, and the remaining genuinely-unresolved items are listed under the contract's Remaining Unresolved Secret Items and Unresolved Gates.
 - `uv run pytest`; `uv run ruff check .`; `uv run ruff format --check .`; `uv run mypy src`; `helm lint helm/`; `helm template coriolis-operator helm/ --include-crds`; `git diff --check`.
 
-This slice is uncommitted, unpushed, and undeployed; the deployed `0.5.3` remains marker-only and unchanged, and no runtime resources or adoption mutations exist.
+This slice is **committed locally at `8ce26ba` on `dev`, but not pushed or deployed**; the deployed `0.5.3` remains marker-only and unchanged, and no runtime resources or adoption mutations exist.
 
 Live-cluster controller lifecycle validation passed for release `0.5.2` in the approved `coriolis` namespace. The currently deployed `0.5.3` retains the marker-only controller behavior and predates this local API slice; full lifecycle validation was not repeated for `0.5.3`.
 
