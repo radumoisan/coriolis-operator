@@ -4,6 +4,7 @@ import hashlib
 import re
 from collections.abc import Mapping, Sequence
 from datetime import UTC, datetime
+from enum import Enum
 from typing import Any
 
 STATE_CONFIG_MAP_SUFFIX = "-operator-state"
@@ -49,7 +50,22 @@ OPERATOR_MANAGEMENT_LABELS = (
 APPLIANCE_NAME_ANNOTATION = "coriolis.cloudbase.it/appliance-name"
 RETENTION_ANNOTATION = "coriolis.cloudbase.it/retention"
 
+# Pre-existing resources the operator references read-only and must never
+# create, adopt, mutate, or classify as operator-retained. The registry pull
+# Secret is the canonical example; it sits outside the retained-resource
+# classifier/reconciliation policy entirely and is always classified as a
+# collision (fail closed) even before the absent check.
+EXTERNAL_READ_ONLY_RESOURCES = ("coriolis-appliance-registry",)
+
 Condition = tuple[str, str, str, str]
+
+
+class RetainedClassification(Enum):
+    """Classification of an existing resource against operator-retained identity."""
+
+    ABSENT = "absent"
+    REUSE = "reuse"
+    COLLISION = "collision"
 
 
 def state_config_map_name(resource_name: str) -> str:
@@ -324,6 +340,79 @@ def classify_existing_marker(
     if existing_data.get("profile") != desired_data.get("profile"):
         return MARKER_COLLISION
     return MARKER_LEGACY
+
+
+def classify_retained_resource(
+    *,
+    existing: Any,
+    resource_name: str,
+    namespace: str,
+    appliance_name: str,
+    component: str,
+    accepted_version: str,
+    retention: str,
+) -> RetainedClassification:
+    """Classify an existing resource against the operator's retained identity.
+
+    An absent resource is eligible for creation (``ABSENT``). A retained
+    resource may be reused automatically only when its deterministic name and
+    namespace and every operator-controlled identity field match the retained
+    metadata produced by ``build_resource_metadata``: the full appliance-name
+    annotation, the standard managed/identity labels, the component label, and
+    the exact retention annotation/class. The object must have **no** owner
+    references; owner plus retention is a collision even if an owner UID
+    matches. Missing/partial/conflicting operator identity metadata is a
+    collision and is never normalized; unrelated extra labels/annotations are
+    permitted. A matching ownerless retained object is ``REUSE`` (no mutation
+    or adoption patching). Anything else is ``COLLISION``.
+
+    The creating appliance CR UID is deliberately **not** part of the identity:
+    retained resources survive CR deletion/recreation, so automatic exact-match
+    reattachment must work even when the CR UID changes. Any stale
+    ``coriolis.cloudbase.it/appliance-uid`` annotation is treated as an
+    unrelated extra annotation and ignored.
+
+    External/pre-existing resources (see ``EXTERNAL_READ_ONLY_RESOURCES``)
+    fail closed as ``COLLISION`` regardless of presence or forged matching
+    metadata, before the absent check, and are never reused.
+
+    ``existing`` may be a mapping-shaped fake or a real Kubernetes model object
+    with snake_case attributes. This is a namespace trust boundary: anyone who
+    can create resources in the namespace can forge the operator's identity
+    metadata, so automatic exact-match reuse must not be treated as proof of
+    origin.
+    """
+    if resource_name in EXTERNAL_READ_ONLY_RESOURCES:
+        return RetainedClassification.COLLISION
+    if existing is None:
+        return RetainedClassification.ABSENT
+    metadata = _field(existing, "metadata")
+    if metadata is None:
+        return RetainedClassification.COLLISION
+    if _field(metadata, "name") != resource_name:
+        return RetainedClassification.COLLISION
+    if _field(metadata, "namespace") != namespace:
+        return RetainedClassification.COLLISION
+    owner_refs = _field(metadata, "ownerReferences")
+    if owner_refs is not None and len(list(owner_refs)) > 0:
+        return RetainedClassification.COLLISION
+    expected = build_resource_metadata(
+        resource_name=resource_name,
+        namespace=namespace,
+        appliance_name=appliance_name,
+        component=component,
+        accepted_version=accepted_version,
+        retention=retention,
+    )
+    labels = _mapping_value(_field(metadata, "labels"))
+    annotations = _mapping_value(_field(metadata, "annotations"))
+    for key, value in expected["labels"].items():
+        if labels.get(key) != value:
+            return RetainedClassification.COLLISION
+    for key, value in expected["annotations"].items():
+        if annotations.get(key) != value:
+            return RetainedClassification.COLLISION
+    return RetainedClassification.REUSE
 
 
 def collision_conditions(namespace: str, name: str) -> list[Condition]:

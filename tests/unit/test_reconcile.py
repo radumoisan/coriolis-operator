@@ -11,12 +11,14 @@ from coriolis_operator import main
 from coriolis_operator.main import reconcile_appliance
 from coriolis_operator.reconcile import (
     APPLIANCE_NAME_ANNOTATION,
+    EXTERNAL_READ_ONLY_RESOURCES,
     MARKER_COLLISION,
     MARKER_LEGACY,
     MARKER_MANAGED,
     RETENTION_ANNOTATION,
     SUPPORTED_INITIAL_VERSION,
     SUPPORTED_PROFILE,
+    RetainedClassification,
     accepted_conditions,
     appliance_identity,
     appliance_resource_name,
@@ -25,6 +27,7 @@ from coriolis_operator.reconcile import (
     build_state_config_map,
     build_status,
     classify_existing_marker,
+    classify_retained_resource,
     collision_conditions,
     rejected_conditions,
     state_config_map_name,
@@ -1222,3 +1225,204 @@ def test_reconcile_retention_annotation_collides_and_skips_ssa() -> None:
     assert statuses["Reconciled"]["reason"] == "ResourceCollision"
     assert statuses["Degraded"]["status"] == "True"
     assert statuses["Degraded"]["reason"] == "ResourceCollision"
+
+
+RETAINED = {
+    "resource_name": "example-data",
+    "namespace": "operators",
+    "appliance_name": "example",
+    "component": "data",
+    "accepted_version": SUPPORTED_INITIAL_VERSION,
+    "retention": "daily",
+}
+
+
+def retained_metadata(meta=None) -> dict:
+    meta = meta or RETAINED
+    return build_resource_metadata(
+        resource_name=meta["resource_name"],
+        namespace=meta["namespace"],
+        appliance_name=meta["appliance_name"],
+        component=meta["component"],
+        accepted_version=meta["accepted_version"],
+        retention=meta["retention"],
+    )
+
+
+def retained_body(meta=None) -> dict:
+    meta = meta or RETAINED
+    return {"metadata": retained_metadata(meta)}
+
+
+def classify(existing, meta=None) -> RetainedClassification:
+    meta = meta or RETAINED
+    return classify_retained_resource(
+        existing=existing,
+        resource_name=meta["resource_name"],
+        namespace=meta["namespace"],
+        appliance_name=meta["appliance_name"],
+        component=meta["component"],
+        accepted_version=meta["accepted_version"],
+        retention=meta["retention"],
+    )
+
+
+def _ret_annotation(body, value):
+    body["metadata"]["annotations"][APPLIANCE_NAME_ANNOTATION] = value
+    return body
+
+
+def _ret_label(body, key, value):
+    body["metadata"]["labels"][key] = value
+    return body
+
+
+def _ret_drop_label(body, key):
+    del body["metadata"]["labels"][key]
+    return body
+
+
+def _ret_drop_annotation(body, key):
+    del body["metadata"]["annotations"][key]
+    return body
+
+
+def _ret_add_owner(body):
+    body["metadata"]["ownerReferences"] = [dict(OWNER, controller=True)]
+    return body
+
+
+def to_v1_retained(body, kind="secret") -> object:
+    meta = body["metadata"]
+    owner_refs = [
+        client.V1OwnerReference(
+            api_version=ref["apiVersion"],
+            kind=ref["kind"],
+            name=ref["name"],
+            uid=ref["uid"],
+            controller=ref.get("controller"),
+        )
+        for ref in meta.get("ownerReferences", [])
+    ]
+    object_meta = client.V1ObjectMeta(
+        name=meta["name"],
+        namespace=meta["namespace"],
+        labels=meta.get("labels"),
+        annotations=meta.get("annotations"),
+        owner_references=owner_refs or None,
+    )
+    if kind == "pvc":
+        return client.V1PersistentVolumeClaim(metadata=object_meta)
+    return client.V1Secret(metadata=object_meta)
+
+
+def test_retained_absent_is_eligible_for_creation() -> None:
+    assert classify(None) == RetainedClassification.ABSENT
+
+
+@pytest.mark.parametrize(
+    "kind",
+    ["secret", "pvc"],
+)
+def test_retained_exact_match_is_reuse(kind: str) -> None:
+    body = retained_body()
+    existing = to_v1_retained(body, kind=kind)
+
+    assert classify(existing) == RetainedClassification.REUSE
+    assert classify(body) == RetainedClassification.REUSE
+
+
+def test_retained_dict_exact_match_is_reuse() -> None:
+    assert classify(retained_body()) == RetainedClassification.REUSE
+
+
+def test_retained_changed_cr_uid_with_otherwise_exact_identity_is_reuse() -> None:
+    body = retained_body()
+    body["metadata"]["annotations"]["coriolis.cloudbase.it/appliance-uid"] = "stale-uid"
+    assert classify(body) == RetainedClassification.REUSE
+
+
+def test_retained_retention_annotation_mismatch_collides() -> None:
+    body = retained_body()
+    body["metadata"]["annotations"][RETENTION_ANNOTATION] = "weekly"
+    assert classify(body) == RetainedClassification.COLLISION
+
+
+@pytest.mark.parametrize(
+    "mutate",
+    [
+        lambda body: _ret_annotation(body, "other"),
+        lambda body: _ret_label(body, "coriolis.cloudbase.it/appliance", "other"),
+        lambda body: _ret_label(body, "coriolis.cloudbase.it/component", "other"),
+        lambda body: _ret_label(body, "app.kubernetes.io/managed-by", "other"),
+        lambda body: _ret_label(body, "app.kubernetes.io/version", "2026.9.0"),
+    ],
+)
+def test_retained_conflicting_identity_field_collides(mutate) -> None:
+    assert classify(mutate(retained_body())) == RetainedClassification.COLLISION
+
+
+def test_retained_name_mismatch_collides() -> None:
+    body = retained_body()
+    body["metadata"]["name"] = "other-data"
+    assert classify(body) == RetainedClassification.COLLISION
+
+
+def test_retained_namespace_mismatch_collides() -> None:
+    body = retained_body()
+    body["metadata"]["namespace"] = "other"
+    assert classify(body) == RetainedClassification.COLLISION
+
+
+@pytest.mark.parametrize(
+    "mutate",
+    [
+        lambda body: _ret_drop_label(body, "coriolis.cloudbase.it/appliance"),
+        lambda body: _ret_drop_label(body, "coriolis.cloudbase.it/component"),
+        lambda body: _ret_drop_label(body, "app.kubernetes.io/component"),
+        lambda body: _ret_drop_annotation(body, APPLIANCE_NAME_ANNOTATION),
+        lambda body: _ret_drop_annotation(body, RETENTION_ANNOTATION),
+    ],
+)
+def test_retained_missing_partial_identity_metadata_collides(mutate) -> None:
+    assert classify(mutate(retained_body())) == RetainedClassification.COLLISION
+
+
+def test_retained_any_owner_reference_collides() -> None:
+    body = _ret_add_owner(retained_body())
+    assert classify(body) == RetainedClassification.COLLISION
+
+
+def test_retained_matching_owner_uid_still_collides() -> None:
+    body = _ret_add_owner(retained_body())
+    body["metadata"]["ownerReferences"][0]["uid"] = OWNER["uid"]
+    assert classify(body) == RetainedClassification.COLLISION
+
+
+def test_retained_unrelated_extra_metadata_is_allowed() -> None:
+    body = retained_body()
+    body["metadata"]["labels"]["example.com/extra"] = "x"
+    body["metadata"]["annotations"]["example.com/extra"] = "y"
+    assert classify(body) == RetainedClassification.REUSE
+
+
+def test_retained_external_read_only_secret_is_never_reused() -> None:
+    external_meta = dict(RETAINED)
+    external_meta["resource_name"] = "coriolis-appliance-registry"
+    assert "coriolis-appliance-registry" in EXTERNAL_READ_ONLY_RESOURCES
+
+    assert classify(None, external_meta) == RetainedClassification.COLLISION
+
+    forged = retained_body(external_meta)
+    assert classify(forged, external_meta) == RetainedClassification.COLLISION
+
+
+def test_retained_non_mapping_metadata_collides() -> None:
+    assert classify({"metadata": "not-a-mapping"}) == RetainedClassification.COLLISION
+
+
+def test_retained_no_input_mutation() -> None:
+    body = retained_body()
+    before = copy.deepcopy(body)
+    classify(body)
+    assert body == before
