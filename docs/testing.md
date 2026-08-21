@@ -60,6 +60,13 @@ For the local documentation-only Secret/configuration contract slice, these vali
 
 This slice is **committed locally at `8ce26ba` on `dev`, but not pushed or deployed**; the deployed `0.5.3` remains marker-only and unchanged, and no runtime resources or adoption mutations exist.
 
+## :material-book-open-page-variant-outline: Pure Secret/ConfigMap Builder Slice
+
+- 116 total tests, including 22 new builder cases from the previous 94; 21 cases matched the final focused selector. Coverage includes deterministic names/standard metadata; ownerless retained credential Secrets with retention metadata; owner-referenced rebuildable configuration resources without retention; exact key sets; opaque caller-provided string inputs without mutation; missing, extra, and non-string input failures without value exposure; `Opaque` UTF-8/base64 Secret `data` with no `stringData`; and plain six-file ConfigMap data that excludes `coriolis.conf` and credentials.
+- `uv run ruff check .`; `uv run ruff format --check .`; `uv run mypy src`; `helm lint helm/`; `helm template coriolis-operator helm/ --include-crds`; and `git diff --check` passed.
+
+The five pure builders (`build_coriolis_credentials_secret`, `build_infrastructure_credentials_secret`, `build_step_ca_credentials_secret`, `build_coriolis_config_map`, and `build_coriolis_config_secret`) are **committed locally at `050f16e` on `dev`, but not pushed or deployed**. This covers manifest construction only: no credential generation, `main.py` reconciliation, Kubernetes reads/SSA, RBAC, CRD, runtime resources, status/readiness, or deployment changed; deployed `0.5.3` remains marker-only.
+
 Live-cluster controller lifecycle validation passed for release `0.5.2` in the approved `coriolis` namespace. The currently deployed `0.5.3` retains the marker-only controller behavior and predates this local API slice; full lifecycle validation was not repeated for `0.5.3`.
 
 The approved dev cluster is `infra-dev-buc-hq` (`virt-infra-dev-buc-hq`); CIXpress remains approved for read-only pipeline troubleshooting and monitoring only. The dedicated operator namespace is `coriolis`. See [Development Environment](dev-environment.md).
