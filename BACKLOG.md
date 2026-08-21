@@ -130,6 +130,12 @@
 - Jinja uses `PackageLoader`, `StrictUndefined`, disabled autoescape, and a trailing newline with byte-identical immutable upstream base and all 16 provider fragments. Frozen provider lists/order/module maps, source-audited values/paths, source/license attribution, prohibited custom overrides, and disabled compression/compressor are enforced.
 - Validation passed: 40 focused configuration tests, 215 total tests, Ruff lint/format, strict mypy, Helm lint/template, `git diff --check`, 17/17 source byte parity, and offline wheel inspection with exactly 25 expected template resources. No `main.py`, reconciliation, Kubernetes reads/writes/SSA, RBAC, CRD, runtime resources/workloads, chart/release/image version, deployment, TLS/CA/bootstrap, provider/private data, optional credentials, storage, readiness, or rotation behavior changed.
 
+## Documented Locally: Foundational Multi-Resource Failure Contract
+
+- The documentation-only policy in [docs/foundational-resource-contract.md](docs/foundational-resource-contract.md) is frozen: validate; pre-read/classify the marker and all five foundational resources; complete pure preflight, generation, rendering, and manifest preparation before writes; apply in canonical order; and apply the marker last. This is a pre-mutation barrier, not a Kubernetes transaction: no rollback, compensation, or deletion; stop on the first apply failure, preserve earlier successes, skip later writes, and retry from fresh reads.
+- `ABSENT` uses create with `AlreadyExists` retry/preflight; managed or legacy objects use resource-version/concurrency-guarded SSA with `Conflict` retry/preflight; `force` never bypasses classification or concurrency; retained `REUSE` is no-write. Retryable read/apply/marker failures use value-safe `ResourceReadFailed`, `ResourceApplyFailed`, or `MarkerApplyFailed` status before framework retry, while stable `ResourceCollision` remains non-transient and mutation-free. The marker records foundational completion only, never readiness, transactionality, or no-drift proof; `Ready=False/RuntimeNotImplemented` remains truthful.
+- This changes no `main.py`, reconciliation, Kubernetes reads/writes, RBAC, SSA, status retry code, CRD, runtime resource, chart/release, or deployment behavior; deployed `0.5.3` remains marker-only.
+
 ## Pending CIXpress Integration
 
 - Receive and add the exact CIXpress pipeline configuration, Template, and Job manifests.
@@ -140,11 +146,10 @@
 ## Planned: Kubernetes-Native Core Runtime
 
 1. Image inventory and pull gate are complete. RC4 failed (Build `868` exported an OVA but no `2608*` tag exists, so RC4 is OVA-only and must not be used); the approved fallback is exact official release `2603.4`. Recorded immutable digests, entrypoints, users, listeners, health capabilities, compatibility, and `registry.cloudbase.it/appliance` access in [the image inventory ledger](docs/image-inventory.md), and mirrored all 26 approved images to `cr.virtomat.io/virtomat/coriolis` (see the mirror section above). Pull validation in `virt-infra-dev-buc-hq` namespace `coriolis` passed using the destination Secret `coriolis-appliance-registry` (type `kubernetes.io/dockerconfigjson`): all 21 initial-runtime image references pulled successfully and no pull-validation Pods remain. This gate is complete.
-2. Freeze multi-resource read/apply failure, reconciliation status, atomicity, and marker-last semantics.
-3. Only then implement runtime collision-safe pre-reads for all five resources, minimal Secret/ConfigMap RBAC, and SSA. Runtime integration is not currently unblocked; retained adoption/runtime construction remains separately deferred. Decoded values remain internal and must never be logged, statused, or evented. TLS/optional credentials/storage/probes/readiness/bootstrap/rotation remain deferred. No runtime workloads are implemented or deployed.
-4. Implement MariaDB, RabbitMQ, Memcached, Keystone, Barbican, Step CA, InfluxDB/logger compatibility, API, conductor, scheduler, transfer cron, minion manager, deployer manager, privileged worker, compressor, web, and web proxy.
-5. Add server-side apply, controller watches, status/readiness, tests, and development acceptance. `Ready=True` requires mandatory Jobs, dependencies, workloads, and internal UI/API checks.
-6. Retain PVCs, CA state, and state credentials on deletion; delete only operator-owned workloads, Services, Jobs, and generated ConfigMaps. Never delete pre-existing referenced Secrets. Avoid a destructive finalizer.
+2. Implement collision-safe runtime pre-reads and create/guarded SSA for all five resources plus the marker, minimal Secret/ConfigMap `get`/`create`/`patch` RBAC, status-then-Kopf-retry wiring, and exhaustive tests. The policy gate is closed, but runtime integration remains blocked until this implementation passes. Retained adoption/runtime construction remains separately deferred. Decoded values remain internal and must never be logged, statused, or evented. TLS/optional credentials/storage/probes/readiness/bootstrap/rotation remain deferred. No runtime workloads are implemented or deployed.
+3. Implement MariaDB, RabbitMQ, Memcached, Keystone, Barbican, Step CA, InfluxDB/logger compatibility, API, conductor, scheduler, transfer cron, minion manager, deployer manager, privileged worker, compressor, web, and web proxy.
+4. Add server-side apply, controller watches, status/readiness, tests, and development acceptance. `Ready=True` requires mandatory Jobs, dependencies, workloads, and internal UI/API checks.
+5. Retain PVCs, CA state, and state credentials on deletion; delete only operator-owned workloads, Services, Jobs, and generated ConfigMaps. Never delete pre-existing referenced Secrets. Avoid a destructive finalizer.
 
 ## Pending Decisions
 
