@@ -12,11 +12,14 @@ from coriolis_operator import main
 from coriolis_operator.main import reconcile_appliance
 from coriolis_operator.reconcile import (
     APPLIANCE_NAME_ANNOTATION,
+    CORIOLIS_CREDENTIALS_KEYS,
     EXTERNAL_READ_ONLY_RESOURCES,
+    INFRASTRUCTURE_CREDENTIALS_KEYS,
     MARKER_COLLISION,
     MARKER_LEGACY,
     MARKER_MANAGED,
     RETENTION_ANNOTATION,
+    STEP_CA_CREDENTIALS_KEYS,
     SUPPORTED_INITIAL_VERSION,
     SUPPORTED_PROFILE,
     RetainedClassification,
@@ -40,6 +43,7 @@ from coriolis_operator.reconcile import (
     generate_step_ca_credentials,
     rejected_conditions,
     state_config_map_name,
+    validated_retained_secret_values,
 )
 
 CONDITION_TYPES = [
@@ -843,6 +847,140 @@ def test_resource_builders_do_not_mutate_inputs(
     builder(**kwargs)
 
     assert values == original
+
+
+@pytest.mark.parametrize(
+    ("builder", "values", "expected_keys"),
+    [
+        (
+            build_coriolis_credentials_secret,
+            CORIOLIS_CREDENTIALS,
+            CORIOLIS_CREDENTIALS_KEYS,
+        ),
+        (
+            build_infrastructure_credentials_secret,
+            INFRASTRUCTURE_CREDENTIALS,
+            INFRASTRUCTURE_CREDENTIALS_KEYS,
+        ),
+        (
+            build_step_ca_credentials_secret,
+            STEP_CA_CREDENTIALS,
+            STEP_CA_CREDENTIALS_KEYS,
+        ),
+    ],
+)
+def test_validated_retained_secret_values_round_trips_retained_builders(
+    builder, values: dict[str, str], expected_keys: frozenset[str]
+) -> None:
+    body = builder(
+        appliance_name="example",
+        namespace="operators",
+        accepted_version="2603.4",
+        retention="retain",
+        values=values,
+    )
+
+    result = validated_retained_secret_values(
+        existing=body, expected_keys=expected_keys
+    )
+
+    assert result == values
+    assert result is not values
+
+
+def test_validated_retained_secret_values_supports_v1_secret_and_absent_identity() -> (
+    None
+):
+    secret = client.V1Secret(
+        type="Opaque",
+        data={"credential": base64.b64encode(b"synthetic decoded").decode("ascii")},
+    )
+
+    assert validated_retained_secret_values(
+        existing=secret, expected_keys=frozenset({"credential"})
+    ) == {"credential": "synthetic decoded"}
+    assert validated_retained_secret_values(
+        existing={"type": "Opaque", "data": secret.data},
+        expected_keys=frozenset({"credential"}),
+    ) == {"credential": "synthetic decoded"}
+
+
+@pytest.mark.parametrize(
+    "existing",
+    [
+        {"apiVersion": "v2", "kind": "Secret", "type": "Opaque", "data": {}},
+        {"apiVersion": "v1", "kind": "ConfigMap", "type": "Opaque", "data": {}},
+        {"kind": "Secret", "type": None, "data": {}},
+        {"kind": "Secret", "type": "kubernetes.io/tls", "data": {}},
+        {"kind": "Secret", "type": "Opaque", "stringData": {}, "data": {}},
+        {"kind": "Secret", "type": "Opaque", "stringData": {"x": "y"}, "data": {}},
+        {"kind": "Secret", "type": "Opaque"},
+        {"kind": "Secret", "type": "Opaque", "data": "not-a-mapping"},
+        {"kind": "Secret", "type": "Opaque", "data": {}},
+        {"kind": "Secret", "type": "Opaque", "data": {"unexpected": "eA=="}},
+        {
+            "kind": "Secret",
+            "type": "Opaque",
+            "data": {"credential": "eA==", "unexpected": "eA=="},
+        },
+        {"kind": "Secret", "type": "Opaque", "data": {"credential": 1}},
+        {
+            "kind": "Secret",
+            "type": "Opaque",
+            "data": {"credential": "synthetic-encoded-sentinel"},
+        },
+        {
+            "kind": "Secret",
+            "type": "Opaque",
+            "data": {"credential": "/w=="},
+        },
+        {"kind": "Secret", "type": "Opaque", "data": {"credential": ""}},
+    ],
+    ids=(
+        "wrong-api-version",
+        "wrong-kind",
+        "missing-type",
+        "wrong-type",
+        "empty-string-data",
+        "present-string-data",
+        "missing-data",
+        "non-mapping-data",
+        "empty-keys",
+        "missing-required-key",
+        "extra-key",
+        "non-string-value",
+        "malformed-base64",
+        "invalid-utf8",
+        "decoded-empty-value",
+    ),
+)
+def test_validated_retained_secret_values_rejects_invalid_persisted_shapes(
+    existing: object,
+) -> None:
+    with pytest.raises(ValueError) as excinfo:
+        validated_retained_secret_values(
+            existing=existing, expected_keys=frozenset({"credential"})
+        )
+
+    message = str(excinfo.value)
+    assert "synthetic-encoded-sentinel" not in message
+    assert "synthetic decoded" not in message
+
+
+def test_validated_retained_secret_values_does_not_mutate_input() -> None:
+    existing = {
+        "type": "Opaque",
+        "data": {"credential": base64.b64encode(b"synthetic decoded").decode("ascii")},
+    }
+    before = copy.deepcopy(existing)
+
+    result = validated_retained_secret_values(
+        existing=existing, expected_keys=frozenset({"credential"})
+    )
+
+    assert existing == before
+    assert result == {"credential": "synthetic decoded"}
+    assert result is not existing["data"]
 
 
 def test_build_status_reports_accepted_api_only_slice() -> None:

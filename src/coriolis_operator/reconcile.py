@@ -462,6 +462,42 @@ def _field(obj: Any, name: str) -> Any:
     return value
 
 
+def validated_retained_secret_values(
+    *, existing: Any, expected_keys: frozenset[str]
+) -> dict[str, str]:
+    """Return validated decoded values from a persisted retained Secret."""
+    api_version = _field(existing, "apiVersion")
+    if api_version is not None and api_version != "v1":
+        raise ValueError("retained Secret apiVersion is invalid")
+    kind = _field(existing, "kind")
+    if kind is not None and kind != "Secret":
+        raise ValueError("retained Secret kind is invalid")
+    if _field(existing, "type") != "Opaque":
+        raise ValueError("retained Secret type is invalid")
+    if _field(existing, "stringData") is not None:
+        raise ValueError("retained Secret must not contain stringData")
+
+    data = _field(existing, "data")
+    if not isinstance(data, Mapping):
+        raise ValueError("retained Secret data is invalid")
+    if set(data) != expected_keys:
+        raise ValueError("retained Secret data keys are invalid")
+
+    decoded: dict[str, str] = {}
+    for key in sorted(expected_keys):
+        encoded = data[key]
+        if not isinstance(encoded, str):
+            raise ValueError("retained Secret data values are invalid")
+        try:
+            value = base64.b64decode(encoded, validate=True).decode("utf-8")
+        except (UnicodeDecodeError, ValueError):
+            raise ValueError("retained Secret data encoding is invalid") from None
+        if not value:
+            raise ValueError("retained Secret data values must be non-empty")
+        decoded[key] = value
+    return decoded
+
+
 def _owner_reference_dict(ref: Any) -> dict[str, Any]:
     if isinstance(ref, Mapping):
         return {
