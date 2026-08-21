@@ -79,6 +79,14 @@ Exact immutable manifest digests for support images at tag `2023.1-ubuntu-jammy`
 | memcached | `746b93082a4f6d07f464e93d4b14f5e30510abf17a9ae0a4af20e111408c8f1e` |
 | rabbitmq | `a595bf6f306ded2b6ad01f068ef69255df72eb73d471ba73ce9bbf0470d15d8a` |
 
+### :material-application-edit-outline: MariaDB Runtime Evidence
+
+The authoritative MariaDB image was anonymously inspected and pulled by digest: `cr.virtomat.io/virtomat/coriolis/mariadb-server@sha256:22cb109d23d1aa6a6acb17e54657b5b9cd753837b01345b52fc3c35cbbd9981e`. It is Linux/amd64; image user `mysql` is UID/GID `42434:42434` with supplemental `kolla` group `42400`; Entrypoint is `dumb-init --`; Cmd is `kolla_start`; Kolla is `16.6.1`; MariaDB is `10.6.22`; it has no OCI healthcheck; data is `/var/lib/mysql`; runtime socket/PID files are under `/run/mysqld`; and it listens on `3306`.
+
+Local disposable Docker validation proved direct `mariadbd` single-node non-Galera operation (`wsrep_on=OFF`) as `42434:42434` with read-only root, no-new-privileges, all capabilities dropped, writable `/var/lib/mysql`, `/run/mysqld`, and `/tmp`, bind `0.0.0.0:3306`, 64M packet limit, 256M InnoDB log size, and utf8mb4/InnoDB. It initialized absent system tables only with `mariadb-install-db`, used mode-0600 ephemeral SQL/client files for raw credentials without credential environment variables, command arguments, logs, or output, performed idempotent database/user/grant bootstrap and authenticated TCP `SELECT 1`, and preserved a durable marker across clean stop and recreation with the same Docker volume. All disposable resources were removed.
+
+`kolla_start` is not an operator path: it fails without `/var/lib/kolla/config_files/config.json`, requires `DB_ROOT_PASSWORD`, and passes client passwords in process arguments. `healthcheck_mariadb` and `clustercheck` are Galera-specific and fail against a healthy non-Galera server. This evidence does not select a Kubernetes workload contract. MariaDB remains blocked on workload kind; PVC ownership/fsGroup behavior; storage class/size, access mode, and retention; exact generated ConfigMap/Secret/init-container/start-script manifests; probe timing/thresholds/failure behavior; resources; lifecycle and recovery policy; and reliable container log capture. The CRD has no storage configuration. `log-error=/dev/stderr` failed by attempting `/dev/stderr.err`; bare `log-error` did not prove Docker-observable readiness logs.
+
 ## :material-book-open-page-variant-outline: Third-Party Images
 
 Step CA is **pinned and mirrored** as historical inventory: sourced by exact digest `sha256:e9e8fa3262bf37b130962ffddbf6a64ac188f0bbb80959cf3ddc04c6bf294c3d` from `smallstep/step-ca` and mirrored to `cr.virtomat.io/virtomat/coriolis/step-ca:2603.4`. Independent destination verification returned the exact expected digest. It is deferred and is not selected for the current initial runtime.

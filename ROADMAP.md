@@ -44,7 +44,7 @@
 
 ## Later Milestones
 
-- The local documentation-only dependency workload evidence gate is recorded. Close OCI, configuration, storage, bootstrap, and probe blockers for all four dependencies, beginning with MariaDB's single-node, persistence, startup, and probe contract. Implement workloads only after eligibility; remaining backend Services and Ingress routes stay deferred until their backends are defined.
+- MariaDB image and standalone runtime evidence is closed locally: the exact digest, non-Galera direct startup, restricted runtime, value-safe bootstrap, and volume recreation path are recorded. Its Kubernetes contract remains blocked on workload kind, storage/PVC ownership and fsGroup behavior, access/retention, generated manifests, probes, resources, lifecycle/recovery, and reliable logs; the CRD has no storage configuration. Implement workloads only after eligibility; remaining dependency blockers, backend Services, and Ingress routes stay deferred.
 - Add safe upgrade and production lifecycle capabilities after explicit contracts and operational review.
 
 ## Pending Decisions
