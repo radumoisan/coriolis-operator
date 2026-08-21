@@ -67,6 +67,13 @@ This slice is **committed locally at `8ce26ba` on `dev`, but not pushed or deplo
 
 The five pure builders (`build_coriolis_credentials_secret`, `build_infrastructure_credentials_secret`, `build_step_ca_credentials_secret`, `build_coriolis_config_map`, and `build_coriolis_config_secret`) are **committed locally at `050f16e` on `dev`, but not pushed or deployed**. This covers manifest construction only: no credential generation, `main.py` reconciliation, Kubernetes reads/SSA, RBAC, CRD, runtime resources, status/readiness, or deployment changed; deployed `0.5.3` remains marker-only.
 
+## :material-book-open-page-variant-outline: Pure Retained Credential Generation Slice
+
+- 132 total tests, including 16 new cases from the previous 116, plus focused tests. Coverage includes independent generation of all seven frozen keys through `secrets.token_urlsafe(32)` (32 random bytes/256 bits, URL-safe opaque strings), deterministic token-factory injection for tests only, invalid empty/non-string factory outputs failing without value exposure, unchanged composition with existing builders, and no credential values in failures.
+- `uv run ruff check .`; `uv run ruff format --check .`; `uv run mypy src`; `helm lint helm/`; `helm template coriolis-operator helm/ --include-crds`; and `git diff --check` passed.
+
+The pure helpers `generate_coriolis_credentials`, `generate_infrastructure_credentials`, and `generate_step_ca_credentials` are **committed locally at `a604579` on `dev`, but not pushed or deployed**. They are not called by `main.py`; no controller reconciliation, Kubernetes reads/writes/SSA, RBAC, CRD, runtime resources, status/readiness, chart/release, deployment, or rotation changed, and deployed `0.5.3` remains marker-only. The frozen policy is operator-generated only, with no inline CR credential values or external credential Secret source. Runtime generate-once/reuse remains pending: generate only for `ABSENT`, reuse exact matching ownerless retained Secrets unchanged, fail closed on collisions, and defer rotation.
+
 Live-cluster controller lifecycle validation passed for release `0.5.2` in the approved `coriolis` namespace. The currently deployed `0.5.3` retains the marker-only controller behavior and predates this local API slice; full lifecycle validation was not repeated for `0.5.3`.
 
 The approved dev cluster is `infra-dev-buc-hq` (`virt-infra-dev-buc-hq`); CIXpress remains approved for read-only pipeline troubleshooting and monitoring only. The dedicated operator namespace is `coriolis`. See [Development Environment](dev-environment.md).
