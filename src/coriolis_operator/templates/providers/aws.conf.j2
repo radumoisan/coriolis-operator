@@ -1,0 +1,57 @@
+[aws_migration_provider]
+# The OS migration image map to use. This mapping will be used to spin up
+# the disk export worker needed to replicate the export disks and OS morphing
+# worker needed to morph the OS being migrated.
+# migr_image_map = linux: ami-50946030, windows: ami-50946031
+
+# ID of a pre-existing image on the source AWS to be used
+# for the temporary export worker VM on the source. The image
+# must be available to the region provided in the Source options.
+# export_image = ami-50946030
+
+# A map similar with migr_image_map, where we specify the username for each OS
+# image. On EC2, various linux distributions, have different usernames.
+# Default is 'ubuntu' for Linux and 'coriolis' for Windows.
+# migr_image_username_map = linux: ubuntu, windows: coriolis
+
+# Name of the instance type to be used for the disk copy workers.
+# Default is t2.medium.
+worker_instance_type = t2.medium
+
+# Default instance type used for final migrated instances.
+# instance_type = t2.medium
+
+# Whether or not to attempt to retain the IP addresses the VM had on the
+# source. This requires that the mapped subnets on AWS include the respective
+# IP address(es) in their ranges.
+# Default is False.
+retain_source_ip = false
+
+# The storage type to default to for the disks of Migrated VMs if an explicit
+# storage mapping was not supplied during the Replica/Migration creation.
+# Default is 'standard'
+default_storage_type = standard
+
+# Default AD to use when creating resources for Migrated/Replicated VMs.
+# Must be in the same region as specified within the connection info.
+# availability_zone = az1
+
+# Default name of the AWS Region for the export provider.
+export_default_region = us-west-2
+
+# Default name of the AWS Region for the import provider.
+import_default_region = us-west-2
+
+# What mechanism to use when sending disk data from the Coriolis installation
+# to the temporary VMs on the target AWS to be written to their
+# respective disk. The HTTPS-based transfer mechanism (TCP/5566) is faster but
+# might not work if there are firewalls in the way. The SSH-based transfer
+# mechanism (TCP/22) is more costly but will be allowed by most firewalls since
+# SSH access from the Coriolis installation to the temporary worker VM is always
+# required. Coriolis automatically sets security groups rules for the temporary
+# VMs accordingly.
+# Choices are 'SSH' or 'HTTPS'. Default is 'HTTPS'.
+data_transfer_mechanism = HTTPS
+
+# Location of the Cloudbase-Init ZIP for amd64 systems
+cloudbaseinit_x64_url = https://www.cloudbase.it/downloads/CloudbaseInitSetup_Stable_x64.zip

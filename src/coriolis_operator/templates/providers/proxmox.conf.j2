@@ -1,0 +1,95 @@
+[proxmox_migration_provider]
+
+# Default Proxmox node to migrate to.
+import_node = ""
+
+# The name of a storage datastore to default to for migrated VMs' disks.
+import_default_storage = "zfs1"
+
+# The device model to use for disks for the migrated VMs.
+# If using a paravirtual device model such as VirtIO, the OSMorphing process is recommended.
+disks_device_model = "virtio"
+
+# The extra config for the migrated VM disks. Provide an options dictionary,
+# e.g. discard: on, iothread: 1. Currently supported: discard (on/ignore).
+# vm_disks_extra_properties = discard: on
+
+# Whether or not to skip starting migrated virtual machines on Proxmox after transferring them.
+skip_migrated_vm_start = false
+
+# Whether or not to force enable KVM hardware virtualization.
+force_enable_kvm = false
+
+# Whether or not to use thin-provisioned disks (qcow2) for the migrated VM.
+# Applicable to storage backends that support qcow snapshots.
+use_qcow_disk = false
+
+# Default virtual CPU model to use for migrated VMs.
+# Note that some CPU models might not be compatible with all CPU vendors.
+# Additionally, using the 'host' model might lead to incompatibilities in
+# live-migrating between hosts with different physical CPU models.
+import_default_cpu_model = "x86-64-v2-AES"
+
+# The device model to use for network interfaces for the migrated VMs.
+# If using a paravirtual device model such as VirtIO, the OSMorphing process is recommended.
+nics_device_model = "virtio"
+
+# The scsi controller type to use for disks for the migrated VMs."
+scsi_controller_model = "virtio-scsi-pci"
+
+# The machine type to use for the migrated VMs.
+machine_type = "q35"
+
+# Whether or not to enable the cluster-wide Proxmox firewall configuration migrated VMs.
+nics_enable_firewall = true
+
+# Sets whether or not to configure the VM to use DHCP during the OSMorphing stage.
+set_dhcp = true
+
+# Whether or not Coriolis should reconfigure Cloud-init/Cloudbase-init during the
+# OSMorphing process to prevent them from creating a new system user or
+# disabling the root user and other existing users, including by disabling
+# password-based SSH authentication, or locking the user by changing/removing
+# its password completely. This will also prevent the application of
+# the 'Cloud-init New Username/Password/Update Packages/Authorized SSH Keys'
+# environment options."
+retain_user_credentials = true
+
+# Whether or not Coriolis should preserve the MAC addresses of the network interfaces
+# of the migrated VMs. In order to avoid MAC address conflicts, please
+# ensure that the addresses will not conflict with existing Proxmox VMs
+# on the same network(s), or that the source and target platforms do NOT share
+# the same L2 VM network.
+preserve_mac_addresses = false
+
+# The name/ID of an Ubuntu 22.04 Linux template on the provided 'import_node'.
+# Must have Cloud-init and the Qemu-guest-agent installed and ready for a first run.
+linux_template = "coriolis-minion-ubuntu-22.04"
+
+# The name/ID of a Windows template on the provided 'import_node'. Must have the
+# Qemu-guest-agent installed, Must have WinRM/HTTPS enabled, and the
+# QEMU guest agent installed and configured.
+windows_template = "coriolis-minion-ws-2022"
+
+# URL to a .iso file containing the Windows VirtIO drivers to be injected
+# within Windows instances being migrated to Proxmox. The URL must be accessible
+# from the OSMorphing worker VM which will be deployed on Proxmox.
+windows_virtio_iso_url = "https://fedorapeople.org/groups/virt/virtio-win/direct-downloads/stable-virtio/virtio-win.iso"
+
+# The HTTP(S) URL of the .ZIP file containing the Cloudbase-Init release
+# Coriolis should install within migrated amd64 Windows guests.
+cloudbaseinit_x64_url = https://www.cloudbase.it/downloads/CloudbaseInitSetup_Stable_x64.zip
+
+# The HTTP(S) URL of the .ZIP file containing the Cloudbase-Init release
+# Coriolis should install within migrated i386 Windows guests.
+cloudbaseinit_x86_url = https://www.cloudbase.it/downloads/CloudbaseInitSetup_Stable_x86.zip
+
+# What mechanism to use when sending disk data from the Coriolis installation
+# to the temporary VMs on the target Proxmox to be written to their
+# respective disk. The HTTPS-based transfer mechanism (TCP/5566) is faster but
+# might not work if there are firewalls in the way. The SSH-based transfer
+# mechanism (TCP/22) is more costly but will be allowed by most firewalls since
+# SSH access from the Coriolis installation to the temporary worker VM is always
+# required.
+# Choices are 'SSH' or 'HTTPS'. Default is 'HTTPS'.
+data_transfer_mechanism = HTTPS

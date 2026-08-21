@@ -1,0 +1,95 @@
+[oracle_vm_migration_provider]
+### Shared parameters:
+# Default repository name on OVM to export/import from/to:
+# repository_name = repo1
+
+### Export parameters:
+# Whether or not Coriolis should use the in-house Exporter service to export
+# VMs' disks. This requires that the Coriolis Exporter service be pre-installed
+# on the Oracle VMM host.
+# use_coriolis_exporter = False
+
+# If using the Coriolis exporter, this option can be used to provide a local
+# path to the CA certificate chain for the OVMM and Exporter endpoint.
+# Alternatively, one may use 'allow_untrusted' directly in the Coriolis
+# endpoint to skip certificate validation during VM exports.
+# ca_chain =
+
+# Details of an existing Oracle Linux template on OVM to use for the temporary
+# machines which perform the disk hashing/export process.
+# The template should have OVMd pre-installed, and should be configured with a
+# network interface attached to a network which is both reachable by the
+# Coriolis installation, as well as have a DHCP server available on it for
+# allocating IP addresses to the temporary machines.
+# export_template = OracleLinux7_template
+# export_template_username = root
+# export_template_password = Passw0rd
+
+### Import parameters:
+# If migrating/replicating a heterogeneous workload with both Linux and
+# Windows instances, separate template names or IDs will need to be provided
+# # for the temporary OSMorphing workers for each OS type.
+# The 'linux' image will be used for the disk copy worker during the replica
+# execution process as well
+# Only accepted keys are 'linux' and 'windows'
+# migr_template_map = linux: OracleLinux7_template, windows: WS2016_template
+
+# Default OS label.
+# os_label = 'Other Linux'
+
+# Default migration template guest OS username.
+# migr_template_username_map = linux: root, windows: Administrator
+
+# Default migration template guest OS password.
+# migr_template_password_map = linux: Passw0rd, windows: Passw0rd
+
+# Default network name used for worker instances
+# during migrations.
+# migr_network_name = management
+
+# Default server pool name.
+# server_pool_name = pool1
+
+# Whether or not to just create VMs but skip powering them on.
+leave_migrated_vm_off = False
+
+# XEN VM domain type.
+# can be 'XEN_PVM', 'XEN_HVM', 'XEN_HVM_PV_DRIVERS', 'LDOMS_PVM', 'UNKNOWN'
+vm_domain_type = XEN_HVM_PV_DRIVERS
+
+# virtual_disk_clone_type can be: THIN_CLONE, SPARSE_COPY, NON_SPARSE_COPY
+virtual_disk_clone_type = THIN_CLONE
+
+# Location of the Cloudbase-Init ZIP for each supported architecture.
+# Cloudbase-Init is installed in Windows VMs for some of the auxiliary
+# functionality it offers to the migrated VMs (most notably, startup scripts)
+cloudbaseinit_x86_url = https://www.cloudbase.it/downloads/CloudbaseInitSetup_Stable_x86.zip
+cloudbaseinit_x64_url = https://www.cloudbase.it/downloads/CloudbaseInitSetup_Stable_x64.zip
+
+# URL to a .zip file containing Windows paravirtual drivers to be injected
+# within Windows instances being Migrated to OVM.
+# The URL must be accessible from the temporary worker VMs which will be
+# deployed on OVM. (namely, attached to the network indicated by the
+# 'migr_network_name' option presented above)
+# The structure of the driver tree from within the .zip file is fixed. Please
+# refer to the documentation page of the Coriolis OV< plugin for more
+# information on how to prepare the .zip file containing the drivers:
+# https://cloudbase.it/oracle-vm-ovm-coriolis-plugin
+windows_pv_drivers_url = http://some.fileserver/opc_win_pv_drivers.zip
+
+# Whether or not to reconfigure the internal network settings of each
+# interface of the instance being migrated/replicated during the OSMorphing
+# process to have the VM perform DHCP on first boot inside the new environment.
+# Default is true
+set_dhcp = true
+
+# What mechanism to use when sending disk data from the Coriolis installation
+# to the temporary VMs on the target OVM to be written to their
+# respective disk. The HTTPS-based transfer mechanism (TCP/5566) is faster but
+# might not work if there are firewalls in the way. The SSH-based transfer
+# mechanism (TCP/22) is more costly but will be allowed by most firewalls since
+# SSH access from the Coriolis installation to the temporary worker VM is always
+# required. Coriolis automatically sets security groups rules for the temporary
+# VMs accordingly.
+# Choices are 'SSH' or 'HTTPS'. Default is 'HTTPS'.
+data_transfer_mechanism = HTTPS

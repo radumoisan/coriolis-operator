@@ -1,0 +1,115 @@
+[azure_migration_provider]
+### Export parameters:
+
+# The Azure location to use for any temporary export resources.
+# Under most circumstances, this should be the same as the location of the VM
+# being Migrated/Replicated which should be specified in the source-env.
+export_location = westus
+
+# Default Migration worker VM size. This will be used if no worker_size is set in
+# the source_environment. If none is provided, Coriolis will list all available
+# flavors on Azure and select the smallest available one that can accommodate
+# the number of disks. If not given, Coriolis will select the first worker
+# size available which can accomodate attaching all the disks for the
+# particular VM being migrated/replicated.
+export_worker_size = Standard_B2s
+
+# Params of the Azure image to use for the temporary VM:
+export_worker_image = version: latest, publisher: Canonical, offer: ubuntu-24_04-lts, sku: server
+
+# Options for controlling the API versions used for each Azure API provider.
+# Only takes effect for source Azure[Stack] platforms. Separate options
+# for destination Azure[Stack] platforms can be found below.
+# All options except for the 'resource' and 'subscription' versions can be
+# ommited, as they can be automatically determined by Coriolis by finding
+# the latest version which is supported both by the Azure platform as well
+# as the version of the client library being leveraged by Coriolis.
+# AzureStack installations which may not allow for discovery of API versions
+# might need to have each version explicitly set.
+# Format must be of the form 'YYYY-MM-DD[-preview]'.
+# export_arm_resource_api_version = 2016-09-01
+# export_arm_subscription_api_version = 2016-09-01
+export_arm_compute_api_version = 2018-06-01
+export_arm_network_api_version = 2018-08-01
+export_arm_storage_api_version = 2018-02-01
+export_blob_storage_api_version = 2020-06-12
+
+### Import parameters:
+
+# The Azure location to which to migrate. The location may also be set for each
+# migration/replica in turn using the destination-environment paramter.
+migr_location = westus
+
+# Name of the Azure storage account to create VHD Page blobs on if
+# "disk_storage_backing_type" is set to "blob_storage"
+# storage_account_name = storageaccount
+
+# Name of the Azure storage container to create VHD page blobs on if
+# "disk_storage_backing_type" is set to 'blob_storage'
+# storage_container_name = coriolis
+
+# The type of storage backing to use for the disks of VMs migrated to Azure.
+# If set to 'blob_storage', disks will be transferred as VHD Page Blobs inside
+# a pre-existing Blob Storage Account inside the resource group being migrated
+# to. If set to 'managed_disks', disks will be transferred as Managed Disks
+# within the resource group being migrated to. If not set, Coriolis will query
+# the available Compute API versions to determine if Managed Disks are
+# available (2017-03-30 onwards), else it defaults to using Blob Storage.
+disk_storage_backing_type = managed_disks
+
+# Default migrated instance size. This will be used if no vm_size is set in
+# the destination-environment. Note: migration will fail if migrated instance
+# size cannot accommodate the number of disks than can be migrated.
+# If not set, the smallest available size that can accommodate the number of
+# disks will be selected for the VM.
+# default_vm_size = Standard_A1
+
+# The images to use for temporary worker VMs:
+linux_migr_image = version: latest, publisher: Canonical, offer: ubuntu-24_04-lts, sku: server
+windows_migr_image = version: latest, publisher: MicrosoftWindowsServer, offer: WindowsServer, sku: 2019-Datacenter
+
+# Default migration worker size. This will be used if no worker_size is set in
+# the target_environment. If none is provided, Coriolis will list all available
+# flavors on Azure and select the smallest available one that can accommodate
+# the number of disks. If not given, Coriolis will select the first worker
+# size available which can accomodate attaching all the disks for the
+# particular VM being migrated/replicated.
+default_worker_size = Standard_B2s
+
+# Whether or not to set any IP addresses read from source VM NIC configurations
+# to destination NICs on Azure. This requires that the network/subnet mappings
+# in the 'network_map' are to networks/subnets on Azure which include the range
+# of the source networks. Default is True
+preserve_nic_ips = True
+
+# Options for controlling the API versions used for each Azure API provider.
+# Only takes effect for destination Azure[Stack] platforms. Separate options
+# for source Azure[Stack] platforms can be found above.
+# All options except for the 'resource' and 'subscription' versions can be
+# ommited, as they can be automatically determined by Coriolis by finding
+# the latest version which is supported both by the Azure platform as well
+# as the version of the client library being leveraged by Coriolis.
+# AzureStack installations which may not allow for discovery of API versions
+# might need to have each version explicitly set.
+# Format must be of the form 'YYYY-MM-DD[-preview]'.
+# arm_resource_api_version = 2016-09-01
+# arm_subscription_api_version = 2016-09-01
+arm_compute_api_version = 2018-06-01
+arm_network_api_version = 2018-08-01
+arm_storage_api_version = 2018-02-01
+blob_storage_api_version = 2020-06-12
+
+# Cloudbase-init Zip URLs for each supported Windows architecture:
+cloudbaseinit_x86_url = https://www.cloudbase.it/downloads/CloudbaseInitSetup_Stable_x86.zip
+cloudbaseinit_x64_url = https://www.cloudbase.it/downloads/CloudbaseInitSetup_Stable_x64.zip
+
+# What mechanism to use when sending disk data from the Coriolis installation
+# to the temporary VMs on the target Azure to be written to their
+# respective disk. The HTTPS-based transfer mechanism (TCP/5566) is faster but
+# might not work if there are firewalls in the way. The SSH-based transfer
+# mechanism (TCP/22) is more costly but will be allowed by most firewalls since
+# SSH access from the Coriolis installation to the temporary worker VM is always
+# required. Coriolis automatically sets security groups rules for the temporary
+# VMs accordingly.
+# Choices are 'SSH' or 'HTTPS'. Default is 'HTTPS'.
+data_transfer_mechanism = HTTPS

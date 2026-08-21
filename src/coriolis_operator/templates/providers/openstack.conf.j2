@@ -1,0 +1,308 @@
+[openstack_migration_provider]
+### Export parameters:
+
+# Integer version of the Image API to use for any interactions with Glance,
+# supported versions being 1 and 2.
+# This value may be overriden on a per-cloud basis with the 'glance_api_version'
+# parameter in the endpoint connection info.
+# Default is 2
+glance_api_version = 2
+
+# Whether to skip certificate verification if the Swift proxy is HTTPS-only
+# with self-signed certificates.
+# This value may be overriden on a per-cloud basis with the
+# 'allow_untrusted_swift' parameter in the connection info.
+# Default is False
+allow_untrusted_swift = False
+
+# Custom mapping between the 'os_type' or 'os_distro' of Glance images on the
+# source OpenStack. Mapping values must be one of the supported OS types in
+# Coriolis. ('linux', 'windows', or 'solaris')
+# custom_os_type_map =
+
+# What Cinder implementation to leverage during replica exports.
+# If set to 'swift_backups', Coriolis will create Cinder backups for each
+# replicated VM disk and fetch the backup objects from Swift.
+# If set to 'ceph_backups', Coriolis will create Cinder backups and connect
+# to the source OpenStack's Ceph via RADOS to retrieve the chunks of each disk.
+# If set to 'ceph_snapshots', Coriolis will create Cinder snapshots for each disk
+# and fetch the diff chunks from the source OpenStack's Ceph.
+# Both the 'ceph_backups' and 'ceph_snapshots' options require that the
+# coriolis-worker component have network access to the source OpenStack's Ceph
+# through librbd/librados.
+# If set to 'coriolis_backups', Coriolis will create a temporary VM on the source
+# and use its in-built Replication engine through it to diff/export the disks.
+# Only the 'coriolis_backups' mechanism works for VMs which were booted from a
+# Glance image, and all other options only work on Cinder-based VMs.
+# Default is 'swift_backups'
+replica_export_mechanism = swift_backups
+
+## Options for 'replica_export_mechanism = swift_backups/ceph_backups'
+
+# The name of the container in which to store the Cinder backups.
+# If pre-existing, the container will be reused. If it doesn't exist, a new one
+# will be created.
+# If 'replica_export_mechanism' is set to 'swift_backups', this is name of the
+# Swift container in which to store the Cinder backups. If pre-existing the
+# container will be reused. If it doesn't exist, a new one will be created.
+# If 'replica_export_mechanism' is set to 'ceph_backups', this must be set to
+# the name of the Ceph pool the backups are stored on. (the 'backup_ceph_pool'
+# Cinder configuration option)
+# Default is 'coriolis'
+default_volume_backups_container = coriolis
+
+## Options for 'replica_export_mechanism = ceph_backups/snapshots'
+
+# Integer timeout (seconds) when connecting to Ceph.
+# Default is 30
+cinder_ceph_timeout = 30
+
+# String name of algorith in Python's hashlib to use for hashing disk chunks to
+# compare them. If unset, the diff will be compared directly instead of hashing.
+# cinder_ceph_backups_diff_hash_algorithm = None
+
+## Options for 'replica_export_mechanism = coriolis_backups'
+
+# Name or ID of a pre-existing Glance Ubuntu 18.04 image on the source OpenStack
+# to be used for the temporary export worker VM on the source. The image must be
+# available to the project/tenant provided in the Coriolis Endpoint. The images
+# must have cloud-init installed and configured for first boot.
+# export_image = ubuntu-18.04-coriolis-worker
+
+# Name of pre-existing Cinder volume type on the source to use for the temporary
+# volumes Coriolis will be creating for exporting instance Glance images. In the
+# case of secondary volumes, the storage type already used by the individual
+# volumes will be used to avoid a cross-backend volume transfer while the clone
+# is occurring. If unset, the default Cinder volume type will be used.
+# export_interim_volume_type =
+
+# Whether or not to download the worker image to a Cinder volume and boot the
+# worker from that. The root disk size" on the configured 'export_flavor_name'
+# will be used for the worker VM volume.
+export_worker_boot_from_volume = false
+
+# Name of the precreated Cinder volume type to use when creating temporary worker volumes.
+# This option is only effective if "export_worker_boot_from_volume" is set.
+# export_worker_volume_type = cinder-volume-type
+
+# The integer size (in GBs) of the Cinder volume to boot temporary worker VMs from.
+# This option is only effective if "export_worker_boot_from_volume" is set. If not set,
+# Coriolis will use the disk size set the selected "export_flavor_name".
+# export_worker_volume_size = 100
+
+# Name of the flavor to use for the temporary disk export VM.
+# The flavor must be compatible with the selected 'export_image'.
+# export_flavor_name = m1.small
+
+# Name or ID of an existing Neutron network on the source OpenStack where to attach
+# the Neutron port of the temporary disk export worker VMs. The selected network
+# must either be in the same project/tenant as set in the Coriolis endpoint or
+# be a shared/external network and thus available to said project. If
+# export_worker_use_fip is set to 'false', the Coriolis installation must be
+# able to route to addresses allocated from this network."
+# export_network = external-network-name
+
+# Whether or not to allocate floating IPs from 'export_fip_pool_name' for the
+# temporary disk export worker VMs.
+# Default is true
+# export_worker_use_fip = true
+
+# Name of an external Neutron network from which to allocate floating IPs for the
+# temporary worker VMs Coriolis boots up during the disk export process. The
+# Coriolis installation must be able to route to addresses allocated from this network.
+# export_fip_pool_name = external
+
+# Whether or not to use config drive to send metadata to the temporary disk disk
+# export worker VMs in case Neutron metadata is not available. Default is false.
+# export_worker_use_config_drive = false
+
+# Whether or not Coriolis should reference security groups by name instead of ID.
+# This option may be required for older source OpenStacks whose Nova service is
+# incapable of identifying security groups by ID.
+# Default is false
+# export_identify_secgroups_by_name = true
+
+# Whether or not Coriolis should wait for export cloned volumes to delete when
+# replication finishes. Setting this option to true will also affect the replica
+# execution's RPO. Some Cinder drivers require this option for the proper
+# sequential cleanup of Cinder snapshots which have child volumes created from them.
+# wait_for_volume_deletion = false
+
+### Import parameters:
+
+# Name of a pre-created availability zone where resources migrated by Coriolis
+# will be created in. Note that Coriolis will need to also create any
+# temporary resources (such as disk transfer and OSMorphing worker VMs)
+# within the same availability zone, so all of the other
+# temporary-resource-related options must be compatible with the selected AZ.
+# Default is None (Nova will choose the default one for Coriolis)
+# availability_zone =
+
+# If migrating/replicating a heterogeneous workload with both Linux and
+# Windows instances, separate image names or IDs will need to be provided
+# for the temporary OSMorphing workers for each OS type.
+# The 'linux' image will be used for the disk copy worker during the replica
+# execution process as well
+# Only accepted keys are 'linux' and 'windows'
+# migr_image_map = linux: 283bdce4-112c-4758-b06a-7e5985a9cd15, windows: Windows Server 2012 R2 Std Eval
+
+# Boolean flag indicating whether or not to list all Neutron networks.
+# By default, Coriolis will only list the networks which are in the
+# same tenant as the one set in the Coriolis endpoint in use.
+list_all_destination_networks = False
+
+# Whether or not unallocated blocks on Cinder target volumes contain
+# zeros. This is controlled by the "volume_clear" Cinder configuration
+# options. (boolean value)
+volumes_are_zeroed = True
+
+# Default hypervisor type. (string value)
+# The type of hypervisor the destination OpenStack features,
+# supported options being "hyperv", "qemu" or "kvm"
+# Default is None, meaning no extra hypervisor-specific actions will be taken
+# during the OSMorphing process
+hypervisor_type = kvm
+
+# Whether or not to download the worker image to a Cinder volume and boot the
+# worker from that. The root disk size on the configured 'migr_flavor_name'
+# will be used for the worker VM volume, 'migr_flavor_name' will be used for
+# the worker VM volume unless explicitly specified using 'migr_worker_volume_size'.
+migr_worker_boot_from_volume = False
+
+# The integer size (in GBs) of the Cinder volume to boot temporary worker VMs
+# from. This option is only effective if "migr_worker_boot_from_volume" is set.
+# If not set, Coriolis will use the disk size set the selected "migr_flavor_name".
+# migr_worker_volume_size =
+
+# Name of the precreated Cinder volume type to use when creating temporary worker volumes.
+# This option is only effective if "migr_worker_boot_from_volume" is set.
+# migr_worker_volume_type =
+
+# Name of the Cinder volume type to be used for
+# volumes with unspecified storage backing option from the
+# source or which could not be mapped in the "storage_map".
+# Default is "" (Cinder scheduler will
+# use default volume type)
+# default_cinder_volume_type =
+
+# Whether or not to set the Cinder volumes as ephemeral (to be deleted when
+# the VM is deleted) on the newly migrated/replicated instance on the
+# destination OpenStack. Default is False.
+delete_disks_on_vm_termination = True
+
+# List of names or IDs of pre-existing security groups on the destination
+# OpenStack to be applied to the migrated/replicated instance.
+# Note that the below set will be joined with the list specified via the
+# 'security_groups' parameter from the set of destination environment parameters
+# (list value)
+# default_security_groups = secgroup1, secgroup2
+
+# Name or ID of an existing Neutron network on the destination
+# OpenStack where to attach the Neutron port of the temporary disk
+# copy/OSMorphing worker VMs. (string value)
+# migr_network = private
+
+# Whether or not to allocate floating IPs from the "migr_fip_pool_name"
+# for the temporary disk copy/OSMorphing worker VMs.
+# Default is True
+migr_worker_use_fip = True
+
+# Name of an existing Neutron network on the destination OpenStack which
+# serves as external and may have floating IPs allocated from it.
+# These floating IPs will be associated to the temporary disk copy/OSMorphing
+# worker VMs.
+# Default is "public"
+# migr_fip_pool_name = public
+
+# Name of an existing Nova flavor which to boot the temporary
+# disk copy/OSMorphing worker VMs as.
+# Default is "m1.small"
+# (string value)
+# migr_flavor_name = m1.small
+
+# Whether or not to use config drive to send metadata to the temporary
+# disk copy/OSMorphing worker VMs in case Neutron metadata is not available
+# Default is False
+migr_worker_use_config_drive = False
+
+# Whether or not to reconfigure the internal network settings of each
+# interface of the instance being migrated/replicated during the OSMorphing
+# process to have the VM perform DHCP on first boot inside the new environment.
+# Default is True
+set_dhcp = True
+
+# If set to "reuse_ports", Coriolis will reuse any Neutron ports found with
+# the MAC addresses needed for the new VM. If set to "keep_mac", Coriolis
+# will delete any ports with the MAC addresses the VM needs and recreate them
+# with the same MAC address. If set to "replace_mac", Coriolis will always
+# create new ports with new MAC addresses.
+port_reuse_policy = keep_mac
+
+# Dictionary with arbitrary key-value pairs to set as the migrated/replicated
+# VM's properties.
+# instance_properties =
+
+# List of comma-separated tags to be set on the migrated/replicated VMs.
+# instance_tags =
+
+# Whether or not to preserve the fixed IPs of the migrated instances' Neutron
+# ports. When this is set to 'True', the target Openstack cloud will attempt
+# to create ports containing fixed IPs collected from the source VM. A subnet
+# with the right CIDR is required in the mapped network for the VM's first NIC.
+preserve_fixed_ips = False
+
+# If set, Coriolis will attempt to identify a suitable subnet from the provided
+# 'floating_ip_pool' on the target OpenStack in which to create a floating IP
+# with the same address the VM had on the source.
+preserve_floating_ip = False
+
+# Whether or not to attach a floating IP to the already migrated VM. This
+# option must be set to 'True' if the migrated VM is intended to have a public
+# IP attached. The floating IP will be allocated from the 'floating_ip_pool'
+# option.
+use_floating_ip = False
+
+# Name of the floating IP pool to be used for the creation and attachment of
+# floating IPs to the migrated VMs.
+# floating_ip_pool = public
+
+# Name or ID of the Nove Server Group to use when recreating the final VMs on Openstack
+# server_group =
+
+# Whether or not Coriolis should reference security groups by name instead of ID.
+# This option may be required for older source OpenStacks whose Nova service is
+# incapable of identifying security groups by ID.
+# Default is false
+# import_identify_secgroups_by_name = true
+
+# A dict of arbitrary key-value pairs to be added as volume image metadata to the boot
+# volume(s) of the final migrated instance. Coriolis automatically sets the 'os_type',
+# 'os_distro', 'hypervisor_type', and 'hw_firmware_type' keys as part of the migration
+# process, but they too can be overridden using this option as well.
+# All the values will be automatically cast to strings if they are not such.
+# Any 'custom_boot_volume_image_metadata' set in the target-environment options
+# will be merged and/or override the defaults provided here for that transfer.
+# default_custom_boot_volume_image_metadata = hw_qemu_guest_agent: yes, ...
+
+# Disk bus to be used for migrated VM's volumes. Accepted values are: virtio, scsi, ide, usb
+disk_bus = virtio
+
+# What mechanism to use when sending disk data from the Coriolis installation
+# to the temporary VMs on the target OpenStack to be written to their
+# respective disk. The HTTPS-based transfer mechanism (TCP/5566) is faster but
+# might not work if there are firewalls in the way. The SSH-based transfer
+# mechanism (TCP/22) is more costly but will be allowed by most firewalls since
+# SSH access from the Coriolis installation to the temporary worker VM is always
+# required. Coriolis automatically sets security groups rules for the temporary
+# VMs accordingly.
+# Choices are 'SSH' or 'HTTPS'. Default is 'HTTPS'.
+data_transfer_mechanism = HTTPS
+
+# Parameters realted to the OSMorphing process for Windows instances:
+windows_virtio_iso_url = https://fedorapeople.org/groups/virt/virtio-win/direct-downloads/stable-virtio/virtio-win.iso
+cloudbaseinit_x64_url = https://www.cloudbase.it/downloads/CloudbaseInitSetup_Stable_x64.zip
+cloudbaseinit_x86_url = https://www.cloudbase.it/downloads/CloudbaseInitSetup_Stable_x86.zip
+
+# Default image name used for VZ Tools installation during Linux migration.
+# Only used in the OSMorphing process.
+# vz_tools_image = vz_guest_tools_lin.iso
