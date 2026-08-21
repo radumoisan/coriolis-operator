@@ -3,7 +3,8 @@
 import base64
 import hashlib
 import re
-from collections.abc import Mapping, Sequence
+import secrets
+from collections.abc import Callable, Mapping, Sequence
 from datetime import UTC, datetime
 from enum import Enum
 from typing import Any
@@ -266,6 +267,36 @@ def _encoded_secret_data(values: Mapping[str, str]) -> dict[str, str]:
         key: base64.b64encode(value.encode("utf-8")).decode("ascii")
         for key, value in values.items()
     }
+
+
+def _generate_credentials(
+    keys: frozenset[str], token_factory: Callable[[int], str]
+) -> dict[str, str]:
+    values = {key: token_factory(32) for key in sorted(keys)}
+    if any(not isinstance(value, str) or not value for value in values.values()):
+        raise ValueError("credential token factory must return a non-empty string")
+    return values
+
+
+def generate_coriolis_credentials(
+    token_factory: Callable[[int], str] = secrets.token_urlsafe,
+) -> dict[str, str]:
+    """Generate independent values for the retained Coriolis credentials Secret."""
+    return _generate_credentials(CORIOLIS_CREDENTIALS_KEYS, token_factory)
+
+
+def generate_infrastructure_credentials(
+    token_factory: Callable[[int], str] = secrets.token_urlsafe,
+) -> dict[str, str]:
+    """Generate values for the retained infrastructure credentials Secret."""
+    return _generate_credentials(INFRASTRUCTURE_CREDENTIALS_KEYS, token_factory)
+
+
+def generate_step_ca_credentials(
+    token_factory: Callable[[int], str] = secrets.token_urlsafe,
+) -> dict[str, str]:
+    """Generate an independent value for the retained step-ca credentials Secret."""
+    return _generate_credentials(STEP_CA_CREDENTIALS_KEYS, token_factory)
 
 
 def _build_retained_secret(

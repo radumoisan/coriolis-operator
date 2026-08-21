@@ -35,6 +35,9 @@ from coriolis_operator.reconcile import (
     classify_existing_marker,
     classify_retained_resource,
     collision_conditions,
+    generate_coriolis_credentials,
+    generate_infrastructure_credentials,
+    generate_step_ca_credentials,
     rejected_conditions,
     state_config_map_name,
 )
@@ -75,6 +78,126 @@ CORIOLIS_CONFIG = {
     "coriolis.release": "2603.4",
 }
 CORIOLIS_CONFIG_SECRET = {"coriolis.conf": "secret config"}
+
+
+@pytest.mark.parametrize(
+    ("generator", "expected_keys"),
+    [
+        (
+            generate_coriolis_credentials,
+            {
+                "coriolis_database_password",
+                "coriolis_keystone_password",
+                "temp_keypair_password",
+            },
+        ),
+        (
+            generate_infrastructure_credentials,
+            {
+                "database_password",
+                "rabbitmq_password",
+                "keystone_admin_password",
+            },
+        ),
+        (generate_step_ca_credentials, {"init_password"}),
+    ],
+)
+def test_credential_generators_use_independent_32_byte_tokens(
+    generator, expected_keys: set[str]
+) -> None:
+    calls: list[int] = []
+
+    def token_factory(bytes_count: int) -> str:
+        calls.append(bytes_count)
+        return f"synthetic-{len(calls)}"
+
+    values = generator(token_factory)
+
+    assert set(values) == expected_keys
+    assert calls == [32] * len(expected_keys)
+    assert values == {
+        key: f"synthetic-{index}"
+        for index, key in enumerate(sorted(expected_keys), start=1)
+    }
+
+
+def test_credential_generators_make_seven_32_byte_factory_calls() -> None:
+    calls: list[int] = []
+
+    def token_factory(bytes_count: int) -> str:
+        calls.append(bytes_count)
+        return "synthetic"
+
+    generate_coriolis_credentials(token_factory)
+    generate_infrastructure_credentials(token_factory)
+    generate_step_ca_credentials(token_factory)
+
+    assert calls == [32] * 7
+
+
+@pytest.mark.parametrize(
+    ("generator", "builder"),
+    [
+        (generate_coriolis_credentials, build_coriolis_credentials_secret),
+        (generate_infrastructure_credentials, build_infrastructure_credentials_secret),
+        (generate_step_ca_credentials, build_step_ca_credentials_secret),
+    ],
+)
+def test_generated_credentials_compose_with_secret_builders(generator, builder) -> None:
+    values = generator(lambda _: "synthetic-token")
+
+    body = builder(
+        appliance_name="example",
+        namespace="operators",
+        accepted_version="2603.4",
+        retention="retain",
+        values=values,
+    )
+
+    assert {
+        key: base64.b64decode(value).decode("utf-8")
+        for key, value in body["data"].items()
+    } == values
+
+
+@pytest.mark.parametrize(
+    "generator",
+    [
+        generate_coriolis_credentials,
+        generate_infrastructure_credentials,
+        generate_step_ca_credentials,
+    ],
+)
+def test_credential_generators_return_url_safe_non_empty_production_tokens(
+    generator,
+) -> None:
+    values = generator()
+
+    assert values
+    assert all(re.fullmatch(r"[A-Za-z0-9_-]+", value) for value in values.values())
+
+
+@pytest.mark.parametrize("invalid_value", ["", 1])
+@pytest.mark.parametrize(
+    "generator",
+    [
+        generate_coriolis_credentials,
+        generate_infrastructure_credentials,
+        generate_step_ca_credentials,
+    ],
+)
+def test_credential_generators_reject_invalid_factory_output_without_leakage(
+    generator, invalid_value: object
+) -> None:
+    def token_factory(_: int) -> object:
+        return invalid_value
+
+    with pytest.raises(ValueError) as excinfo:
+        generator(token_factory)
+
+    assert (
+        str(excinfo.value) == "credential token factory must return a non-empty string"
+    )
 
 
 def sample_meta(generation: int = 7) -> dict:
