@@ -3,8 +3,9 @@ import copy
 import hashlib
 import re
 from datetime import UTC, datetime
-from unittest.mock import MagicMock
+from unittest.mock import ANY, MagicMock, call
 
+import kopf
 import pytest
 from kubernetes import client
 
@@ -215,10 +216,14 @@ def _api_exception(status: int) -> Exception:
 def make_core_api(existing=None) -> MagicMock:
     api = MagicMock()
     api.api_client.default_headers = {}
-    if existing is None:
-        api.read_namespaced_config_map.side_effect = _api_exception(404)
-    else:
-        api.read_namespaced_config_map.return_value = existing
+
+    def read_config_map(*, name: str, namespace: str) -> object:
+        if name.endswith("-operator-state") and existing is not None:
+            return existing
+        raise _api_exception(404)
+
+    api.read_namespaced_config_map.side_effect = read_config_map
+    api.read_namespaced_secret.side_effect = _api_exception(404)
     return api
 
 
@@ -230,7 +235,7 @@ def desired_body(meta=None) -> dict:
         "name": meta["name"],
         "uid": meta["uid"],
     }
-    return build_state_config_map(
+    body = build_state_config_map(
         name=meta["name"],
         namespace=meta["namespace"],
         profile=SUPPORTED_PROFILE,
@@ -238,6 +243,8 @@ def desired_body(meta=None) -> dict:
         generation=meta["generation"],
         owner=owner,
     )
+    body["metadata"]["resourceVersion"] = "1"
+    return body
 
 
 def legacy_marker(meta=None, *, generation: str = "1") -> dict:
@@ -252,6 +259,7 @@ def legacy_marker(meta=None, *, generation: str = "1") -> dict:
         "metadata": {
             "name": state_config_map_name(meta["name"]),
             "namespace": meta["namespace"],
+            "resourceVersion": "1",
             "ownerReferences": [dict(owner, controller=True)],
         },
         "data": {
@@ -278,6 +286,7 @@ def to_v1_config_map(body: dict) -> client.V1ConfigMap:
         metadata=client.V1ObjectMeta(
             name=meta["name"],
             namespace=meta["namespace"],
+            resource_version=meta.get("resourceVersion"),
             labels=meta.get("labels"),
             annotations=meta.get("annotations"),
             owner_references=owner_refs or None,
@@ -1010,8 +1019,9 @@ def test_build_status_reports_accepted_api_only_slice() -> None:
                 "Reconciled",
                 "True",
                 "Reconciled",
-                "The accepted profile/version controller state marker was recorded "
-                "in Kubernetes.",
+                "The foundational appliance resources and controller state marker "
+                "were reconciled in Kubernetes; runtime readiness is not implemented "
+                "yet.",
             ),
             condition(
                 "Ready",
@@ -1118,23 +1128,41 @@ def test_reconcile_appliance_server_side_applies_state_and_returns_status() -> N
         core_api=core_api,
     )
 
-    expected_body = desired_body()
-    core_api.read_namespaced_config_map.assert_called_once_with(
-        name="example-operator-state",
-        namespace="operators",
-    )
-    core_api.patch_namespaced_config_map.assert_called_once_with(
-        name="example-operator-state",
-        namespace="operators",
-        body=expected_body,
-        field_manager="coriolis-operator",
-        force=True,
-    )
-    assert core_api.api_client.default_headers == {
-        "Content-Type": "application/apply-patch+yaml"
-    }
+    assert core_api.method_calls == [
+        call.read_namespaced_config_map(
+            name="example-operator-state", namespace="operators"
+        ),
+        call.read_namespaced_secret(
+            name="example-coriolis-credentials", namespace="operators"
+        ),
+        call.read_namespaced_secret(
+            name="example-infrastructure-credentials", namespace="operators"
+        ),
+        call.read_namespaced_config_map(
+            name="example-coriolis-config", namespace="operators"
+        ),
+        call.read_namespaced_secret(
+            name="example-coriolis-config-secret", namespace="operators"
+        ),
+        call.create_namespaced_secret(namespace="operators", body=ANY),
+        call.create_namespaced_secret(namespace="operators", body=ANY),
+        call.create_namespaced_config_map(namespace="operators", body=ANY),
+        call.create_namespaced_secret(namespace="operators", body=ANY),
+        call.create_namespaced_config_map(namespace="operators", body=ANY),
+    ]
     assert status["observedGeneration"] == 7
     assert status["acceptedVersion"] == "2603.4"
+    created_credentials = [
+        call.kwargs["body"]
+        for call in core_api.create_namespaced_secret.call_args_list
+        if call.kwargs["body"]["metadata"]["name"]
+        in {"example-coriolis-credentials", "example-infrastructure-credentials"}
+    ]
+    assert len(created_credentials) == 2
+    assert all(
+        body["metadata"]["annotations"][RETENTION_ANNOTATION] == "state-credentials"
+        for body in created_credentials
+    )
     condition_statuses = [
         condition_status["status"] for condition_status in status["conditions"]
     ]
@@ -1157,8 +1185,7 @@ def test_reconcile_omitted_profile_defaults_to_core() -> None:
         core_api=core_api,
     )
 
-    core_api.patch_namespaced_config_map.assert_called_once()
-    body = core_api.patch_namespaced_config_map.call_args.kwargs["body"]
+    body = core_api.create_namespaced_config_map.call_args_list[1].kwargs["body"]
     assert body["data"]["profile"] == SUPPORTED_PROFILE
     assert status["acceptedVersion"] == "2603.4"
 
@@ -1173,7 +1200,7 @@ def test_reconcile_treats_empty_accepted_version_as_absent() -> None:
         core_api=core_api,
     )
 
-    core_api.patch_namespaced_config_map.assert_called_once()
+    core_api.create_namespaced_config_map.assert_called()
     assert status["acceptedVersion"] == "2603.4"
 
 
@@ -1312,7 +1339,7 @@ def test_reconcile_with_accepted_version_matching_requested_applies_normally() -
         core_api=core_api,
     )
 
-    core_api.patch_namespaced_config_map.assert_called_once()
+    core_api.create_namespaced_config_map.assert_called()
     assert status["acceptedVersion"] == SUPPORTED_INITIAL_VERSION
     assert status["observedGeneration"] == 8
     conditions = {item["type"]: item["status"] for item in status["conditions"]}
@@ -1373,15 +1400,15 @@ def test_profile_field_handler_routes_through_reconcile(
     )
 
 
-def test_handler_propagates_reconcile_failure_without_patching_status(
+def test_handler_patches_sanitized_status_before_retry(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     core_api = make_core_api()
-    core_api.patch_namespaced_config_map.side_effect = RuntimeError("API failed")
+    core_api.create_namespaced_config_map.side_effect = RuntimeError("API failed")
     monkeypatch.setattr(main.client, "CoreV1Api", MagicMock(return_value=core_api))
     patch = MagicMock()
 
-    with pytest.raises(RuntimeError, match="API failed"):
+    with pytest.raises(kopf.TemporaryError):
         main._handle_reconcile(
             {"profile": "core", "version": "2603.4"},
             {
@@ -1393,7 +1420,9 @@ def test_handler_propagates_reconcile_failure_without_patching_status(
             patch,
         )
 
-    patch.status.update.assert_not_called()
+    reconciled = patch.status.update.call_args.args[0]
+    assert reconciled["conditions"][2]["reason"] == "ResourceApplyFailed"
+    assert "API failed" not in repr(reconciled)
 
 
 def _mutate_label(key: str, value: str):
@@ -1476,9 +1505,6 @@ def test_reconcile_matching_managed_marker_proceeds_with_unchanged_body() -> Non
         core_api=core_api,
     )
 
-    core_api.read_namespaced_config_map.assert_called_once_with(
-        name="example-operator-state", namespace="operators"
-    )
     core_api.patch_namespaced_config_map.assert_called_once_with(
         name="example-operator-state",
         namespace="operators",
@@ -1543,7 +1569,6 @@ def test_reconcile_collision_blocks_and_never_patches(mutate) -> None:
         core_api=core_api,
     )
 
-    core_api.read_namespaced_config_map.assert_called_once()
     core_api.patch_namespaced_config_map.assert_not_called()
     assert "acceptedVersion" not in status
     assert [c["type"] for c in status["conditions"]] == CONDITION_TYPES
@@ -1555,7 +1580,7 @@ def test_reconcile_collision_blocks_and_never_patches(mutate) -> None:
     assert statuses["Reconciled"]["status"] == "False"
     assert statuses["Reconciled"]["reason"] == "ResourceCollision"
     assert statuses["Ready"]["status"] == "False"
-    assert statuses["Ready"]["reason"] == "ResourceCollision"
+    assert statuses["Ready"]["reason"] == "RuntimeNotImplemented"
     assert statuses["Degraded"]["status"] == "True"
     assert statuses["Degraded"]["reason"] == "ResourceCollision"
     assert statuses["Upgradeable"]["status"] == "False"
@@ -1591,32 +1616,33 @@ def test_reconcile_collision_preserves_prior_accepted_version_and_transition() -
     assert degraded["lastTransitionTime"] == "2026-08-19T09:00:00Z"
 
 
-def test_reconcile_propagates_non_404_api_read_error_without_patch() -> None:
+def test_reconcile_non_404_read_error_requests_sanitized_retry() -> None:
     core_api = make_core_api()
     core_api.read_namespaced_config_map.side_effect = client.ApiException(status=403)
 
-    with pytest.raises(client.ApiException) as excinfo:
+    with pytest.raises(main.ReconcileRetry) as excinfo:
         reconcile_appliance(
             spec={"profile": "core", "version": "2603.4"},
             meta=sample_meta(),
             core_api=core_api,
         )
 
-    assert excinfo.value.status == 403
+    assert excinfo.value.status["conditions"][2]["reason"] == "ResourceReadFailed"
     core_api.patch_namespaced_config_map.assert_not_called()
 
 
-def test_reconcile_propagates_generic_read_error_without_patch() -> None:
+def test_reconcile_generic_read_error_requests_sanitized_retry() -> None:
     core_api = make_core_api()
     core_api.read_namespaced_config_map.side_effect = RuntimeError("read failed")
 
-    with pytest.raises(RuntimeError, match="read failed"):
+    with pytest.raises(main.ReconcileRetry) as excinfo:
         reconcile_appliance(
             spec={"profile": "core", "version": "2603.4"},
             meta=sample_meta(),
             core_api=core_api,
         )
 
+    assert excinfo.value.status["conditions"][2]["reason"] == "ResourceReadFailed"
     core_api.patch_namespaced_config_map.assert_not_called()
 
 
@@ -1680,12 +1706,17 @@ def test_collision_conditions_are_deterministic_and_identify_marker() -> None:
         "The core profile has no supported upgrade path.",
     )
     message = (
-        "The existing ConfigMap 'operators/example-operator-state' conflicts "
-        "with the operator's managed state marker and was not modified."
+        "The existing resource 'operators/example-operator-state' conflicts with "
+        "operator-managed identity and was not modified."
     )
     assert conditions[1] == ("Progressing", "False", "ResourceCollision", message)
     assert conditions[2] == ("Reconciled", "False", "ResourceCollision", message)
-    assert conditions[3] == ("Ready", "False", "ResourceCollision", message)
+    assert conditions[3] == (
+        "Ready",
+        "False",
+        "RuntimeNotImplemented",
+        "The appliance runtime is not implemented yet.",
+    )
     assert conditions[4] == ("Degraded", "True", "ResourceCollision", message)
 
 
@@ -2248,3 +2279,397 @@ def test_foundational_preflight_does_not_mutate_existing_resources() -> None:
     )
 
     assert existing == before
+
+
+def test_foundational_gate_reuses_retained_secrets_without_writing_them() -> None:
+    api = make_core_api()
+    api.read_namespaced_secret.side_effect = [
+        build_coriolis_credentials_secret(
+            appliance_name="example",
+            namespace="operators",
+            accepted_version="2603.4",
+            retention="state-credentials",
+            values=CORIOLIS_CREDENTIALS,
+        ),
+        build_infrastructure_credentials_secret(
+            appliance_name="example",
+            namespace="operators",
+            accepted_version="2603.4",
+            retention="state-credentials",
+            values=INFRASTRUCTURE_CREDENTIALS,
+        ),
+        _api_exception(404),
+    ]
+
+    reconcile_appliance(
+        spec={"profile": "core", "version": "2603.4"}, meta=sample_meta(), core_api=api
+    )
+
+    created_secret_names = [
+        call.kwargs["body"]["metadata"]["name"]
+        for call in api.create_namespaced_secret.call_args_list
+    ]
+    patched_secret_names = [
+        call.kwargs["name"] for call in api.patch_namespaced_secret.call_args_list
+    ]
+    assert created_secret_names == ["example-coriolis-config-secret"]
+    assert patched_secret_names == []
+    config_secret = api.create_namespaced_secret.call_args.kwargs["body"]
+    rendered = base64.b64decode(config_secret["data"]["coriolis.conf"]).decode()
+    assert CORIOLIS_CREDENTIALS["coriolis_database_password"] in rendered
+    assert INFRASTRUCTURE_CREDENTIALS["rabbitmq_password"] in rendered
+
+
+def test_foundational_gate_collision_has_no_writes_after_complete_reads() -> None:
+    api = make_core_api()
+    collided = build_coriolis_credentials_secret(
+        appliance_name="example",
+        namespace="operators",
+        accepted_version="2603.4",
+        retention="state-credentials",
+        values=CORIOLIS_CREDENTIALS,
+    )
+    collided["metadata"]["labels"]["app.kubernetes.io/managed-by"] = "other"
+    api.read_namespaced_secret.side_effect = [
+        collided,
+        _api_exception(404),
+        _api_exception(404),
+    ]
+
+    status = reconcile_appliance(
+        spec={"profile": "core", "version": "2603.4"}, meta=sample_meta(), core_api=api
+    )
+
+    assert api.read_namespaced_secret.call_count == 3
+    assert api.create_namespaced_secret.call_count == 0
+    assert api.create_namespaced_config_map.call_count == 0
+    assert {item["reason"] for item in status["conditions"]} >= {"ResourceCollision"}
+
+
+@pytest.mark.parametrize("status_code", [404, 409])
+def test_create_absence_and_already_exists_have_distinct_outcomes(
+    status_code: int,
+) -> None:
+    api = make_core_api()
+    if status_code == 409:
+        api.create_namespaced_secret.side_effect = client.ApiException(
+            status=409, reason="credential-value-must-not-leak"
+        )
+
+    if status_code == 404:
+        status = reconcile_appliance(
+            spec={"profile": "core", "version": "2603.4"},
+            meta=sample_meta(),
+            core_api=api,
+        )
+        assert status["acceptedVersion"] == "2603.4"
+    else:
+        with pytest.raises(main.ReconcileRetry) as excinfo:
+            reconcile_appliance(
+                spec={"profile": "core", "version": "2603.4"},
+                meta=sample_meta(),
+                core_api=api,
+            )
+        assert excinfo.value.status["conditions"][2]["reason"] == "ResourceApplyFailed"
+        assert "credential-value-must-not-leak" not in repr(excinfo.value.status)
+
+
+def test_managed_resources_use_resource_version_and_marker_is_last() -> None:
+    api = make_core_api(existing=desired_body())
+    managed_config = owned_body()
+    managed_config["metadata"]["resourceVersion"] = "17"
+    api.read_namespaced_config_map.side_effect = [desired_body(), managed_config]
+    api.read_namespaced_secret.side_effect = [_api_exception(404)] * 3
+
+    reconcile_appliance(
+        spec={"profile": "core", "version": "2603.4"}, meta=sample_meta(), core_api=api
+    )
+
+    config_apply = api.patch_namespaced_config_map.call_args_list[0].kwargs
+    marker_apply = api.patch_namespaced_config_map.call_args_list[1].kwargs
+    assert config_apply["body"]["metadata"]["resourceVersion"] == "17"
+    assert config_apply["field_manager"] == "coriolis-operator"
+    assert config_apply["force"] is True
+    assert marker_apply["name"] == "example-operator-state"
+    assert api.method_calls[-1] == call.patch_namespaced_config_map(**marker_apply)
+
+
+def test_apply_conflict_keeps_prior_writes_and_preserves_accepted_version() -> None:
+    api = make_core_api(existing=desired_body())
+    api.read_namespaced_secret.side_effect = [_api_exception(404)] * 3
+    api.patch_namespaced_config_map.side_effect = client.ApiException(
+        status=409, reason="rendered-secret-must-not-leak"
+    )
+
+    with pytest.raises(main.ReconcileRetry) as excinfo:
+        reconcile_appliance(
+            spec={"profile": "core", "version": "2603.4"},
+            meta=sample_meta(),
+            status={"acceptedVersion": "2603.4", "conditions": []},
+            core_api=api,
+        )
+
+    assert api.create_namespaced_secret.call_count == 3
+    assert excinfo.value.status["acceptedVersion"] == "2603.4"
+    assert excinfo.value.status["conditions"][2]["reason"] == "MarkerApplyFailed"
+    assert "rendered-secret-must-not-leak" not in repr(excinfo.value.status)
+
+
+def test_initial_retry_does_not_establish_accepted_version() -> None:
+    api = make_core_api()
+    api.read_namespaced_secret.side_effect = client.ApiException(
+        status=500, reason="token"
+    )
+
+    with pytest.raises(main.ReconcileRetry) as excinfo:
+        reconcile_appliance(
+            spec={"profile": "core", "version": "2603.4"},
+            meta=sample_meta(),
+            core_api=api,
+        )
+
+    assert "acceptedVersion" not in excinfo.value.status
+
+
+def test_existing_managed_resource_without_resource_version_retries_before_write() -> (
+    None
+):
+    api = make_core_api(existing=desired_body())
+    api.read_namespaced_secret.side_effect = [_api_exception(404)] * 3
+    marker = desired_body()
+    marker["metadata"].pop("resourceVersion")
+    api.read_namespaced_config_map.side_effect = [marker, _api_exception(404)]
+
+    with pytest.raises(main.ReconcileRetry) as excinfo:
+        reconcile_appliance(
+            spec={"profile": "core", "version": "2603.4"},
+            meta=sample_meta(),
+            core_api=api,
+        )
+
+    assert excinfo.value.status["conditions"][2]["reason"] == "MarkerApplyFailed"
+    api.create_namespaced_secret.assert_not_called()
+    api.create_namespaced_config_map.assert_not_called()
+    api.patch_namespaced_config_map.assert_not_called()
+
+
+def test_apply_header_is_removed_before_later_create() -> None:
+    api = make_core_api()
+    managed_config = owned_body()
+    managed_config["metadata"]["resourceVersion"] = "17"
+    api.read_namespaced_config_map.side_effect = [_api_exception(404), managed_config]
+    api.read_namespaced_secret.side_effect = [_api_exception(404)] * 3
+
+    def create_secret(*, namespace: str, body: dict) -> None:
+        if body["metadata"]["name"] == "example-coriolis-config-secret":
+            assert "Content-Type" not in api.api_client.default_headers
+
+    api.create_namespaced_secret.side_effect = create_secret
+
+    reconcile_appliance(
+        spec={"profile": "core", "version": "2603.4"}, meta=sample_meta(), core_api=api
+    )
+
+    assert "Content-Type" not in api.api_client.default_headers
+
+
+def test_apply_header_is_restored_after_patch_failure() -> None:
+    api = make_core_api(existing=desired_body())
+    api.read_namespaced_secret.side_effect = [_api_exception(404)] * 3
+    api.patch_namespaced_config_map.side_effect = client.ApiException(status=409)
+    api.api_client.default_headers["Content-Type"] = "application/json"
+
+    with pytest.raises(main.ReconcileRetry):
+        reconcile_appliance(
+            spec={"profile": "core", "version": "2603.4"},
+            meta=sample_meta(),
+            core_api=api,
+        )
+
+    assert api.api_client.default_headers["Content-Type"] == "application/json"
+
+
+def test_retry_status_has_the_frozen_condition_contract() -> None:
+    api = make_core_api()
+    api.read_namespaced_secret.side_effect = client.ApiException(status=500)
+
+    with pytest.raises(main.ReconcileRetry) as excinfo:
+        reconcile_appliance(
+            spec={"profile": "core", "version": "2603.4"},
+            meta=sample_meta(),
+            core_api=api,
+        )
+
+    assert [
+        (condition["type"], condition["status"], condition["reason"])
+        for condition in excinfo.value.status["conditions"]
+    ] == [
+        ("Accepted", "True", "Accepted"),
+        ("Progressing", "True", "Retrying"),
+        ("Reconciled", "False", "ResourceReadFailed"),
+        ("Ready", "False", "RuntimeNotImplemented"),
+        ("Degraded", "True", "ResourceReadFailed"),
+        ("Upgradeable", "False", "UpgradeNotSupported"),
+    ]
+
+
+def test_foundational_collision_message_is_generic_and_value_safe() -> None:
+    api = make_core_api()
+    collided = build_coriolis_credentials_secret(
+        appliance_name="example",
+        namespace="operators",
+        accepted_version="2603.4",
+        retention="state-credentials",
+        values=CORIOLIS_CREDENTIALS,
+    )
+    collided["metadata"]["labels"]["app.kubernetes.io/managed-by"] = "other"
+    api.read_namespaced_secret.side_effect = [
+        collided,
+        _api_exception(404),
+        _api_exception(404),
+    ]
+
+    status = reconcile_appliance(
+        spec={"profile": "core", "version": "2603.4"}, meta=sample_meta(), core_api=api
+    )
+
+    message = status["conditions"][1]["message"]
+    assert message == (
+        "The existing resource 'operators/example-coriolis-credentials' conflicts "
+        "with operator-managed identity and was not modified."
+    )
+    assert "ConfigMap" not in message
+    assert "marker" not in message
+
+
+def test_foundational_managed_apply_conflict_stops_later_writes_and_marker() -> None:
+    api = make_core_api()
+    managed_config = owned_body()
+    managed_config["metadata"]["resourceVersion"] = "17"
+    api.read_namespaced_config_map.side_effect = [_api_exception(404), managed_config]
+    api.read_namespaced_secret.side_effect = [_api_exception(404)] * 3
+    api.patch_namespaced_config_map.side_effect = client.ApiException(status=409)
+
+    with pytest.raises(main.ReconcileRetry) as excinfo:
+        reconcile_appliance(
+            spec={"profile": "core", "version": "2603.4"},
+            meta=sample_meta(),
+            core_api=api,
+        )
+
+    assert excinfo.value.status["conditions"][2]["reason"] == "ResourceApplyFailed"
+    assert api.create_namespaced_secret.call_count == 2
+    api.create_namespaced_config_map.assert_not_called()
+    assert api.patch_namespaced_config_map.call_count == 1
+
+
+@pytest.mark.parametrize("failed_read", range(1, 6))
+def test_non_404_at_each_foundational_read_position_prevents_writes(
+    failed_read: int,
+) -> None:
+    api = MagicMock()
+    api.api_client.default_headers = {}
+    reads = 0
+
+    def read(*, name: str, namespace: str) -> object:
+        nonlocal reads
+        reads += 1
+        if reads == failed_read:
+            raise client.ApiException(status=500)
+        raise client.ApiException(status=404)
+
+    api.read_namespaced_config_map.side_effect = read
+    api.read_namespaced_secret.side_effect = read
+
+    with pytest.raises(main.ReconcileRetry) as excinfo:
+        reconcile_appliance(
+            spec={"profile": "core", "version": "2603.4"},
+            meta=sample_meta(),
+            core_api=api,
+        )
+
+    assert reads == failed_read
+    assert excinfo.value.status["conditions"][2]["reason"] == "ResourceReadFailed"
+    api.create_namespaced_secret.assert_not_called()
+    api.create_namespaced_config_map.assert_not_called()
+    api.patch_namespaced_secret.assert_not_called()
+    api.patch_namespaced_config_map.assert_not_called()
+
+
+@pytest.mark.parametrize(
+    "target",
+    [
+        "build_state_config_map",
+        "classify_existing_marker",
+        "preflight_foundational_resources",
+        "render_coriolis_config",
+    ],
+)
+def test_preparation_failures_are_sanitized_and_prevent_writes(
+    monkeypatch: pytest.MonkeyPatch, target: str
+) -> None:
+    api = make_core_api(
+        existing=desired_body() if target == "classify_existing_marker" else None
+    )
+
+    def fail(*args: object, **kwargs: object) -> object:
+        raise RuntimeError("preparation-sentinel-credential")
+
+    monkeypatch.setattr(main, target, fail)
+
+    with pytest.raises(main.ReconcileRetry) as excinfo:
+        reconcile_appliance(
+            spec={"profile": "core", "version": "2603.4"},
+            meta=sample_meta(),
+            core_api=api,
+        )
+
+    assert excinfo.value.status["conditions"][2]["reason"] == "ResourceApplyFailed"
+    assert "preparation-sentinel-credential" not in repr(excinfo.value.status)
+    api.create_namespaced_secret.assert_not_called()
+    api.create_namespaced_config_map.assert_not_called()
+    api.patch_namespaced_secret.assert_not_called()
+    api.patch_namespaced_config_map.assert_not_called()
+
+
+def test_credential_generation_failure_is_sanitized_before_writes(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    def fail(_: int) -> str:
+        raise RuntimeError("generated-credential-sentinel")
+
+    monkeypatch.setattr(
+        "coriolis_operator.reconcile.generate_coriolis_credentials", fail
+    )
+    api = make_core_api()
+
+    with pytest.raises(main.ReconcileRetry) as excinfo:
+        reconcile_appliance(
+            spec={"profile": "core", "version": "2603.4"},
+            meta=sample_meta(),
+            core_api=api,
+        )
+
+    assert excinfo.value.status["conditions"][2]["reason"] == "ResourceApplyFailed"
+    assert "generated-credential-sentinel" not in repr(excinfo.value.status)
+    api.create_namespaced_secret.assert_not_called()
+    api.create_namespaced_config_map.assert_not_called()
+
+
+def test_core_api_construction_failure_patches_sanitized_status_before_retry(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    def fail() -> object:
+        raise RuntimeError("construction-sentinel-token")
+
+    monkeypatch.setattr(main.client, "CoreV1Api", fail)
+    patch = MagicMock()
+
+    with pytest.raises(kopf.TemporaryError):
+        main._handle_reconcile(
+            {"profile": "core", "version": "2603.4"}, sample_meta(), patch
+        )
+
+    reconciled = patch.status.update.call_args.args[0]
+    assert reconciled["conditions"][2]["reason"] == "ResourceReadFailed"
+    assert "construction-sentinel-token" not in repr(reconciled)

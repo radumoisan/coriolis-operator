@@ -33,12 +33,13 @@ RUNTIME_NOT_IMPLEMENTED_MESSAGE = "The appliance runtime is not implemented yet.
 NOT_DEGRADED_MESSAGE = "The appliance is not degraded."
 NOT_RECONCILED_MESSAGE = "No resources were applied to Kubernetes."
 RECONCILED_MESSAGE = (
-    "The accepted profile/version controller state marker was recorded in Kubernetes."
+    "The foundational appliance resources and controller state marker were reconciled "
+    "in Kubernetes; runtime readiness is not implemented yet."
 )
 UPGRADE_NOT_SUPPORTED_MESSAGE = "The core profile has no supported upgrade path."
 RESOURCE_COLLISION_MESSAGE = (
-    "The existing ConfigMap '{namespace}/{name}' conflicts with the operator's "
-    "managed state marker and was not modified."
+    "The existing resource '{namespace}/{name}' conflicts with operator-managed "
+    "identity and was not modified."
 )
 
 MARKER_MANAGED = "managed"
@@ -92,6 +93,24 @@ CORIOLIS_CONFIG_SECRET_KEYS = frozenset({"coriolis.conf"})
 EXTERNAL_READ_ONLY_RESOURCES = ("coriolis-appliance-registry",)
 
 Condition = tuple[str, str, str, str]
+
+
+def retry_conditions(category: str) -> list[Condition]:
+    """Return value-safe conditions for a retryable Kubernetes API failure."""
+    message = "Kubernetes resource reconciliation will be retried."
+    return [
+        (
+            "Accepted",
+            "True",
+            "Accepted",
+            "The requested profile and version are supported.",
+        ),
+        ("Progressing", "True", "Retrying", message),
+        ("Reconciled", "False", category, message),
+        ("Ready", "False", "RuntimeNotImplemented", RUNTIME_NOT_IMPLEMENTED_MESSAGE),
+        ("Degraded", "True", category, message),
+        ("Upgradeable", "False", "UpgradeNotSupported", UPGRADE_NOT_SUPPORTED_MESSAGE),
+    ]
 
 
 class RetainedClassification(Enum):
@@ -822,7 +841,7 @@ def preflight_foundational_resources(
 
 
 def collision_conditions(namespace: str, name: str) -> list[Condition]:
-    """Conditions when an existing marker conflicts and blocks reconciliation."""
+    """Conditions when an existing foundational resource blocks reconciliation."""
     message = RESOURCE_COLLISION_MESSAGE.format(namespace=namespace, name=name)
     return [
         (
@@ -833,7 +852,7 @@ def collision_conditions(namespace: str, name: str) -> list[Condition]:
         ),
         ("Progressing", "False", "ResourceCollision", message),
         ("Reconciled", "False", "ResourceCollision", message),
-        ("Ready", "False", "ResourceCollision", message),
+        ("Ready", "False", "RuntimeNotImplemented", RUNTIME_NOT_IMPLEMENTED_MESSAGE),
         ("Degraded", "True", "ResourceCollision", message),
         (
             "Upgradeable",
@@ -845,7 +864,7 @@ def collision_conditions(namespace: str, name: str) -> list[Condition]:
 
 
 def accepted_conditions() -> list[Condition]:
-    """Conditions for a valid, accepted, API-only reconcile."""
+    """Conditions for a valid foundational-resource reconcile."""
     return [
         (
             "Accepted",
