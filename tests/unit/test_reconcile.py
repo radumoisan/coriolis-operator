@@ -14,6 +14,7 @@ from coriolis_operator.main import reconcile_appliance
 from coriolis_operator.reconcile import (
     APPLIANCE_NAME_ANNOTATION,
     CORIOLIS_CREDENTIALS_KEYS,
+    DEPENDENCY_SERVICES,
     EXTERNAL_READ_ONLY_RESOURCES,
     INFRASTRUCTURE_CREDENTIALS_KEYS,
     MARKER_COLLISION,
@@ -31,6 +32,7 @@ from coriolis_operator.reconcile import (
     build_coriolis_config_map,
     build_coriolis_config_secret,
     build_coriolis_credentials_secret,
+    build_dependency_service,
     build_infrastructure_credentials_secret,
     build_resource_metadata,
     build_state_config_map,
@@ -224,6 +226,7 @@ def make_core_api(existing=None) -> MagicMock:
 
     api.read_namespaced_config_map.side_effect = read_config_map
     api.read_namespaced_secret.side_effect = _api_exception(404)
+    api.read_namespaced_service.side_effect = _api_exception(404)
     return api
 
 
@@ -723,6 +726,57 @@ def test_appliance_resource_builders_metadata_and_names(
         assert "type" not in body
 
 
+def test_dependency_service_definition_and_builders_have_exact_contract() -> None:
+    assert DEPENDENCY_SERVICES == (
+        ("rabbitmq", 5672),
+        ("memcached", 11211),
+        ("mariadb", 3306),
+        ("keystone", 5000),
+    )
+
+    for component, port in DEPENDENCY_SERVICES:
+        body = build_dependency_service(
+            appliance_name="example.domain",
+            namespace="operators",
+            accepted_version="2603.4",
+            owner=OWNER,
+            component=component,
+        )
+
+        assert body["apiVersion"] == "v1"
+        assert body["kind"] == "Service"
+        assert body["metadata"]["name"] == appliance_resource_name(
+            "example.domain", component
+        )
+        assert body["metadata"]["ownerReferences"] == [dict(OWNER, controller=True)]
+        assert body["spec"] == {
+            "type": "ClusterIP",
+            "selector": {
+                "coriolis.cloudbase.it/appliance": appliance_identity("example.domain"),
+                "coriolis.cloudbase.it/component": component,
+            },
+            "ports": [
+                {
+                    "name": component,
+                    "protocol": "TCP",
+                    "port": port,
+                    "targetPort": port,
+                }
+            ],
+        }
+
+
+def test_dependency_service_builder_rejects_unsupported_component() -> None:
+    with pytest.raises(ValueError, match="^unsupported dependency service component$"):
+        build_dependency_service(
+            appliance_name="example",
+            namespace="operators",
+            accepted_version="2603.4",
+            owner=OWNER,
+            component="barbican",
+        )
+
+
 @pytest.mark.parametrize(
     ("builder", "values", "retained"),
     [
@@ -1019,9 +1073,9 @@ def test_build_status_reports_accepted_api_only_slice() -> None:
                 "Reconciled",
                 "True",
                 "Reconciled",
-                "The foundational appliance resources and controller state marker "
-                "were reconciled in Kubernetes; runtime readiness is not implemented "
-                "yet.",
+                "The foundational appliance resources, dependency Services, and "
+                "controller state marker were reconciled in Kubernetes; runtime "
+                "readiness is not implemented yet.",
             ),
             condition(
                 "Ready",
@@ -1144,10 +1198,18 @@ def test_reconcile_appliance_server_side_applies_state_and_returns_status() -> N
         call.read_namespaced_secret(
             name="example-coriolis-config-secret", namespace="operators"
         ),
+        call.read_namespaced_service(name="example-rabbitmq", namespace="operators"),
+        call.read_namespaced_service(name="example-memcached", namespace="operators"),
+        call.read_namespaced_service(name="example-mariadb", namespace="operators"),
+        call.read_namespaced_service(name="example-keystone", namespace="operators"),
         call.create_namespaced_secret(namespace="operators", body=ANY),
         call.create_namespaced_secret(namespace="operators", body=ANY),
         call.create_namespaced_config_map(namespace="operators", body=ANY),
         call.create_namespaced_secret(namespace="operators", body=ANY),
+        call.create_namespaced_service(namespace="operators", body=ANY),
+        call.create_namespaced_service(namespace="operators", body=ANY),
+        call.create_namespaced_service(namespace="operators", body=ANY),
+        call.create_namespaced_service(namespace="operators", body=ANY),
         call.create_namespaced_config_map(namespace="operators", body=ANY),
     ]
     assert status["observedGeneration"] == 7
@@ -2673,3 +2735,183 @@ def test_core_api_construction_failure_patches_sanitized_status_before_retry(
     reconciled = patch.status.update.call_args.args[0]
     assert reconciled["conditions"][2]["reason"] == "ResourceReadFailed"
     assert "construction-sentinel-token" not in repr(reconciled)
+
+
+def _managed_dependency_service(
+    component: str, resource_version: str | None = "17"
+) -> dict:
+    body = build_dependency_service(
+        appliance_name="example",
+        namespace="operators",
+        accepted_version="2603.4",
+        owner=OWNER,
+        component=component,
+    )
+    if resource_version is not None:
+        body["metadata"]["resourceVersion"] = resource_version
+    return body
+
+
+def test_dependency_services_read_and_create_in_order() -> None:
+    api = make_core_api()
+
+    reconcile_appliance(
+        spec={"profile": "core", "version": "2603.4"},
+        meta=sample_meta(),
+        core_api=api,
+    )
+
+    read_names = [
+        call.kwargs["name"] for call in api.read_namespaced_service.call_args_list
+    ]
+    assert read_names == [
+        appliance_resource_name("example", component)
+        for component, _ in DEPENDENCY_SERVICES
+    ]
+    created_names = [
+        call.kwargs["body"]["metadata"]["name"]
+        for call in api.create_namespaced_service.call_args_list
+    ]
+    assert created_names == [
+        appliance_resource_name("example", component)
+        for component, _ in DEPENDENCY_SERVICES
+    ]
+    assert api.method_calls[-1] == call.create_namespaced_config_map(
+        namespace="operators", body=ANY
+    )
+
+
+def test_managed_dependency_services_use_guarded_ssa_and_restore_content_type() -> None:
+    api = make_core_api()
+    api.api_client.default_headers["Content-Type"] = "application/json"
+    api.read_namespaced_service.side_effect = [
+        _managed_dependency_service(component) for component, _ in DEPENDENCY_SERVICES
+    ]
+
+    def patch_service(**_: object) -> None:
+        assert (
+            api.api_client.default_headers["Content-Type"]
+            == "application/apply-patch+yaml"
+        )
+
+    api.patch_namespaced_service.side_effect = patch_service
+
+    reconcile_appliance(
+        spec={"profile": "core", "version": "2603.4"},
+        meta=sample_meta(),
+        core_api=api,
+    )
+
+    patched_names = [
+        call.kwargs["name"] for call in api.patch_namespaced_service.call_args_list
+    ]
+    assert patched_names == [
+        appliance_resource_name("example", component)
+        for component, _ in DEPENDENCY_SERVICES
+    ]
+    for service_call in api.patch_namespaced_service.call_args_list:
+        assert service_call.kwargs["body"]["metadata"]["resourceVersion"] == "17"
+        assert service_call.kwargs["field_manager"] == "coriolis-operator"
+        assert service_call.kwargs["force"] is True
+    assert api.api_client.default_headers["Content-Type"] == "application/json"
+
+
+def test_dependency_service_collision_has_no_writes_after_all_service_reads() -> None:
+    api = make_core_api()
+    collided = _managed_dependency_service("rabbitmq")
+    collided["metadata"]["labels"]["coriolis.cloudbase.it/component"] = "other"
+    api.read_namespaced_service.side_effect = [
+        collided,
+        *[_api_exception(404) for _ in DEPENDENCY_SERVICES[1:]],
+    ]
+
+    status = reconcile_appliance(
+        spec={"profile": "core", "version": "2603.4"},
+        meta=sample_meta(),
+        core_api=api,
+    )
+
+    assert api.read_namespaced_service.call_count == len(DEPENDENCY_SERVICES)
+    assert status["conditions"][2]["reason"] == "ResourceCollision"
+    assert "operators/example-rabbitmq" in status["conditions"][2]["message"]
+    assert not [
+        method
+        for method in api.method_calls
+        if method[0].startswith(("create", "patch"))
+    ]
+
+
+def test_dependency_service_read_error_and_missing_version_retry() -> None:
+    read_error_api = make_core_api()
+    read_error_api.read_namespaced_service.side_effect = client.ApiException(status=403)
+    missing_version_api = make_core_api()
+    missing_version_api.read_namespaced_service.side_effect = [
+        _managed_dependency_service("rabbitmq", resource_version=None),
+        *[_api_exception(404) for _ in DEPENDENCY_SERVICES[1:]],
+    ]
+
+    for api in (read_error_api, missing_version_api):
+        with pytest.raises(main.ReconcileRetry) as excinfo:
+            reconcile_appliance(
+                spec={"profile": "core", "version": "2603.4"},
+                meta=sample_meta(),
+                core_api=api,
+            )
+
+        expected = (
+            "ResourceReadFailed" if api is read_error_api else "ResourceApplyFailed"
+        )
+        assert excinfo.value.status["conditions"][2]["reason"] == expected
+        assert not [
+            method
+            for method in api.method_calls
+            if method[0].startswith(("create", "patch"))
+        ]
+
+
+@pytest.mark.parametrize("operation", ["create", "patch"])
+def test_dependency_service_apply_failure_prevents_marker_write(operation: str) -> None:
+    api = make_core_api()
+    if operation == "patch":
+        api.read_namespaced_service.side_effect = [
+            _managed_dependency_service(component)
+            for component, _ in DEPENDENCY_SERVICES
+        ]
+        api.patch_namespaced_service.side_effect = [
+            None,
+            client.ApiException(status=409),
+        ]
+    else:
+        api.create_namespaced_service.side_effect = [
+            None,
+            client.ApiException(status=409),
+        ]
+
+    with pytest.raises(main.ReconcileRetry) as excinfo:
+        reconcile_appliance(
+            spec={"profile": "core", "version": "2603.4"},
+            meta=sample_meta(),
+            core_api=api,
+        )
+
+    assert excinfo.value.status["conditions"][2]["reason"] == "ResourceApplyFailed"
+    assert api.create_namespaced_config_map.call_count == 1
+    assert (
+        api.create_namespaced_config_map.call_args.kwargs["body"]["metadata"]["name"]
+        == "example-coriolis-config"
+    )
+    service_calls = getattr(api, f"{operation}_namespaced_service").call_args_list
+    service_names = [
+        service_call.kwargs["body"]["metadata"]["name"]
+        if operation == "create"
+        else service_call.kwargs["name"]
+        for service_call in service_calls
+    ]
+    assert service_names == [
+        "example-rabbitmq",
+        "example-memcached",
+    ]
+    assert len(service_calls) == 2
+    assert api.create_namespaced_secret.call_count == 3
+    api.patch_namespaced_config_map.assert_not_called()
+    assert not [method for method in api.method_calls if method[0].startswith("delete")]

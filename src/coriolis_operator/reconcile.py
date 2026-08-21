@@ -33,8 +33,8 @@ RUNTIME_NOT_IMPLEMENTED_MESSAGE = "The appliance runtime is not implemented yet.
 NOT_DEGRADED_MESSAGE = "The appliance is not degraded."
 NOT_RECONCILED_MESSAGE = "No resources were applied to Kubernetes."
 RECONCILED_MESSAGE = (
-    "The foundational appliance resources and controller state marker were reconciled "
-    "in Kubernetes; runtime readiness is not implemented yet."
+    "The foundational appliance resources, dependency Services, and controller state "
+    "marker were reconciled in Kubernetes; runtime readiness is not implemented yet."
 )
 UPGRADE_NOT_SUPPORTED_MESSAGE = "The core profile has no supported upgrade path."
 RESOURCE_COLLISION_MESSAGE = (
@@ -84,6 +84,12 @@ CORIOLIS_CONFIG_KEYS = frozenset(
     }
 )
 CORIOLIS_CONFIG_SECRET_KEYS = frozenset({"coriolis.conf"})
+DEPENDENCY_SERVICES = (
+    ("rabbitmq", 5672),
+    ("memcached", 11211),
+    ("mariadb", 3306),
+    ("keystone", 5000),
+)
 
 # Pre-existing resources the operator references read-only and must never
 # create, adopt, mutate, or classify as operator-retained. The registry pull
@@ -301,6 +307,48 @@ def build_state_config_map(
             "acceptedVersion": accepted_version,
             "profile": profile,
             "generation": str(generation),
+        },
+    }
+
+
+def build_dependency_service(
+    *,
+    appliance_name: str,
+    namespace: str,
+    accepted_version: str,
+    owner: Mapping[str, Any],
+    component: str,
+) -> dict[str, Any]:
+    """Build the ClusterIP Service for one supported appliance dependency."""
+    ports = dict(DEPENDENCY_SERVICES)
+    if component not in ports:
+        raise ValueError("unsupported dependency service component")
+    port = ports[component]
+    return {
+        "apiVersion": "v1",
+        "kind": "Service",
+        "metadata": build_resource_metadata(
+            resource_name=appliance_resource_name(appliance_name, component),
+            namespace=namespace,
+            appliance_name=appliance_name,
+            component=component,
+            accepted_version=accepted_version,
+            owner=owner,
+        ),
+        "spec": {
+            "type": "ClusterIP",
+            "selector": {
+                "coriolis.cloudbase.it/appliance": appliance_identity(appliance_name),
+                "coriolis.cloudbase.it/component": component,
+            },
+            "ports": [
+                {
+                    "name": component,
+                    "protocol": "TCP",
+                    "port": port,
+                    "targetPort": port,
+                }
+            ],
         },
     }
 

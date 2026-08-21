@@ -40,6 +40,14 @@ rules:
   - apiGroups:
       - ""
     resources:
+      - services
+    verbs:
+      - get
+      - create
+      - patch
+  - apiGroups:
+      - ""
+    resources:
       - events
     verbs:
       - create

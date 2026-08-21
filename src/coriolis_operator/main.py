@@ -15,6 +15,7 @@ from coriolis_operator.configuration import (
     render_sensitive_coriolis_config,
 )
 from coriolis_operator.reconcile import (
+    DEPENDENCY_SERVICES,
     MARKER_COLLISION,
     SUPPORTED_INITIAL_VERSION,
     SUPPORTED_PROFILE,
@@ -26,10 +27,12 @@ from coriolis_operator.reconcile import (
     build_coriolis_config_map,
     build_coriolis_config_secret,
     build_coriolis_credentials_secret,
+    build_dependency_service,
     build_infrastructure_credentials_secret,
     build_state_config_map,
     build_status,
     classify_existing_marker,
+    classify_owned_resource,
     collision_conditions,
     kubernetes_coriolis_render_inputs,
     preflight_foundational_resources,
@@ -186,7 +189,7 @@ def reconcile_appliance(
     status: Mapping[str, Any] | None = None,
     core_api: client.CoreV1Api | None = None,
 ) -> dict[str, Any]:
-    """Reconcile foundational resources and return the accepted status."""
+    """Reconcile foundational resources and dependency Services."""
     name = str(meta["name"])
     namespace = str(meta["namespace"])
     generation = int(meta["generation"])
@@ -250,6 +253,10 @@ def reconcile_appliance(
         )
         config_map_name = appliance_resource_name(name, "coriolis-config")
         config_secret_name = appliance_resource_name(name, "coriolis-config-secret")
+        dependency_service_names = tuple(
+            (component, appliance_resource_name(name, component))
+            for component, _ in DEPENDENCY_SERVICES
+        )
     except ReconcileRetry:
         raise
     except Exception:
@@ -304,6 +311,21 @@ def reconcile_appliance(
         accepted_version=accepted_version,
         status=status,
     )
+    dependency_services_existing = tuple(
+        (
+            component,
+            service_name,
+            _read_or_absent(
+                api.read_namespaced_service,
+                name=service_name,
+                namespace=namespace,
+                generation=generation,
+                accepted_version=accepted_version,
+                status=status,
+            ),
+        )
+        for component, service_name in dependency_service_names
+    )
     try:
         marker_classification = (
             classify_existing_marker(existing=marker_existing, desired=marker_body)
@@ -346,6 +368,23 @@ def reconcile_appliance(
             ),
             None,
         )
+        service_classifications = tuple(
+            (
+                component,
+                service_name,
+                existing,
+                classify_owned_resource(
+                    existing=existing,
+                    resource_name=service_name,
+                    namespace=namespace,
+                    appliance_name=name,
+                    component=component,
+                    accepted_version=requested_version,
+                    owner=owner,
+                ),
+            )
+            for component, service_name, existing in dependency_services_existing
+        )
     except ReconcileRetry:
         raise
     except Exception:
@@ -359,10 +398,33 @@ def reconcile_appliance(
             conditions=collision_conditions(namespace, collision),
             prior_conditions=_prior_conditions(status),
         )
+    service_collision = next(
+        (
+            service_name
+            for _, service_name, _, classification in service_classifications
+            if classification is OwnedClassification.COLLISION
+        ),
+        None,
+    )
+    if service_collision is not None:
+        return build_status(
+            generation,
+            accepted_version=accepted_version,
+            conditions=collision_conditions(namespace, service_collision),
+            prior_conditions=_prior_conditions(status),
+        )
     for existing, classification in (
         (config_map_existing, preflight.classifications[config_map_name]),
         (config_secret_existing, preflight.classifications[config_secret_name]),
     ):
+        if (
+            classification is OwnedClassification.MANAGED
+            and _resource_version(existing) is None
+        ):
+            raise _retry_status(
+                generation, accepted_version, status, "ResourceApplyFailed"
+            )
+    for _, _, existing, classification in service_classifications:
         if (
             classification is OwnedClassification.MANAGED
             and _resource_version(existing) is None
@@ -419,6 +481,19 @@ def reconcile_appliance(
             retention=STATE_CREDENTIALS_RETENTION,
             values=preflight.credentials[infrastructure_credentials_name],
         )
+        dependency_service_bodies = tuple(
+            (
+                component,
+                build_dependency_service(
+                    appliance_name=name,
+                    namespace=namespace,
+                    accepted_version=requested_version,
+                    owner=owner,
+                    component=component,
+                ),
+            )
+            for component, _ in DEPENDENCY_SERVICES
+        )
     except ReconcileRetry:
         raise
     except Exception:
@@ -464,6 +539,19 @@ def reconcile_appliance(
             body=body,
             existing=existing,
             category=category,
+            generation=generation,
+            accepted_version=accepted_version,
+            status=status,
+        )
+    for (_, body), (_, _, existing, classification) in zip(
+        dependency_service_bodies, service_classifications, strict=True
+    ):
+        _create_or_apply(
+            api,
+            kind="service",
+            body=body,
+            existing=existing,
+            category="ResourceApplyFailed",
             generation=generation,
             accepted_version=accepted_version,
             status=status,
