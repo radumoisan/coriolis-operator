@@ -2,13 +2,15 @@
 
 Validate the work relevant to each change.
 
-## :material-book-open-page-variant-outline: Current Foundational Runtime Gate Validation
+## :material-book-open-page-variant-outline: Current Foundational And Service Validation
 
-- `uv run pytest tests/unit` passed: 243 tests.
-- `uv run ruff check .`, `uv run ruff format --check .` (35 files already formatted), `uv run mypy src`, `helm lint helm/`, `helm template coriolis-operator helm/ --include-crds`, and `git diff --check` passed.
-- Coverage includes the completed local marker-plus-four runtime gate: exact ordered pre-reads with only `404` absent; metadata-first preflight/rendering before writes; retained `state-credentials` create/reuse with no reuse write; resourceVersion-guarded SSA; ordered foundational writes with marker last; no rollback; sanitized retry status before `kopf.TemporaryError`; stable `ResourceCollision`; and `Ready=False/RuntimeNotImplemented`.
+- The foundational gate is committed locally at `862777d`, with status commit `f219977`; both are unpushed and undeployed.
+- Validation passed: `uv run pytest tests/unit` (252 passed); Ruff lint; Ruff format check (35 files already formatted); mypy; Helm lint/template; and `git diff --check`.
+- Coverage includes the marker-plus-four foundational gate and the current Service slice: the existing read prefix, then RabbitMQ `5672`, Memcached `11211`, MariaDB `3306`, and Keystone `5000` Service pre-reads in order; only `404` absent; all reads/classification/preflight/rendering/manifest construction before writes; guarded SSA for managed Services; foundational writes, then Services in frozen order, marker last; no rollback; sanitized retry failures; stable `ResourceCollision`; and `Ready=False/RuntimeNotImplemented`.
 
-This work is uncommitted, unpushed, and undeployed. No Services, Ingress resources, workloads, storage, bootstrap, probes/readiness, rotation, or deployment was added; deployed `0.5.3` remains marker-only.
+The four-Service slice is committed locally at `797235b` on `dev`, unpushed and undeployed. No workloads, endpoints, Ingress resources, Jobs, storage, bootstrap, probes/readiness, rotation, additional Services, or deployment was added; deployed `0.5.3` remains marker-only.
+
+The next stage is dependency workload/bootstrap/storage/readiness design and implementation. Barbican and all other Services remain deferred; no Ingress route is emitted before its backend Service exists.
 
 For the controller skeleton, these local validations have passed:
 
@@ -108,7 +110,7 @@ This pure slice is **committed locally at `35eac9b` on `dev`, but not pushed or 
 
 - The documentation-only contract is **committed locally at `574efcf` on `dev`, but not pushed or deployed**. No renderer implementation/tests or runtime behavior changed; deployed `0.5.3` remains marker-only.
 - Documentation validation reviewed every immutable upstream base-template variable and all 16 provider fragments. It preserved authoritative provider lists/order/module maps, froze no initial custom module overrides and disabled compression/compressor, and confirmed the complete `coriolis.conf` remains exactly one key in the owner-referenced configuration Secret, never ConfigMap/log/status/event/metadata/documentation content.
-- Documentation validation also confirmed explicit internal dependency inputs, source-audited identities/paths, credential mappings, strict value-safe validation, redacted interface boundary, no CRD fields, and exactly `coriolis.cloudbase.it/retention: state-credentials` on all three generated credential Secrets. TLS/CA material, provider connection/private data, optional credentials, dependency Services/workloads, bootstrap, storage, readiness, and rotation remain deferred.
+- At that stage, documentation validation also confirmed explicit internal dependency inputs, source-audited identities/paths, credential mappings, strict value-safe validation, redacted interface boundary, no CRD fields, and exactly `coriolis.cloudbase.it/retention: state-credentials` on all three generated credential Secrets. TLS/CA material, provider connection/private data, optional credentials, dependency Services/workloads, bootstrap, storage, readiness, and rotation remained deferred.
 - `git diff --check` passed. This is documentation validation evidence, not code-test evidence; no code test count is claimed.
 
 At `574efcf`, the next sequence was pure renderer implementation/tests, then multi-resource semantics; this is retained documentation-contract history.
@@ -125,7 +127,7 @@ The pure renderer is **committed locally at `9bb20f3` on `dev`, but not pushed o
 
 - The historical, superseded policy in [Foundational Resource Contract](foundational-resource-contract.md) records validation; marker and five-resource pre-reads/classification; pure preparation before mutation; canonical operations; marker last; non-transactional failure handling; and value-safe status outcomes.
 - This documentation-only slice changes no runtime code, Kubernetes interaction, RBAC, CRD, resource, chart/release, or deployment behavior. `git diff --check` is its only validation; no code test count is claimed. The current code coverage fact remains that API failures presently propagate, which is distinct from the frozen future runtime semantics.
-- Next implementation: collision-safe marker-plus-four reads/create/guarded SSA, Secret/ConfigMap `get`/`create`/`patch` RBAC, sanitized status then Kopf retry, and exhaustive tests. Services, Ingress, and workloads follow later.
+- At that stage, the next implementation was collision-safe marker-plus-four reads/create/guarded SSA, Secret/ConfigMap `get`/`create`/`patch` RBAC, sanitized status then Kopf retry, and exhaustive tests. Services, Ingress, and workloads followed later.
 
 ## :material-book-open-page-variant-outline: Current Pure Contract/Input Migration
 

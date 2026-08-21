@@ -20,15 +20,15 @@ Community ingress-nginx is the short-term controller. The future operator will o
 
 Ingress is the only external exposure. Backend and dependency Services are ClusterIP and plaintext, which assumes a trusted cluster network and is not encryption. Ingress terminates TLS and redirects HTTPS, then uses HTTP backends. The route, rewrite, exact-origin CORS/preflight, auth-header, and WebSocket contract is frozen in the [Foundational Resource Contract](foundational-resource-contract.md). No route is emitted before its Service exists.
 
-## :material-book-open-page-variant-outline: Current Blocker And Ordering
+## :material-book-open-page-variant-outline: Current Implementation Boundary
 
-The next runtime integration is limited to collision-safe reads, create/guarded SSA, and status retry for the marker plus four foundational resources: two retained credential Secrets, the configuration ConfigMap, and the configuration Secret. Add only the required Secret/ConfigMap `get`/`create`/`patch` RBAC and exhaustive tests.
+The marker-plus-four foundational integration is committed locally at `862777d`, with status commit `f219977`; both are unpushed and undeployed. The four-Service slice is committed locally at `797235b` on `dev`, unpushed and undeployed, retains its read prefix, and implements exactly four Services in frozen order: RabbitMQ `5672`, Memcached `11211`, MariaDB `3306`, and Keystone `5000`. All reads, classifications, foundational preflight/rendering, and manifest construction complete before writes; managed Services use resourceVersion-guarded SSA; writes remain foundational resources, then Services in order, marker last. Secret, ConfigMap, and Service RBAC are exactly `get`/`create`/`patch`.
 
-Services, Ingress, dependency bootstrap, workloads, probes, storage, readiness, and route emission remain later milestones. No Kubernetes runtime I/O, Services, Ingresses, or workloads are implemented now.
+Dependency workloads, bootstrap, storage, probes, readiness, Barbican and other Services, and route emission remain later milestones. No workloads, endpoints, Ingresses, or Jobs are implemented. No route may be emitted before its backend Service exists.
 
 ## :material-book-open-page-variant-outline: API And Lifecycle Policy
 
-The `v1alpha1` API retains optional/defaulted `spec.profile` (`core`), required non-empty `spec.version`, and optional `status.acceptedVersion`; version changes are controller-blocked through status rather than admission. The ingress CRD fields, sample, and pure validation/resolution changed in this slice. No `main.py`, runtime Kubernetes I/O, RBAC, Service, Ingress resource, workload, release/chart/image, or deployment behavior changed.
+The `v1alpha1` API retains optional/defaulted `spec.profile` (`core`), required non-empty `spec.version`, and optional `status.acceptedVersion`; version changes are controller-blocked through status rather than admission. The ingress CRD fields, sample, and pure validation/resolution remain local-only. The current Service slice adds runtime Kubernetes I/O and Service RBAC but no Ingress resource, workload, release/chart/image, CRD version, or deployment behavior.
 
 The condition types are `Accepted`, `Progressing`, `Reconciled`, `Ready`, `Degraded`, and `Upgradeable`. `Ready=False/RuntimeNotImplemented` remains truthful until required dependencies, workloads, and internal checks exist. Future deletion garbage-collects operator-owned workloads, Services, Jobs, and generated ConfigMaps; retained state credentials and PVCs survive, and external referenced Secrets are never deleted.
 
@@ -36,7 +36,7 @@ The condition types are `Accepted`, `Progressing`, `Reconciled`, `Ready`, `Degra
 
 The privileged worker may mount `/dev` and `/lib/modules`; single-node `local-path` storage is acceptable and not production HA. Console-editor behavior must be declarative rather than host mutation. Logger Unix-socket compatibility may use a shared retained volume as a transitional design.
 
-Milestone history remains: image/runtime inventory is complete; the API slice is local and undeployed; the deployed `0.5.3` remains marker-only. The next milestone is marker-plus-four foundational runtime integration, followed later by dependencies/bootstrap, workloads, Services/Ingresses, status/readiness, tests, and development acceptance. The first runtime acceptance is complete bootstrap with internally healthy UI/API, not a migration test.
+Milestone history remains: image/runtime inventory is complete; the foundational gate is committed locally but unpushed and undeployed; the four-Service slice is committed locally at `797235b` on `dev`, unpushed and undeployed; and the deployed `0.5.3` remains marker-only. The four-Service slice is limited to the four dependency Services. The next stage is dependency workload/bootstrap/storage/readiness design and implementation; remaining Services and Ingress routes follow only after their backends are defined. The first runtime acceptance is complete bootstrap with internally healthy UI/API, not a migration test.
 
 Deferred work includes the licensing server and UI, Metal Hub, console editor and VM-host administration, external provider configuration, migration validation, automatic upgrades, and production HA.
 
@@ -44,10 +44,10 @@ Deferred work includes the licensing server and UI, Metal Hub, console editor an
 
 1. Image and runtime inventory is complete.
 2. CRD and runtime API are locally implemented and undeployed; this migration adds ingress schema/sample/pure validation only.
-3. Foundational resources next implement collision-safe marker-plus-four reads, create/guarded SSA, minimal Secret/ConfigMap RBAC, status retry, and exhaustive tests.
+3. Foundational resources are committed locally at `862777d` with status commit `f219977`; the four-Service slice is committed locally at `797235b` on `dev`, unpushed and undeployed, and adds only four dependency Services with matching guarded reconciliation and Service `get`/`create`/`patch` RBAC.
 4. Generated configuration retains immutable upstream provenance, provider order/maps, exact mount boundaries, and value-safe Secret handling.
-5. Foundational dependencies and bootstrap Jobs remain later work.
-6. Workloads, then their ClusterIP Services and logical-origin Ingress routing, remain later work; no route precedes its Service.
+5. Dependency workloads, bootstrap Jobs, storage, and readiness remain later work.
+6. Barbican and other backend Services, then logical-origin Ingress routing, remain later work; no route precedes its Service.
 7. Controller watches, status/readiness, broader tests, and development acceptance follow runtime construction.
 
 ## :material-book-open-page-variant-outline: Image Gate History

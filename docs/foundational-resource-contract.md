@@ -97,11 +97,11 @@ Workloads will mount the generated ConfigMap and configuration Secret together a
 
 ### :material-application-edit-outline: Marker-Plus-Four Ordering
 
-The runtime integration validates profile/version, collision-safely reads the marker, then reads these four resources in order: Coriolis credentials Secret, infrastructure credentials Secret, configuration ConfigMap, configuration Secret. A `404` is absent; any other read error stops before mutation. Preflight classifies metadata before retained-Secret semantic validation; a semantic failure fails closed as `COLLISION`. Credential reuse/generation, rendering, and desired-manifest construction finish before the first write.
+The runtime integration validates profile/version, collision-safely reads the marker, then reads these four resources in order: Coriolis credentials Secret, infrastructure credentials Secret, configuration ConfigMap, configuration Secret. It then reads the locally implemented Services in frozen order: RabbitMQ `5672`, Memcached `11211`, MariaDB `3306`, and Keystone `5000`. A `404` is absent; any other read error stops before mutation. Classification, foundational preflight, rendering, and all desired-manifest construction finish before the first write.
 
-Create absent resources collision-safely; apply managed owner-referenced resources with guarded SSA; never write retained reuse. Apply the marker last. `AlreadyExists` and resource-version conflicts retry from fresh reads. A failure writes a sanitized status before framework retry, with no rollback or compensation. `ResourceCollision` is non-transient and mutation-free. The historical marker-plus-five sequence, including Step CA credentials, is superseded and retained only as validation history.
+Create absent resources collision-safely; apply managed owner-referenced resources with resourceVersion-guarded SSA; never write retained reuse. Write the four foundational resources, then the four Services in frozen order, and apply the marker last. `AlreadyExists` and resource-version conflicts retry from fresh reads. A failure writes a sanitized status before framework retry, with no rollback or compensation. `ResourceCollision` is non-transient and mutation-free. The historical marker-plus-five sequence, including Step CA credentials, is superseded and retained only as validation history.
 
-The marker-plus-four runtime gate is complete locally. Services, Ingress, dependencies, workloads, storage, probes, bootstrap, credential rotation, and remaining runtime design are later work. `Ready=False/RuntimeNotImplemented` remains the truthful status until runtime readiness is implemented.
+The marker-plus-four runtime gate is committed locally at `862777d`, with status commit `f219977`; both are unpushed and undeployed. The four-Service slice is committed locally at `797235b` on `dev`, unpushed and undeployed. Workloads, endpoints, Ingress, Jobs, storage, probes, bootstrap, credential rotation, remaining Services, and runtime design are later work. `Ready=False/RuntimeNotImplemented` remains the truthful status until runtime readiness is implemented.
 
 ## :material-book-open-page-variant-outline: Ingress And Service Contract
 
@@ -117,7 +117,7 @@ Ingress has not been reconciled. Community ingress-nginx is the short-term contr
 
 ### :material-application-edit-outline: Service And Exposure Policy
 
-Only Ingress is externally exposed. Every backend and dependency Service is ClusterIP and plaintext on the trusted cluster network; ClusterIP does not encrypt traffic. TLS and HTTPS redirect terminate at Ingress, with HTTP to backends.
+Only Ingress is externally exposed. The locally implemented RabbitMQ, Memcached, MariaDB, and Keystone Services are ClusterIP and plaintext on the trusted cluster network; ClusterIP does not encrypt traffic. TLS and HTTPS redirect terminate at Ingress, with HTTP to backends. Other listed ports and routes remain contract-only until their Services are implemented.
 
 | Component | Service port |
 | --- | ---: |
@@ -147,11 +147,11 @@ The public contract is one origin, `https://<host>`. It may use multiple ingress
 | `/licensing` | licensing server `/v2` |
 | `/metal-hub` | Metal Hub `/api/v1` |
 
-No future route may be emitted until its backend Service exists. No Service, Ingress, or workload resource is implemented today. Before adding the web workload, prove offline that the web image starts without `CA_FINGERPRINT` and without a Step CA mount.
+No future route may be emitted until its backend Service exists. RabbitMQ, Memcached, MariaDB, and Keystone Services are locally implemented; no workloads, endpoints, Ingress, or other Services are implemented. Before adding the web workload, prove offline that the web image starts without `CA_FINGERPRINT` and without a Step CA mount.
 
 ## :material-book-open-page-variant-outline: Current Status And Accuracy
 
-The immutable upstream appliance source still contains Step CA and web-proxy roles. They are historical source evidence, not initial Kubernetes runtime selection. The pure helper, renderer, configuration, retained-resource, and ingress-resolution slices, plus the marker-plus-four runtime integration, are locally implemented and validated by 243 unit tests. Runtime reconciliation now performs the ordered reads/preflight/rendering and guarded writes defined above; Secret and ConfigMap RBAC is exactly `get`/`create`/`patch`. No Service or Ingress resource, workload, release, chart, image, or deployment behavior changed. Deployed `0.5.3` remains marker-only.
+The immutable upstream appliance source still contains Step CA and web-proxy roles. They are historical source evidence, not initial Kubernetes runtime selection. The foundational runtime integration is committed locally at `862777d`, with status commit `f219977`; both are unpushed and undeployed. The four-Service slice is committed locally at `797235b` on `dev`, unpushed and undeployed, and adds only RabbitMQ, Memcached, MariaDB, and Keystone Services. Each uses deterministic `appliance_resource_name`, standard owner-referenced metadata, ClusterIP/plaintext with no explicit `clusterIP`/`clusterIPs`, selector exactly the label-safe appliance identity plus component, and one named TCP Service/target port at the same fixed number. Secret, ConfigMap, and Service RBAC are each exactly `get`/`create`/`patch`. Validation passed: 252 unit tests, Ruff lint, Ruff format check (35 files already formatted), mypy, Helm lint/template, and `git diff --check`. No workload, endpoint, Ingress, Job, release, chart, image, or deployment behavior changed. Deployed `0.5.3` remains marker-only.
 
 ### :material-application-edit-outline: Preserved Source And Slice Record
 
@@ -227,7 +227,7 @@ The following former facts remain historical evidence and must not be treated as
 - `35eac9b`: historical five-resource preflight slice, local only and superseded only for its Step CA entry.
 - `9bb20f3`: sensitive configuration renderer slice, local only and not deployed.
 
-These slice records establish pure/API behavior only. The subsequent local marker-plus-four runtime gate adds `main.py` reconciliation, ordered Kubernetes reads/writes/guarded SSA, exact Secret/ConfigMap `get`/`create`/`patch` RBAC, and sanitized status-then-Kopf-retry handling; it does not add Services, Ingress resources, workloads, readiness, chart/release/image versioning, TLS bootstrap, storage, rotation, or deployment.
+These slice records establish pure/API behavior only. The subsequent marker-plus-four runtime gate adds `main.py` reconciliation, ordered Kubernetes reads/writes/guarded SSA, exact Secret/ConfigMap `get`/`create`/`patch` RBAC, and sanitized status-then-Kopf-retry handling. The four-Service slice is committed locally at `797235b` on `dev`, unpushed and undeployed, and adds only the four documented Services; Ingress resources, workloads, readiness, chart/release/image versioning, TLS bootstrap, storage, rotation, and deployment remain deferred.
 
 ## :material-book-open-page-variant-outline: Dependency And Resource Plan
 
@@ -239,12 +239,12 @@ The future evidence-informed order is MariaDB, Kolla infrastructure services, `c
 
 ## :material-book-open-page-variant-outline: Unresolved Gates
 
-The marker API/migration, metadata, retained-resource classifier, builders, credential generation, retained Secret validation, non-sensitive renderer, preflight, sensitive renderer, Kubernetes render-input factory, derived template variants, and ingress schema/resolver are local pure/API slices. The completed local marker-plus-four runtime gate implements the exact ordered pre-reads, metadata-first preflight/rendering before writes, retained `state-credentials` create/reuse with reuse no-write, resourceVersion-guarded SSA for managed resources, four ordered foundational writes with marker last, no rollback, sanitized retry status before `kopf.TemporaryError`, and exact Secret/ConfigMap `get`/`create`/`patch` RBAC. It is validated by 243 unit tests. It does not add Service or Ingress resources, workloads, release/chart/image, or deployment behavior.
+The marker API/migration, metadata, retained-resource classifier, builders, credential generation, retained Secret validation, non-sensitive renderer, preflight, sensitive renderer, Kubernetes render-input factory, derived template variants, and ingress schema/resolver are local pure/API slices. The marker-plus-four runtime gate is committed locally at `862777d`, with status commit `f219977`; both are unpushed and undeployed. The four-Service slice is committed locally at `797235b` on `dev`, unpushed and undeployed, retains its read prefix, pre-reads the four Services in frozen order, completes all reads/classification/foundational preflight/rendering/manifest construction before writes, uses guarded SSA for managed Services, writes foundational resources then Services in order with marker last, and has no rollback. Validation passed: 252 unit tests, Ruff lint, Ruff format check (35 files already formatted), mypy, Helm lint/template, and `git diff --check`; Service RBAC is exactly `get`/`create`/`patch`. It adds no workloads, endpoints, Ingresses, Jobs, release/chart/image, or deployment behavior.
 
-Remaining gates are storage/PVC layout; probes/readiness/bootstrap; credential rotation; provider private material; optional component credentials; runtime Services, Ingresses, workloads, and route emission; and remaining runtime design. No runtime readiness is claimed.
+Remaining gates are dependency workload/bootstrap/storage/readiness design and implementation; probes; credential rotation; provider private material; optional component credentials; Barbican and other backend Services; Ingress route emission after each backend Service exists; and remaining runtime design. No runtime readiness is claimed.
 
 ### :material-application-edit-outline: Milestone History
 
 - `ab9df83` is the local API slice; `fbab6e5` adds label-safe naming/metadata; `d8df00f` adds marker pre-read/migration handling; and `1b73045` adds pure retained-resource classification. None is deployed.
 - `050f16e` adds pure manifest builders; `a604579` adds credential generation; `5165629` adds retained Secret semantic validation; `97153a7` adds non-sensitive rendering; `35eac9b` adds the historical five-resource preflight; and `9bb20f3` adds sensitive rendering. The historical three-Secret preflight is superseded by the current marker-plus-four contract.
-- The completed local marker-plus-four runtime gate follows the present ingress/pure-input slice. The complete local unit suite reports 243 passing tests. It is uncommitted, unpushed, and undeployed; deployed `0.5.3` remains marker-only.
+- The marker-plus-four runtime gate follows the present ingress/pure-input slice and is committed locally at `862777d`, with status commit `f219977`; both are unpushed and undeployed. The four-Service slice is committed locally at `797235b` on `dev`, unpushed and undeployed, raises the local unit count to 252, and implements only RabbitMQ, Memcached, MariaDB, and Keystone Services; deployed `0.5.3` remains marker-only.

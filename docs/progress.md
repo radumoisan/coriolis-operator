@@ -169,3 +169,15 @@ Committed the pure Kubernetes networking/configuration contract locally at `e2dd
 ## :material-book-open-page-variant-outline: 2026-08-21: Marker-Plus-Four Foundational Runtime Gate Completed Locally
 
 Completed the local, uncommitted, unpushed, and undeployed marker-plus-four foundational runtime gate. Reconciliation performs the marker plus four exact ordered pre-reads, treats only `404` as absent, completes metadata-first preflight/rendering before writes, creates absent retained `state-credentials` or reuses it without writing, uses resourceVersion-guarded SSA for managed resources, writes the four foundational resources in order with the marker last, and provides no rollback. Retryable failures publish sanitized `ResourceReadFailed`, `ResourceApplyFailed`, or `MarkerApplyFailed` status before `kopf.TemporaryError`; `ResourceCollision` remains stable and mutation-free, and success remains `Ready=False/RuntimeNotImplemented`. Secret and ConfigMap RBAC is exactly `get`/`create`/`patch`. Validation passed: `uv run pytest tests/unit` (243 passed); `uv run ruff check .`; `uv run ruff format --check .` (35 files already formatted); `uv run mypy src`; `helm lint helm/`; `helm template coriolis-operator helm/ --include-crds`; and `git diff --check`. No Services, Ingress resources, workloads, storage, bootstrap, probes/readiness, rotation, deployment, or version change was added; deployed `0.5.3` remains unchanged and marker-only. Services, Ingress, workloads, and remaining runtime design are deferred.
+
+## :material-book-open-page-variant-outline: 2026-08-21: Foundational Gate Committed Locally
+
+The marker-plus-four foundational runtime gate is committed locally at `862777d` on `dev`, with status commit `f219977`; both remain unpushed and undeployed. Deployed release `0.5.3` remains unchanged and marker-only.
+
+## :material-book-open-page-variant-outline: 2026-08-21: Four Dependency Services Implemented Locally
+
+Implemented the current uncommitted, unpushed, and undeployed Service slice: RabbitMQ `5672`, Memcached `11211`, MariaDB `3306`, and Keystone `5000`, in frozen order. The Services are owner-referenced ClusterIP/plaintext resources with deterministic names, standard metadata, label-safe identity/component selectors, and one named TCP port; no workloads, endpoints, Ingresses, Jobs, or additional Services were added. Validation before documentation changes passed: 252 unit tests, Ruff lint/format, mypy, and Helm lint/template; `Ready=False/RuntimeNotImplemented` remains expected.
+
+## :material-book-open-page-variant-outline: 2026-08-22: Four Dependency Services Committed Locally
+
+The four-Service implementation is committed locally at `797235b` on `dev`, unpushed and undeployed: RabbitMQ `5672`, Memcached `11211`, MariaDB `3306`, and Keystone `5000`. Full validation passed with 252 unit tests, Ruff lint/format, mypy, Helm lint/template, and `git diff --check`; deployed `0.5.3` remains unchanged and marker-only.
