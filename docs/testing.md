@@ -2,6 +2,14 @@
 
 Validate the work relevant to each change.
 
+## :material-book-open-page-variant-outline: Current Foundational Runtime Gate Validation
+
+- `uv run pytest tests/unit` passed: 243 tests.
+- `uv run ruff check .`, `uv run ruff format --check .` (35 files already formatted), `uv run mypy src`, `helm lint helm/`, `helm template coriolis-operator helm/ --include-crds`, and `git diff --check` passed.
+- Coverage includes the completed local marker-plus-four runtime gate: exact ordered pre-reads with only `404` absent; metadata-first preflight/rendering before writes; retained `state-credentials` create/reuse with no reuse write; resourceVersion-guarded SSA; ordered foundational writes with marker last; no rollback; sanitized retry status before `kopf.TemporaryError`; stable `ResourceCollision`; and `Ready=False/RuntimeNotImplemented`.
+
+This work is uncommitted, unpushed, and undeployed. No Services, Ingress resources, workloads, storage, bootstrap, probes/readiness, rotation, or deployment was added; deployed `0.5.3` remains marker-only.
+
 For the controller skeleton, these local validations have passed:
 
 - Python 3.12 Ruff format.

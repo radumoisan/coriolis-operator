@@ -1,6 +1,6 @@
 # Foundational Resource Contract
 
-This page freezes the foundational Kubernetes resource contract for the `core` profile. It records policy, authoritative evidence, and implemented pure/API-local slices; it does not claim runtime Kubernetes reconciliation. The deployed operator `0.5.3` remains marker-only.
+This page freezes the foundational Kubernetes resource contract for the `core` profile. It records policy, authoritative evidence, implemented pure/API-local slices, and the completed local marker-plus-four runtime gate. The deployed operator `0.5.3` remains marker-only.
 
 !!! note
     Earlier commits documented three retained Secrets, Step CA bootstrap, and a marker-plus-five-resource sequence. Those are historical design and validation facts only. They are superseded by the marker-plus-four-resource contract below; no past commit, mirror result, or source input is rewritten.
@@ -97,11 +97,11 @@ Workloads will mount the generated ConfigMap and configuration Secret together a
 
 ### :material-application-edit-outline: Marker-Plus-Four Ordering
 
-The next runtime integration must validate profile/version, collision-safely read the marker, then read these four resources in order: Coriolis credentials Secret, infrastructure credentials Secret, configuration ConfigMap, configuration Secret. A `404` is absent; any other read error stops before mutation. Preflight classifies metadata before retained-Secret semantic validation; a semantic failure fails closed as `COLLISION`. Credential reuse/generation, rendering, and desired-manifest construction finish before the first write.
+The runtime integration validates profile/version, collision-safely reads the marker, then reads these four resources in order: Coriolis credentials Secret, infrastructure credentials Secret, configuration ConfigMap, configuration Secret. A `404` is absent; any other read error stops before mutation. Preflight classifies metadata before retained-Secret semantic validation; a semantic failure fails closed as `COLLISION`. Credential reuse/generation, rendering, and desired-manifest construction finish before the first write.
 
 Create absent resources collision-safely; apply managed owner-referenced resources with guarded SSA; never write retained reuse. Apply the marker last. `AlreadyExists` and resource-version conflicts retry from fresh reads. A failure writes a sanitized status before framework retry, with no rollback or compensation. `ResourceCollision` is non-transient and mutation-free. The historical marker-plus-five sequence, including Step CA credentials, is superseded and retained only as validation history.
 
-The immediate gate is collision-safe reads, create/guarded SSA, minimal Secret/ConfigMap `get`/`create`/`patch` RBAC, status-then-retry wiring, and tests for the marker-plus-four sequence. Services, Ingress, dependencies, workloads, storage, probes, bootstrap, and credential rotation are later work. `Ready=False/RuntimeNotImplemented` remains the truthful status until runtime readiness is implemented.
+The marker-plus-four runtime gate is complete locally. Services, Ingress, dependencies, workloads, storage, probes, bootstrap, credential rotation, and remaining runtime design are later work. `Ready=False/RuntimeNotImplemented` remains the truthful status until runtime readiness is implemented.
 
 ## :material-book-open-page-variant-outline: Ingress And Service Contract
 
@@ -151,7 +151,7 @@ No future route may be emitted until its backend Service exists. No Service, Ing
 
 ## :material-book-open-page-variant-outline: Current Status And Accuracy
 
-The immutable upstream appliance source still contains Step CA and web-proxy roles. They are historical source evidence, not initial Kubernetes runtime selection. The pure helper, renderer, configuration, retained-resource, and ingress-resolution slices are locally implemented and validated by 218 unit tests. This slice changed ingress CRD/schema fields, the sample, and pure validation. No `main.py`, runtime Kubernetes I/O, RBAC, Service or Ingress resource, workload, release, chart, image, or deployment behavior changed. Deployed `0.5.3` remains marker-only.
+The immutable upstream appliance source still contains Step CA and web-proxy roles. They are historical source evidence, not initial Kubernetes runtime selection. The pure helper, renderer, configuration, retained-resource, and ingress-resolution slices, plus the marker-plus-four runtime integration, are locally implemented and validated by 243 unit tests. Runtime reconciliation now performs the ordered reads/preflight/rendering and guarded writes defined above; Secret and ConfigMap RBAC is exactly `get`/`create`/`patch`. No Service or Ingress resource, workload, release, chart, image, or deployment behavior changed. Deployed `0.5.3` remains marker-only.
 
 ### :material-application-edit-outline: Preserved Source And Slice Record
 
@@ -227,7 +227,7 @@ The following former facts remain historical evidence and must not be treated as
 - `35eac9b`: historical five-resource preflight slice, local only and superseded only for its Step CA entry.
 - `9bb20f3`: sensitive configuration renderer slice, local only and not deployed.
 
-These slice records establish pure/API behavior only. They do not claim a change to `main.py`, runtime Kubernetes reads/writes/SSA, RBAC, CRD reconciliation, runtime resources, workload readiness, chart/release/image versioning, TLS bootstrap, storage, rotation, or deployment.
+These slice records establish pure/API behavior only. The subsequent local marker-plus-four runtime gate adds `main.py` reconciliation, ordered Kubernetes reads/writes/guarded SSA, exact Secret/ConfigMap `get`/`create`/`patch` RBAC, and sanitized status-then-Kopf-retry handling; it does not add Services, Ingress resources, workloads, readiness, chart/release/image versioning, TLS bootstrap, storage, rotation, or deployment.
 
 ## :material-book-open-page-variant-outline: Dependency And Resource Plan
 
@@ -239,12 +239,12 @@ The future evidence-informed order is MariaDB, Kolla infrastructure services, `c
 
 ## :material-book-open-page-variant-outline: Unresolved Gates
 
-The marker API/migration, metadata, retained-resource classifier, builders, credential generation, retained Secret validation, non-sensitive renderer, preflight, sensitive renderer, Kubernetes render-input factory, derived template variants, and ingress schema/resolver are local pure/API slices. The marker migration accepts a compatible legacy `0.5.2`/`0.5.3` marker only when its controller owner reference and accepted version/profile are compatible; partial/conflicting metadata, owner mismatch, incompatible legacy data, or owner-plus-retention metadata is `ResourceCollision` and is never adopted, deleted, or renamed. This slice changed the ingress CRD/sample/pure validation and is validated by 218 unit tests. It did not change `main.py`, runtime Kubernetes I/O, RBAC, Service or Ingress resources, workloads, release/chart/image, or deployment behavior.
+The marker API/migration, metadata, retained-resource classifier, builders, credential generation, retained Secret validation, non-sensitive renderer, preflight, sensitive renderer, Kubernetes render-input factory, derived template variants, and ingress schema/resolver are local pure/API slices. The completed local marker-plus-four runtime gate implements the exact ordered pre-reads, metadata-first preflight/rendering before writes, retained `state-credentials` create/reuse with reuse no-write, resourceVersion-guarded SSA for managed resources, four ordered foundational writes with marker last, no rollback, sanitized retry status before `kopf.TemporaryError`, and exact Secret/ConfigMap `get`/`create`/`patch` RBAC. It is validated by 243 unit tests. It does not add Service or Ingress resources, workloads, release/chart/image, or deployment behavior.
 
-Remaining gates are collision-safe marker-plus-four runtime reads/create/guarded SSA and status retry; retained-resource runtime adoption; storage/PVC layout; probes/readiness/bootstrap; credential rotation; provider private material; optional component credentials; and runtime Services, Ingresses, workloads, and route emission. No runtime validation or readiness is claimed.
+Remaining gates are storage/PVC layout; probes/readiness/bootstrap; credential rotation; provider private material; optional component credentials; runtime Services, Ingresses, workloads, and route emission; and remaining runtime design. No runtime readiness is claimed.
 
 ### :material-application-edit-outline: Milestone History
 
 - `ab9df83` is the local API slice; `fbab6e5` adds label-safe naming/metadata; `d8df00f` adds marker pre-read/migration handling; and `1b73045` adds pure retained-resource classification. None is deployed.
 - `050f16e` adds pure manifest builders; `a604579` adds credential generation; `5165629` adds retained Secret semantic validation; `97153a7` adds non-sensitive rendering; `35eac9b` adds the historical five-resource preflight; and `9bb20f3` adds sensitive rendering. The historical three-Secret preflight is superseded by the current marker-plus-four contract.
-- The present slice adds ingress CRD/sample/pure validation, `IngressSettings`, Kubernetes render inputs, and Kubernetes-derived template variants. The complete local unit suite reports 218 passing tests. Deployed `0.5.3` remains marker-only.
+- The completed local marker-plus-four runtime gate follows the present ingress/pure-input slice. The complete local unit suite reports 243 passing tests. It is uncommitted, unpushed, and undeployed; deployed `0.5.3` remains marker-only.
