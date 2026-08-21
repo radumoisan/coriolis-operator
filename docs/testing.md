@@ -81,6 +81,13 @@ The pure helpers `generate_coriolis_credentials`, `generate_infrastructure_crede
 
 `validated_retained_secret_values` is **committed locally at `5165629` on `dev`, but not pushed or deployed**. It validates semantics only: no metadata classification, Kubernetes reads/writes, generation, SSA, collision/status handling, or reconciliation. No `main.py`, RBAC, CRD, runtime resource, chart/release, deployment, or rotation behavior changed; deployed `0.5.3` remains marker-only. Future preflight must classify metadata first and map semantic failure fail-closed to `COLLISION`; decoded values remain internal and are never logged, statused, or evented.
 
+## :material-book-open-page-variant-outline: Non-Sensitive Configuration Rendering Slice
+
+- 19 focused renderer tests and 171 total tests passed. Coverage includes explicit input validation, Jinja2 `PackageLoader`/`StrictUndefined` behavior, disabled autoescape, preserved trailing newlines, all six frozen ConfigMap keys, `accepted_version` mapping to legacy `default_coriolis_docker_images_tag`, value-safe failures, wheel resource inspection, and byte comparison against the six verbatim Apache-2.0 upstream templates.
+- No `main.py`, reconciliation, Kubernetes reads/writes, SSA, RBAC, CRD, runtime resources, workload, release/chart/image version, deployment, TLS, storage, readiness, bootstrap, or rotation behavior changed.
+
+Pure `render_coriolis_config` is **committed locally at `97153a7` on `dev`, but not pushed or deployed**. It renders no `coriolis.conf`, provider fragments, credentials, or other Secret content; deployed `0.5.3` remains marker-only. The next gate is collision-safe preflight for all five frozen resources before mutation, then SSA, minimal Secret RBAC, and reconciliation/status semantics.
+
 Live-cluster controller lifecycle validation passed for release `0.5.2` in the approved `coriolis` namespace. The currently deployed `0.5.3` retains the marker-only controller behavior and predates this local API slice; full lifecycle validation was not repeated for `0.5.3`.
 
 The approved dev cluster is `infra-dev-buc-hq` (`virt-infra-dev-buc-hq`); CIXpress remains approved for read-only pipeline troubleshooting and monitoring only. The dedicated operator namespace is `coriolis`. See [Development Environment](dev-environment.md).
