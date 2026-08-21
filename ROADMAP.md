@@ -44,7 +44,7 @@
 
 ## Later Milestones
 
-- MariaDB image and standalone runtime evidence is closed locally: the exact digest, non-Galera direct startup, restricted runtime, value-safe bootstrap, and volume recreation path are recorded. Its Kubernetes contract remains blocked on workload kind, storage/PVC ownership and fsGroup behavior, access/retention, generated manifests, probes, resources, lifecycle/recovery, and reliable logs; the CRD has no storage configuration. Implement workloads only after eligibility; remaining dependency blockers, backend Services, and Ingress routes stay deferred.
+- MariaDB image, standalone runtime evidence, and the development Kubernetes contract are closed locally: the exact digest, non-Galera direct startup, restricted runtime, value-safe bootstrap, retained PVC/StatefulSet shape, generated configuration, probes, and lifecycle policy are recorded. Next is pure CRD validation/resolver and manifest-builder/preflight implementation, then reconciliation after tests. Target storage must validate RWO, fsGroup, retained reuse, attach-detach/rescheduling, and clean 30-second termination before deployment; production remains blocked on backup/restore, HA, and RPO/RTO acceptance.
 - Add safe upgrade and production lifecycle capabilities after explicit contracts and operational review.
 
 ## Pending Decisions

@@ -250,20 +250,60 @@ The mirrored tags were pull-validated. The tag-plus-digest strings themselves we
 | --- | --- | --- |
 | RabbitMQ | Plaintext Kubernetes Service `5672`; source Kolla TLS is historical and must not be copied. Known config: `/etc/kolla/rabbitmq/rabbitmq.conf`. Coriolis uses user `openstack` and `rabbitmq_password`; Coriolis common creates no RabbitMQ user, vhost, or policy. | OCI User/Entrypoint/Cmd; plaintext Kolla config; writable path and persistence policy; user/default-vhost provisioning; probe. |
 | Memcached | Service `11211`; no credentials, provisioning, or configuration found. | OCI metadata; launch/config mechanism; writable or ephemeral policy; probe. |
-| MariaDB | Service `3306`; `/etc/kolla/mariadb/galera.cnf` adjusts `max_allowed_packet=64M` and `innodb_log_file_size=256M`. Admin uses `database_password`. Coriolis common idempotently creates database/user `coriolis` with `coriolis_database_password` and grants `coriolis.*:ALL` from `%`. OCI and standalone runtime evidence is recorded below. | Workload kind; PVC ownership/fsGroup behavior; storage class/size, access mode, and retention; exact generated ConfigMap/Secret/init-container/start-script manifests; Kubernetes probes/failure behavior; resources; disruption/node-loss/rescheduling/concurrent-mount/backup/restore/upgrade policy; reliable container log capture. |
+| MariaDB | Service `3306`; `/etc/kolla/mariadb/galera.cnf` adjusts `max_allowed_packet=64M` and `innodb_log_file_size=256M`. Admin uses `database_password`. Coriolis common idempotently creates database/user `coriolis` with `coriolis_database_password` and grants `coriolis.*:ALL` from `%`. OCI, standalone runtime, and the development Kubernetes contract are recorded below. | Pure CRD validation/resolver and manifest-builder/preflight implementation, then reconciliation tests. Before deployment, target storage must validate RWO, fsGroup, retained reuse, attach-detach/rescheduling, and clean 30-second termination. Production backup/restore, HA, and RPO/RTO acceptance remain deferred. |
 | Keystone | HTTP Service `5000`; `/etc/kolla/keystone/wsgi-keystone.conf`; admin uses `keystone_admin_password`. Coriolis common idempotently creates user `coriolis`, admin role on `service`, `migration` service, and RegionOne admin/internal/public endpoints. | OCI metadata; WSGI config and command; MariaDB schema/sync; fernet/bootstrap state; writable paths; probe. |
 
 ### :material-application-edit-outline: MariaDB Runtime Evidence
 
-The approved image was anonymously inspected and pulled by digest: `cr.virtomat.io/virtomat/coriolis/mariadb-server@sha256:22cb109d23d1aa6a6acb17e54657b5b9cd753837b01345b52fc3c35cbbd9981e`. It is Linux/amd64, runs as image user `mysql` (UID/GID `42434:42434`, supplemental `kolla` group `42400`), has Entrypoint `dumb-init --` and Cmd `kolla_start`, contains Kolla `16.6.1` and MariaDB `10.6.22`, declares no OCI healthcheck, uses data path `/var/lib/mysql`, runtime socket/PID path `/run/mysqld`, and port `3306`.
+The approved workload image is `cr.virtomat.io/virtomat/coriolis/mariadb-server:2023.1-ubuntu-jammy@sha256:22cb109d23d1aa6a6acb17e54657b5b9cd753837b01345b52fc3c35cbbd9981e`; local inspection and runs used its digest-only form `cr.virtomat.io/virtomat/coriolis/mariadb-server@sha256:22cb109d23d1aa6a6acb17e54657b5b9cd753837b01345b52fc3c35cbbd9981e`. It is Linux/amd64, runs as image user `mysql` (UID/GID `42434:42434`, supplemental `kolla` group `42400`), has Entrypoint `dumb-init --` and Cmd `kolla_start`, contains Kolla `16.6.1` and MariaDB `10.6.22`, declares no OCI healthcheck, uses data path `/var/lib/mysql`, runtime socket/PID path `/run/mysqld`, and port `3306`.
 
 `kolla_start` is rejected for operator use: without `/var/lib/kolla/config_files/config.json` it fails; its bootstrap requires `DB_ROOT_PASSWORD` in the environment and passes passwords in client process arguments, violating the value boundary. Its `healthcheck_mariadb` and `clustercheck` are Galera-specific and fail against a healthy non-Galera server.
 
 A disposable local Docker validation proved direct `mariadbd` single-node operation with `wsrep_on=OFF` as `42434:42434`, read-only root filesystem, no-new-privileges, dropped capabilities, writable `/var/lib/mysql`, `/run/mysqld`, and `/tmp`, binding `0.0.0.0:3306`, `max_allowed_packet=64M`, `innodb_log_file_size=256M`, and utf8mb4/InnoDB. Initialization ran only when system tables were absent via `mariadb-install-db`; mode-0600 ephemeral SQL/client files held raw credentials, with no credential environment variables, command arguments, logs, or output. Idempotent database/user/grant bootstrap, authenticated TCP `SELECT 1`, and a durable marker survived clean stop and container recreation using the same Docker volume. All disposable containers, networks, and volumes were removed.
 
-This is standalone image/runtime evidence, not a Kubernetes workload manifest contract. MariaDB remains not implementation-eligible until the matrix blockers close. In particular, `log-error=/dev/stderr` failed because MariaDB tried `/dev/stderr.err`; the tested bare `log-error` did not prove Docker-observable readiness logs.
+This standalone evidence supports the development Kubernetes contract below. `log-error=/dev/stderr` must not be used because MariaDB tried `/dev/stderr.err`; direct `--console` emitted startup, ready-for-connections, normal shutdown, InnoDB shutdown, and shutdown-complete messages to container logs.
 
 `coriolis-dbsync` is an Alembic-to-head command proven in `coriolis-oss`. No local source proves its invocation, selected image, or ordering. No Job is selected.
+
+## :material-book-open-page-variant-outline: MariaDB Kubernetes Contract
+
+This is a frozen development contract, not an implementation, deployment, cluster validation, or production-readiness claim. It closes MariaDB design eligibility only for the next pure CRD validation/resolver and manifest-builder/preflight slice.
+
+### :material-application-edit-outline: API And Failure Boundary
+
+- Retain top-level `spec.profile`, `spec.version`, and `spec.ingress` unchanged. Add optional top-level `spec.storage` and `spec.resources` objects so existing CRs remain schema-valid.
+- `spec.storage.mariadb`, when present, requires non-empty `storageClassName` and positive Kubernetes quantity `size`. `spec.resources.mariadb`, when present, requires positive `requests.cpu`, `requests.memory`, `limits.cpu`, and `limits.memory`; each request must not exceed its corresponding limit.
+- MariaDB desired-state preparation requires complete storage and resource blocks. Omitted or incomplete configuration is a stable, mutation-free runtime-configuration failure that preserves accepted version state; it creates no MariaDB resource.
+- Storage class, initial size, RWO, Filesystem volume mode, and retention identity are immutable after PVC creation; expansion is never automatic. Resource changes may update the managed StatefulSet template and restart its sole pod one at a time. Image/version/storage changes remain blocked.
+
+### :material-application-edit-outline: Storage And Workload
+
+- Create exactly one ownerless retained PVC `<appliance>-mariadb-data`, annotated exactly `coriolis.cloudbase.it/retention: mariadb-data`, with explicit requested class/size, exactly RWO and Filesystem. Exact stable identity and immutable-spec reuse is no-write; never patch or delete a reused PVC. Provisioner/status fields are not operator-managed identity drift.
+- Create exactly one owner-referenced StatefulSet `<appliance>-mariadb` with `replicas: 1`. Do not create a Deployment, `volumeClaimTemplates`, PDB, HA, or Galera resources.
+- The pod uses `runAsUser`, `runAsGroup`, and `fsGroup` `42434`, `fsGroupChangePolicy: OnRootMismatch`, and `supplementalGroups: [42400]`. The container is non-root, read-only-root, no privilege escalation, drops `ALL` capabilities, and uses `RuntimeDefault` seccomp.
+- The retained PVC mounts only at `/var/lib/mysql`. Ordinary `emptyDir` mounts are `/run/mysqld` and `/tmp`; memory-backed or size-limited `emptyDir` is unsupported by evidence. Target storage must honor fsGroup; no privileged/root chown init fallback exists.
+- Use exactly `cr.virtomat.io/virtomat/coriolis/mariadb-server:2023.1-ubuntu-jammy@sha256:22cb109d23d1aa6a6acb17e54657b5b9cd753837b01345b52fc3c35cbbd9981e` and the read-only external imagePullSecret `coriolis-appliance-registry`.
+
+### :material-application-edit-outline: Generated Configuration And Startup
+
+- Owner-referenced ConfigMap `<appliance>-mariadb-config` contains exactly `my.cnf`, `prepare-mariadb.sh`, and `start-mariadb.sh`, with no credentials. Owner-referenced rebuildable Secret `<appliance>-mariadb-config-secret` contains exactly `admin.cnf`, `coriolis.cnf`, and `bootstrap.sql`, rendered value-safely from the two retained credential Secrets using `data`, never `stringData`.
+- An init container using the exact image copies the Secret projection read-only into `/run/mysqld` as UID/GID `42434:42434`, mode `0600`. It runs `mariadb-install-db --datadir=/var/lib/mysql --auth-root-authentication-method=normal` only if `/var/lib/mysql/mysql` is absent, writes an ephemeral first-initialization marker, and performs no network SQL.
+- The main container preserves image Entrypoint `dumb-init --` and runs the non-secret start script. That script starts direct `mariadbd --defaults-file=<my.cnf-path> --console`, waits on the local socket, applies idempotent file-based `bootstrap.sql`, then writes an ephemeral bootstrap-complete marker only after success; Service endpoints are not ready first. First start alone uses passwordless local-socket root; subsequent starts use mode-`0600` `admin.cnf`. It forwards SIGTERM, waits for MariaDB, and exits with it.
+- `my.cnf` fixes `wsrep_on=OFF`, datadir/socket/PID/bind/port, `max_allowed_packet=64M`, `innodb_log_file_size=256M`, and utf8mb4/InnoDB. It has no `log-error`; `--console` is the logging path. Renderers must escape option-file and SQL values. Credentials never appear in ConfigMaps, environment, arguments, metadata, logs, status, events, errors, or documentation.
+
+### :material-application-edit-outline: Probes And Lifecycle
+
+- Startup exec requires the bootstrap-complete marker and mode-`0600` admin-file `mariadb-admin ... ping`: period `10s`, timeout `5s`, failure threshold `30`. Readiness uses the Coriolis TCP client file and `mariadb ... --execute='SELECT 1'`: period `10s`, timeout `5s`, failure threshold `3`, success threshold `1`. Liveness uses the admin socket client file and `mariadb-admin ... ping`: period `10s`, timeout `5s`, failure threshold `6`.
+- These conservative timings are development policy, not source facts. Startup gates readiness and liveness. `terminationGracePeriodSeconds` is `30`.
+- One StatefulSet replica with RWO and no operator force deletion is the no-concurrent-writer policy. Planned and unplanned disruptions cause downtime; no PDB exists. Rely on Kubernetes/CSI attach-detach and never create a second writer, erase, repair, or reinitialize an existing retained datadir.
+- Retain the PVC and credential Secrets across CR deletion/recreation; garbage collection recreates owner-referenced StatefulSet/config resources and `emptyDir`. There is no automatic backup, restore, repair, resize, credential rotation, or MariaDB/image upgrade. Restore is a separately approved operator-run procedure. Production HA/RPO/RTO/backup acceptance remains deferred.
+
+### :material-application-edit-outline: Reconciliation And RBAC
+
+- After the existing marker/foundational/four-Service read prefix, read retained PVC, MariaDB ConfigMap, MariaDB config Secret, then StatefulSet. Complete API validation, classification, secret-safe rendering, and all desired manifests before writes.
+- Write the existing four foundational resources, four Services, then create an absent PVC or exact no-write reuse, guarded SSA ConfigMap, Secret, StatefulSet, and marker last. Only `404` is absent; collisions remain mutation-free and retry/status rules remain sanitized.
+- Future RBAC is PVC `get`/`create` only and StatefulSet `get`/`create`/`patch`; existing ConfigMap/Secret permissions suffice. Do not grant pod/log, delete, PVC patch, PDB, or cluster-scope permissions.
+- Before live deployment, target storage must prove RWO, fsGroup, retained reuse, rescheduling/attach-detach, and clean 30-second termination. Production is still blocked on backup/restore, HA, and RPO/RTO, but these do not block pure implementation of this development contract.
 
 ### :material-application-edit-outline: Durable Workload Invariants
 
@@ -275,7 +315,7 @@ This is standalone image/runtime evidence, not a Kubernetes workload manifest co
 
 ### :material-application-edit-outline: Eligibility Sequence
 
-Complete all four dependency interfaces first. MariaDB's OCI and standalone startup/bootstrap evidence is closed, but it is not implementation-eligible until its remaining Kubernetes storage, manifest, probe, resource, lifecycle, and log-capture gates close. RabbitMQ and Memcached follow; Keystone follows MariaDB; Coriolis common bootstrap follows healthy dependencies. Historical Ansible order is evidence, not Kubernetes readiness proof.
+Complete all four dependency interfaces first. MariaDB's OCI, standalone startup/bootstrap, and development Kubernetes design contract are closed; pure API validation/resolver and manifest-builder/preflight implementation is next, followed by reconciliation only after tests. RabbitMQ and Memcached follow; Keystone follows MariaDB; Coriolis common bootstrap follows healthy dependencies. Historical Ansible order is evidence, not Kubernetes readiness proof.
 
 Before code for any dependency, require evidence for:
 
@@ -291,7 +331,7 @@ If evidence is absent, stop rather than infer.
 
 This evidence contract is local, unpushed, and undeployed. The marker API/migration, metadata, retained-resource classifier, builders, credential generation, retained Secret validation, renderers, preflight, Kubernetes render-input factory, derived template variants, ingress schema/resolver, marker-plus-four runtime gate (`862777d` with status `f219977`), and four-Service slice (`797235b`) retain their recorded status. Current validation passed: 252 unit tests, Ruff lint/format, mypy, Helm lint/template, and `git diff --check`.
 
-Implementation remains blocked on the required per-dependency interfaces. For MariaDB, standalone OCI/runtime, direct non-Galera startup, and value-safe bootstrap evidence is closed; unresolved Kubernetes gates are workload kind, PVC ownership/fsGroup behavior, storage class/size, access mode/retention, exact generated manifests, probe timing/thresholds/failure behavior, resources, disruption/node-loss/rescheduling/concurrent-mount/backup/restore/upgrade policy, and reliable container log capture. The current CRD has no storage configuration. Keystone schema/fernet/bootstrap evidence and a selected, proven `coriolis-dbsync` Job contract remain unresolved. Credential rotation, provider private material, optional component credentials, Barbican and other backend Services, and Ingress routes after backend workloads remain deferred. No workload manifest contract or runtime readiness is claimed.
+Implementation remains blocked on the required per-dependency interfaces. For MariaDB, the development contract now fixes workload, retained storage, generated manifests, bootstrap, probes, resource rules, lifecycle, and console logging; next are pure CRD validation/resolver and manifest-builder/preflight implementation, then reconciliation tests. Before live deployment, target storage must validate RWO, fsGroup, retained reuse, rescheduling/attach-detach, and clean 30-second termination. Production remains blocked on backup/restore, HA, and RPO/RTO acceptance. Keystone schema/fernet/bootstrap evidence and a selected, proven `coriolis-dbsync` Job contract remain unresolved. Credential rotation, provider private material, optional component credentials, Barbican and other backend Services, and Ingress routes after backend workloads remain deferred. No runtime implementation, deployment, cluster validation, or readiness is claimed.
 
 ### :material-application-edit-outline: Milestone History
 
