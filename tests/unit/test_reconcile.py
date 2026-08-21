@@ -1,3 +1,4 @@
+import base64
 import copy
 import hashlib
 import re
@@ -23,9 +24,14 @@ from coriolis_operator.reconcile import (
     appliance_identity,
     appliance_resource_name,
     blocked_conditions,
+    build_coriolis_config_map,
+    build_coriolis_config_secret,
+    build_coriolis_credentials_secret,
+    build_infrastructure_credentials_secret,
     build_resource_metadata,
     build_state_config_map,
     build_status,
+    build_step_ca_credentials_secret,
     classify_existing_marker,
     classify_retained_resource,
     collision_conditions,
@@ -48,6 +54,27 @@ OWNER = {
     "name": "example",
     "uid": "abc-123",
 }
+
+CORIOLIS_CREDENTIALS = {
+    "coriolis_database_password": "db synthetic",
+    "coriolis_keystone_password": "keystone synthetic",
+    "temp_keypair_password": "keypair synthetic",
+}
+INFRASTRUCTURE_CREDENTIALS = {
+    "database_password": "database synthetic",
+    "rabbitmq_password": "rabbitmq synthetic",
+    "keystone_admin_password": "admin synthetic",
+}
+STEP_CA_CREDENTIALS = {"init_password": "step-ca synthetic"}
+CORIOLIS_CONFIG = {
+    "coriolis-api.wsgi": "wsgi application",
+    "wsgi-coriolis.conf": "wsgi config",
+    "vixdisklib.conf": "disk config",
+    "api-paste.ini": "paste config",
+    "policy.yml": "policy config",
+    "coriolis.release": "2603.4",
+}
+CORIOLIS_CONFIG_SECRET = {"coriolis.conf": "secret config"}
 
 
 def sample_meta(generation: int = 7) -> dict:
@@ -456,6 +483,243 @@ def test_state_config_map_preserves_legacy_dotted_name() -> None:
     assert config_map["metadata"]["annotations"] == {
         "coriolis.cloudbase.it/appliance-name": appliance_name
     }
+
+
+def _assert_standard_metadata(
+    metadata: dict, component: str, *, retained: bool
+) -> None:
+    assert metadata["namespace"] == "operators"
+    assert metadata["labels"] == {
+        "app.kubernetes.io/name": "coriolis",
+        "app.kubernetes.io/instance": "example",
+        "app.kubernetes.io/version": "2603.4",
+        "app.kubernetes.io/component": component,
+        "app.kubernetes.io/part-of": "coriolis-appliance",
+        "app.kubernetes.io/managed-by": "coriolis-operator",
+        "coriolis.cloudbase.it/appliance": "example",
+        "coriolis.cloudbase.it/component": component,
+    }
+    annotations = {"coriolis.cloudbase.it/appliance-name": "example"}
+    if retained:
+        annotations[RETENTION_ANNOTATION] = "retain"
+        assert "ownerReferences" not in metadata
+    else:
+        assert metadata["ownerReferences"] == [dict(OWNER, controller=True)]
+    assert metadata["annotations"] == annotations
+
+
+@pytest.mark.parametrize(
+    ("builder", "values", "component", "retained"),
+    [
+        (
+            build_coriolis_credentials_secret,
+            CORIOLIS_CREDENTIALS,
+            "coriolis-credentials",
+            True,
+        ),
+        (
+            build_infrastructure_credentials_secret,
+            INFRASTRUCTURE_CREDENTIALS,
+            "infrastructure-credentials",
+            True,
+        ),
+        (
+            build_step_ca_credentials_secret,
+            STEP_CA_CREDENTIALS,
+            "step-ca-credentials",
+            True,
+        ),
+        (build_coriolis_config_map, CORIOLIS_CONFIG, "coriolis-config", False),
+        (
+            build_coriolis_config_secret,
+            CORIOLIS_CONFIG_SECRET,
+            "coriolis-config-secret",
+            False,
+        ),
+    ],
+    ids=(
+        "coriolis-credentials",
+        "infrastructure-credentials",
+        "step-ca-credentials",
+        "coriolis-config",
+        "coriolis-config-secret",
+    ),
+)
+def test_appliance_resource_builders_metadata_and_names(
+    builder, values: dict[str, str], component: str, retained: bool
+) -> None:
+    kwargs = {
+        "appliance_name": "example",
+        "namespace": "operators",
+        "accepted_version": "2603.4",
+        "values": values,
+    }
+    if retained:
+        kwargs["retention"] = "retain"
+    else:
+        kwargs["owner"] = OWNER
+
+    body = builder(**kwargs)
+
+    assert body["apiVersion"] == "v1"
+    assert body["metadata"]["name"] == f"example-{component}"
+    _assert_standard_metadata(body["metadata"], component, retained=retained)
+    if body["kind"] == "Secret":
+        assert body["type"] == "Opaque"
+        assert "stringData" not in body
+    else:
+        assert body["kind"] == "ConfigMap"
+        assert "type" not in body
+
+
+@pytest.mark.parametrize(
+    ("builder", "values", "retained"),
+    [
+        (build_coriolis_credentials_secret, CORIOLIS_CREDENTIALS, True),
+        (build_infrastructure_credentials_secret, INFRASTRUCTURE_CREDENTIALS, True),
+        (build_step_ca_credentials_secret, STEP_CA_CREDENTIALS, True),
+        (build_coriolis_config_secret, CORIOLIS_CONFIG_SECRET, False),
+    ],
+)
+def test_secret_builders_base64_encode_opaque_values(
+    builder, values: dict[str, str], retained: bool
+) -> None:
+    kwargs = {
+        "appliance_name": "example",
+        "namespace": "operators",
+        "accepted_version": "2603.4",
+        "values": values,
+    }
+    if retained:
+        kwargs["retention"] = "retain"
+    else:
+        kwargs["owner"] = OWNER
+
+    body = builder(**kwargs)
+
+    assert set(body["data"]) == set(values)
+    assert {
+        key: base64.b64decode(value).decode("utf-8")
+        for key, value in body["data"].items()
+    } == values
+    assert "stringData" not in body
+
+
+def test_coriolis_config_map_has_only_plain_approved_values() -> None:
+    body = build_coriolis_config_map(
+        appliance_name="example",
+        namespace="operators",
+        accepted_version="2603.4",
+        owner=OWNER,
+        values=CORIOLIS_CONFIG,
+    )
+
+    assert body["data"] == CORIOLIS_CONFIG
+    assert set(body["data"]) == {
+        "coriolis-api.wsgi",
+        "wsgi-coriolis.conf",
+        "vixdisklib.conf",
+        "api-paste.ini",
+        "policy.yml",
+        "coriolis.release",
+    }
+
+
+@pytest.mark.parametrize(
+    ("builder", "values", "retained"),
+    [
+        (build_coriolis_credentials_secret, CORIOLIS_CREDENTIALS, True),
+        (build_infrastructure_credentials_secret, INFRASTRUCTURE_CREDENTIALS, True),
+        (build_step_ca_credentials_secret, STEP_CA_CREDENTIALS, True),
+        (build_coriolis_config_map, CORIOLIS_CONFIG, False),
+        (build_coriolis_config_secret, CORIOLIS_CONFIG_SECRET, False),
+    ],
+)
+def test_resource_builders_reject_missing_extra_and_non_string_values(
+    builder, values: dict[str, str], retained: bool
+) -> None:
+    kwargs = {
+        "appliance_name": "example",
+        "namespace": "operators",
+        "accepted_version": "2603.4",
+    }
+    if retained:
+        kwargs["retention"] = "retain"
+    else:
+        kwargs["owner"] = OWNER
+    missing = dict(values)
+    missing.pop(next(iter(missing)))
+    extra = dict(values, unexpected="synthetic extra")
+    non_string = dict(values)
+    non_string[next(iter(non_string))] = 1
+
+    for invalid_values in (missing, extra, non_string):
+        with pytest.raises(ValueError) as excinfo:
+            builder(**kwargs, values=invalid_values)
+        assert "synthetic extra" not in str(excinfo.value)
+
+
+def test_config_map_rejects_credentials_and_coriolis_conf() -> None:
+    for forbidden_key in (*CORIOLIS_CREDENTIALS, "coriolis.conf"):
+        values = dict(CORIOLIS_CONFIG, **{forbidden_key: "synthetic value"})
+        with pytest.raises(ValueError) as excinfo:
+            build_coriolis_config_map(
+                appliance_name="example",
+                namespace="operators",
+                accepted_version="2603.4",
+                owner=OWNER,
+                values=values,
+            )
+        assert "synthetic value" not in str(excinfo.value)
+
+
+def test_resource_builders_use_existing_metadata_validation() -> None:
+    with pytest.raises(ValueError):
+        build_coriolis_credentials_secret(
+            appliance_name="UPPER",
+            namespace="operators",
+            accepted_version="2603.4",
+            retention="retain",
+            values=CORIOLIS_CREDENTIALS,
+        )
+    with pytest.raises(ValueError):
+        build_step_ca_credentials_secret(
+            appliance_name="example",
+            namespace="operators",
+            accepted_version="2603.4",
+            retention="",
+            values=STEP_CA_CREDENTIALS,
+        )
+
+
+@pytest.mark.parametrize(
+    ("builder", "values", "retained"),
+    [
+        (build_coriolis_credentials_secret, CORIOLIS_CREDENTIALS, True),
+        (build_infrastructure_credentials_secret, INFRASTRUCTURE_CREDENTIALS, True),
+        (build_step_ca_credentials_secret, STEP_CA_CREDENTIALS, True),
+        (build_coriolis_config_map, CORIOLIS_CONFIG, False),
+        (build_coriolis_config_secret, CORIOLIS_CONFIG_SECRET, False),
+    ],
+)
+def test_resource_builders_do_not_mutate_inputs(
+    builder, values: dict[str, str], retained: bool
+) -> None:
+    original = copy.deepcopy(values)
+    kwargs = {
+        "appliance_name": "example",
+        "namespace": "operators",
+        "accepted_version": "2603.4",
+        "values": values,
+    }
+    if retained:
+        kwargs["retention"] = "retain"
+    else:
+        kwargs["owner"] = OWNER
+
+    builder(**kwargs)
+
+    assert values == original
 
 
 def test_build_status_reports_accepted_api_only_slice() -> None:

@@ -1,5 +1,6 @@
 """Pure values and Kubernetes resource bodies used by the controller."""
 
+import base64
 import hashlib
 import re
 from collections.abc import Mapping, Sequence
@@ -49,6 +50,33 @@ OPERATOR_MANAGEMENT_LABELS = (
 )
 APPLIANCE_NAME_ANNOTATION = "coriolis.cloudbase.it/appliance-name"
 RETENTION_ANNOTATION = "coriolis.cloudbase.it/retention"
+
+CORIOLIS_CREDENTIALS_KEYS = frozenset(
+    {
+        "coriolis_database_password",
+        "coriolis_keystone_password",
+        "temp_keypair_password",
+    }
+)
+INFRASTRUCTURE_CREDENTIALS_KEYS = frozenset(
+    {
+        "database_password",
+        "rabbitmq_password",
+        "keystone_admin_password",
+    }
+)
+STEP_CA_CREDENTIALS_KEYS = frozenset({"init_password"})
+CORIOLIS_CONFIG_KEYS = frozenset(
+    {
+        "coriolis-api.wsgi",
+        "wsgi-coriolis.conf",
+        "vixdisklib.conf",
+        "api-paste.ini",
+        "policy.yml",
+        "coriolis.release",
+    }
+)
+CORIOLIS_CONFIG_SECRET_KEYS = frozenset({"coriolis.conf"})
 
 # Pre-existing resources the operator references read-only and must never
 # create, adopt, mutate, or classify as operator-retained. The registry pull
@@ -215,6 +243,172 @@ def build_state_config_map(
             "profile": profile,
             "generation": str(generation),
         },
+    }
+
+
+def _validated_opaque_values(
+    values: Mapping[str, str], expected_keys: frozenset[str], object_name: str
+) -> dict[str, str]:
+    if not isinstance(values, Mapping):
+        raise ValueError(f"{object_name} values must be a mapping")
+    provided_keys = set(values)
+    missing = expected_keys - provided_keys
+    extra = provided_keys - expected_keys
+    if missing or extra:
+        raise ValueError(f"{object_name} values must have exactly the required keys")
+    if any(not isinstance(value, str) for value in values.values()):
+        raise ValueError(f"{object_name} values must be strings")
+    return dict(values)
+
+
+def _encoded_secret_data(values: Mapping[str, str]) -> dict[str, str]:
+    return {
+        key: base64.b64encode(value.encode("utf-8")).decode("ascii")
+        for key, value in values.items()
+    }
+
+
+def _build_retained_secret(
+    *,
+    appliance_name: str,
+    namespace: str,
+    accepted_version: str,
+    component: str,
+    retention: str,
+    values: Mapping[str, str],
+    expected_keys: frozenset[str],
+) -> dict[str, Any]:
+    resource_name = appliance_resource_name(appliance_name, component)
+    return {
+        "apiVersion": "v1",
+        "kind": "Secret",
+        "metadata": build_resource_metadata(
+            resource_name=resource_name,
+            namespace=namespace,
+            appliance_name=appliance_name,
+            component=component,
+            accepted_version=accepted_version,
+            retention=retention,
+        ),
+        "type": "Opaque",
+        "data": _encoded_secret_data(
+            _validated_opaque_values(values, expected_keys, resource_name)
+        ),
+    }
+
+
+def build_coriolis_credentials_secret(
+    *,
+    appliance_name: str,
+    namespace: str,
+    accepted_version: str,
+    retention: str,
+    values: Mapping[str, str],
+) -> dict[str, Any]:
+    """Build the retained Coriolis credentials Secret apply body."""
+    return _build_retained_secret(
+        appliance_name=appliance_name,
+        namespace=namespace,
+        accepted_version=accepted_version,
+        component="coriolis-credentials",
+        retention=retention,
+        values=values,
+        expected_keys=CORIOLIS_CREDENTIALS_KEYS,
+    )
+
+
+def build_infrastructure_credentials_secret(
+    *,
+    appliance_name: str,
+    namespace: str,
+    accepted_version: str,
+    retention: str,
+    values: Mapping[str, str],
+) -> dict[str, Any]:
+    """Build the retained infrastructure credentials Secret apply body."""
+    return _build_retained_secret(
+        appliance_name=appliance_name,
+        namespace=namespace,
+        accepted_version=accepted_version,
+        component="infrastructure-credentials",
+        retention=retention,
+        values=values,
+        expected_keys=INFRASTRUCTURE_CREDENTIALS_KEYS,
+    )
+
+
+def build_step_ca_credentials_secret(
+    *,
+    appliance_name: str,
+    namespace: str,
+    accepted_version: str,
+    retention: str,
+    values: Mapping[str, str],
+) -> dict[str, Any]:
+    """Build the retained step-ca credentials Secret apply body."""
+    return _build_retained_secret(
+        appliance_name=appliance_name,
+        namespace=namespace,
+        accepted_version=accepted_version,
+        component="step-ca-credentials",
+        retention=retention,
+        values=values,
+        expected_keys=STEP_CA_CREDENTIALS_KEYS,
+    )
+
+
+def build_coriolis_config_map(
+    *,
+    appliance_name: str,
+    namespace: str,
+    accepted_version: str,
+    owner: Mapping[str, Any],
+    values: Mapping[str, str],
+) -> dict[str, Any]:
+    """Build the owner-referenced Coriolis configuration ConfigMap apply body."""
+    component = "coriolis-config"
+    resource_name = appliance_resource_name(appliance_name, component)
+    return {
+        "apiVersion": "v1",
+        "kind": "ConfigMap",
+        "metadata": build_resource_metadata(
+            resource_name=resource_name,
+            namespace=namespace,
+            appliance_name=appliance_name,
+            component=component,
+            accepted_version=accepted_version,
+            owner=owner,
+        ),
+        "data": _validated_opaque_values(values, CORIOLIS_CONFIG_KEYS, resource_name),
+    }
+
+
+def build_coriolis_config_secret(
+    *,
+    appliance_name: str,
+    namespace: str,
+    accepted_version: str,
+    owner: Mapping[str, Any],
+    values: Mapping[str, str],
+) -> dict[str, Any]:
+    """Build the owner-referenced Coriolis configuration Secret apply body."""
+    component = "coriolis-config-secret"
+    resource_name = appliance_resource_name(appliance_name, component)
+    return {
+        "apiVersion": "v1",
+        "kind": "Secret",
+        "metadata": build_resource_metadata(
+            resource_name=resource_name,
+            namespace=namespace,
+            appliance_name=appliance_name,
+            component=component,
+            accepted_version=accepted_version,
+            owner=owner,
+        ),
+        "type": "Opaque",
+        "data": _encoded_secret_data(
+            _validated_opaque_values(values, CORIOLIS_CONFIG_SECRET_KEYS, resource_name)
+        ),
     }
 
 
