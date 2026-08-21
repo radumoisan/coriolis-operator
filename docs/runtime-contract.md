@@ -1,6 +1,6 @@
 # Runtime Contract
 
-Existing upstream Coriolis component repositories and images are immutable inputs. This operator must not rebuild or patch upstream Coriolis code or images.
+Existing upstream Coriolis component repositories and images are immutable inputs. The operator does not rebuild or patch them. The deployed `0.5.3` controller remains marker-only, so `Ready=False/RuntimeNotImplemented` remains correct.
 
 ## :material-book-open-page-variant-outline: Completed Marker-Only Contract
 
@@ -8,55 +8,48 @@ Release `0.5.2` at `86552e46fd2fb13b05d66cc2b7e25f4968f00846` completed the init
 
 That limited, non-destructive contract is completed history. It is not the target runtime behavior.
 
-## :material-book-open-page-variant-outline: Kubernetes-Native Core Runtime
+## :material-book-open-page-variant-outline: Core Runtime Direction
 
-Creating a `CoriolisAppliance` must deploy the complete selected Coriolis stack as Kubernetes workloads directly in namespace `coriolis`. It must not provision an external VM. OpenStack and VMware remain migration endpoints.
+The future `core` profile targets exact official release `2603.4` and deploys Kubernetes workloads, not an external VM. The current initial-runtime selection excludes the former web-proxy and Step CA bootstrap. Their immutable-source and image-mirror records are historical evidence, not current selection. `coriolis-common` remains a base image, not a workload; licensing server/UI, Metal Hub, console editor, and logger/InfluxDB remain deferred.
 
-The first runtime profile is `core`, targeting exact official Coriolis release `2603.4` (not `2603.41`/`2603.42`). Its initial core workload is API, conductor, scheduler, transfer cron, minion manager, deployer manager, privileged worker, compressor, web, and web proxy. `coriolis-common` is a base image, not a workload. Deferred: licensing server, Metal Hub, console editor, and logger/InfluxDB.
+The configuration contract derives Kubernetes service names through `appliance_resource_name`; it uses plaintext RabbitMQ on `5672`, Keystone HTTP on `5000`, and removes only approved TLS/CA directives from Kubernetes-derived Coriolis and WSGI templates. Upstream root templates remain immutable. The web workload is blocked on offline evidence that it starts without `CA_FINGERPRINT` or a Step CA mount.
 
-The first acceptance is complete bootstrap with an internally healthy and reachable UI and API. It does not include a migration test.
+## :material-book-open-page-variant-outline: Network And Ingress Policy
 
-!!! note
-    The image inventory and pull gate are complete. The exact `2603.4` image set, immutable digests, platform, users, listeners, and health capability are recorded in the [Image Inventory](image-inventory.md) ledger; all 26 approved images are mirrored to `cr.virtomat.io/virtomat/coriolis`, and all 21 initial-runtime image pulls passed in `virt-infra-dev-buc-hq` namespace `coriolis`. The multi-resource policy is frozen in the [Foundational Resource Contract](foundational-resource-contract.md); runtime integration remains blocked until collision-safe reads/create/guarded SSA, minimal RBAC, status-then-retry wiring, and exhaustive tests pass.
+Community ingress-nginx is the short-term controller. The future operator will own Ingress resources only; it will not install the controller or create, mutate, or delete certificate Secret material. `certManager` always derives `<host>-tls` and annotates a ready defaulted or explicit `ClusterIssuer`; `existingSecret` alone accepts a same-namespace external `tlsSecretName` and emits no issuer annotation. Defaults are host `coriolis.app.cloudbase.wiki`, class `nginx`, issuer `letsencrypt`, and derived `<host>-tls` Secret.
+
+Ingress is the only external exposure. Backend and dependency Services are ClusterIP and plaintext, which assumes a trusted cluster network and is not encryption. Ingress terminates TLS and redirects HTTPS, then uses HTTP backends. The route, rewrite, exact-origin CORS/preflight, auth-header, and WebSocket contract is frozen in the [Foundational Resource Contract](foundational-resource-contract.md). No route is emitted before its Service exists.
+
+## :material-book-open-page-variant-outline: Current Blocker And Ordering
+
+The next runtime integration is limited to collision-safe reads, create/guarded SSA, and status retry for the marker plus four foundational resources: two retained credential Secrets, the configuration ConfigMap, and the configuration Secret. Add only the required Secret/ConfigMap `get`/`create`/`patch` RBAC and exhaustive tests.
+
+Services, Ingress, dependency bootstrap, workloads, probes, storage, readiness, and route emission remain later milestones. No Kubernetes runtime I/O, Services, Ingresses, or workloads are implemented now.
 
 ## :material-book-open-page-variant-outline: API And Lifecycle Policy
 
-!!! note
-    The API slice below is committed locally at `ab9df83` (branch `dev`, not pushed) and is absent from the deployed operator. Full controller lifecycle validation remains on release `0.5.2`; the currently deployed `0.5.3` retains the marker-only controller behavior.
+The `v1alpha1` API retains optional/defaulted `spec.profile` (`core`), required non-empty `spec.version`, and optional `status.acceptedVersion`; version changes are controller-blocked through status rather than admission. The ingress CRD fields, sample, and pure validation/resolution changed in this slice. No `main.py`, runtime Kubernetes I/O, RBAC, Service, Ingress resource, workload, release/chart/image, or deployment behavior changed.
 
-The `v1alpha1` API defines optional/defaulted `spec.profile` (`core`, the only enum value), required non-empty `spec.version`, and optional non-empty `status.acceptedVersion`. The sample uses `profile: core`, `version: "2603.4"`.
+The condition types are `Accepted`, `Progressing`, `Reconciled`, `Ready`, `Degraded`, and `Upgradeable`. `Ready=False/RuntimeNotImplemented` remains truthful until required dependencies, workloads, and internal checks exist. Future deletion garbage-collects operator-owned workloads, Services, Jobs, and generated ConfigMaps; retained state credentials and PVCs survive, and external referenced Secrets are never deleted.
 
-`spec.version` is immutable for the first runtime profile, enforced by the controller rather than admission: no CEL/validation rule rejects a change, so a rejected request remains observable in status. The controller compares the requested version against the persisted `status.acceptedVersion`; a change applies no resources, preserves the accepted state, advances `observedGeneration`, and sets `Upgradeable=False` with reason `UpgradeBlocked` rather than attempt an unsafe upgrade. Unsupported initial profiles/versions apply no resources and report `Accepted=False` rejection conditions.
+## :material-book-open-page-variant-outline: Development Constraints And Milestones
 
-The implemented status condition types are `Accepted`, `Progressing`, `Reconciled`, `Ready`, `Degraded`, and `Upgradeable`. The API-only reconcile truthfully reports `Ready=False/RuntimeNotImplemented`; `Ready=True` is allowed only after mandatory Jobs, dependencies, workloads, and internal UI/API checks pass.
+The privileged worker may mount `/dev` and `/lib/modules`; single-node `local-path` storage is acceptable and not production HA. Console-editor behavior must be declarative rather than host mutation. Logger Unix-socket compatibility may use a shared retained volume as a transitional design.
 
-Deletion removes operator-owned workloads, Services, Jobs, and generated ConfigMaps. It retains PVCs, CA state, and state credentials for recovery. Pre-existing referenced Secrets are never deleted. The initial policy avoids a destructive finalizer.
-
-## :material-book-open-page-variant-outline: Development Constraints
-
-The privileged worker may mount host `/dev` and `/lib/modules`. Single-node `local-path` storage is acceptable. Retained state is not production HA.
-
-Console-editor behavior must become declarative Kubernetes or CR configuration, not host mutation. Logger Unix-socket compatibility may initially use a shared single-node retained volume; this is a transitional development design.
+Milestone history remains: image/runtime inventory is complete; the API slice is local and undeployed; the deployed `0.5.3` remains marker-only. The next milestone is marker-plus-four foundational runtime integration, followed later by dependencies/bootstrap, workloads, Services/Ingresses, status/readiness, tests, and development acceptance. The first runtime acceptance is complete bootstrap with internally healthy UI/API, not a migration test.
 
 Deferred work includes the licensing server and UI, Metal Hub, console editor and VM-host administration, external provider configuration, migration validation, automatic upgrades, and production HA.
 
-## :material-book-open-page-variant-outline: Image Inventory Gate
-
-RC4 is blocked/OVA-only for Kubernetes: Build `868` exported an OVA, but no `registry.cloudbase.it/appliance/coriolis-*` repository carries a `2608*` tag. The approved fallback is exact official release `2603.4`; its authoritative inventory is the [Image Inventory](image-inventory.md) ledger. The metadata gate is complete and all 26 approved images were mirrored to `cr.virtomat.io/virtomat/coriolis` on 2026-08-20 with preserved/verified digests. Pull validation in `virt-infra-dev-buc-hq` namespace `coriolis` has passed: all 21 initial-runtime image references pulled successfully via `scripts/validate-image-pulls.py` using the destination Secret `coriolis-appliance-registry` (type `kubernetes.io/dockerconfigjson`), and no pull-validation Pods remain. The gate is complete. The multi-resource policy is frozen in the [Foundational Resource Contract](foundational-resource-contract.md), but runtime integration remains blocked until collision-safe runtime reads/create/guarded SSA, minimal Secret/ConfigMap RBAC, status-then-Kopf-retry wiring, and exhaustive tests pass; no Coriolis core runtime workloads have been implemented or deployed.
-
-!!! note
-    The pull gate has passed; do not claim runtime readiness or bootstrap. Runtime integration is not currently unblocked, and no core runtime workloads exist yet.
-
 ## :material-book-open-page-variant-outline: Ordered Implementation Plan
 
-1. Image and runtime inventory. *(complete)*
-2. CRD and runtime API. *(committed locally at `ab9df83`, not pushed/deployed)*
-3. Foundational resource contracts. *(documented in the [Foundational Resource Contract](foundational-resource-contract.md); metadata, collision, retained-resource classification, manifest builders, credential generation, retained Secret semantics, non-sensitive rendering, five-resource preflight, sensitive rendering, and the multi-resource failure/status/atomicity/race-safety/marker-last policy are frozen or implemented in local unpushed/undeployed slices through `9bb20f3`. Before any MariaDB vertical slice, implement collision-safe runtime pre-reads and create/guarded SSA for all five resources plus the marker, minimal Secret/ConfigMap `get`/`create`/`patch` RBAC, status-then-Kopf-retry wiring, and exhaustive tests. Runtime integration remains blocked until that passes; `Ready=False/RuntimeNotImplemented` remains truthful.)*
-4. Generated configuration and secrets. *(Pure builders are committed at `050f16e`, pure retained credential generators at `a604579`, pure retained Secret semantic validation/extraction at `5165629`, non-sensitive configuration rendering at `97153a7`, five-resource preflight at `35eac9b`, and sensitive configuration rendering at `9bb20f3`, none pushed/deployed. The complete `coriolis.conf` is exactly one key in the owner-referenced configuration Secret, never ConfigMap/log/status/event/metadata/documentation content. The sensitive renderer uses the immutable upstream base template and all 16 fragments with preserved provider lists/order/module maps, no custom module overrides or compression/compressor, explicit internal dependency inputs, source-audited identities/paths, credential mappings, strict value-safe validation, and no CRD fields. The multi-resource policy is frozen; next is runtime reads/create/guarded SSA for all five resources plus the marker, minimal RBAC, status-then-Kopf-retry wiring, and exhaustive tests. Runtime integration remains blocked; retained adoption/runtime construction and rotation remain deferred.)*
+1. Image and runtime inventory is complete.
+2. CRD and runtime API are locally implemented and undeployed; this migration adds ingress schema/sample/pure validation only.
+3. Foundational resources next implement collision-safe marker-plus-four reads, create/guarded SSA, minimal Secret/ConfigMap RBAC, status retry, and exhaustive tests.
+4. Generated configuration retains immutable upstream provenance, provider order/maps, exact mount boundaries, and value-safe Secret handling.
+5. Foundational dependencies and bootstrap Jobs remain later work.
+6. Workloads, then their ClusterIP Services and logical-origin Ingress routing, remain later work; no route precedes its Service.
+7. Controller watches, status/readiness, broader tests, and development acceptance follow runtime construction.
 
-5. Foundational dependencies and bootstrap Jobs.
-6. Coriolis workloads.
-7. Server-side apply and controller watches.
-8. Status and readiness.
-9. Tests.
-10. Development deployment and acceptance.
+## :material-book-open-page-variant-outline: Image Gate History
+
+RC4 remains OVA-only for Kubernetes because no approved `2608*` registry tags exist. The exact `2603.4` inventory remains authoritative: 26 images were mirrored and 21 image references passed pull validation. Those counts and digests are historical validation facts; they do not make Step CA or web-proxy current initial-runtime components. See [Image Inventory](image-inventory.md).

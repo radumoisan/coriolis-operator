@@ -42,6 +42,35 @@ spec:
                 version:
                   type: string
                   minLength: 1
+                ingress:
+                  type: object
+                  default:
+                    host: coriolis.app.cloudbase.wiki
+                    ingressClassName: nginx
+                    tls:
+                      mode: certManager
+                  properties:
+                    host:
+                      type: string
+                      default: coriolis.app.cloudbase.wiki
+                    ingressClassName:
+                      type: string
+                      default: nginx
+                    tls:
+                      type: object
+                      default:
+                        mode: certManager
+                      properties:
+                        mode:
+                          type: string
+                          enum:
+                            - certManager
+                            - existingSecret
+                          default: certManager
+                        clusterIssuer:
+                          type: string
+                        tlsSecretName:
+                          type: string
             status:
               type: object
               properties:

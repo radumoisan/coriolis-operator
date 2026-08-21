@@ -29,13 +29,13 @@ The target runtime contract and acceptance boundary are in [Runtime Contract](ru
 - All images are **Linux/amd64**.
 - No application or private support image declares an OCI healthcheck, so **probes are operator-owned**.
 - Images default to **root/empty user**.
-- Listeners: API `7667`, web `3000`, web proxy `443`.
+- Historical listener inventory: API `7667`, web `3000`, web proxy `443`. The web proxy is deferred from the current initial-runtime selection.
 - The worker is **privileged** with `/dev` and `/lib/modules`.
 - Kolla support images (keystone, barbican, kolla-toolbox, mariadb, rabbitmq, memcached) run as their platform service users by default.
 
-## :material-book-open-page-variant-outline: Approved Initial Core Workload
+## :material-book-open-page-variant-outline: Historical Pull-Validated Core Selection
 
-Initial core workload: API, conductor, scheduler, transfer-cron, minion-manager, deployer-manager, privileged worker, compressor, web, web-proxy.
+Historical pull-validation selection included API, conductor, scheduler, transfer-cron, minion-manager, deployer-manager, privileged worker, compressor, web, web-proxy, and Step CA. The current initial-runtime selection defers web-proxy and Step CA; their mirrored images remain retained as historical inventory evidence.
 
 - `coriolis-common` is a **base image**, not a workload.
 - Deferred: licensing server, Metal Hub, console editor, logger/InfluxDB.
@@ -81,7 +81,7 @@ Exact immutable manifest digests for support images at tag `2023.1-ubuntu-jammy`
 
 ## :material-book-open-page-variant-outline: Third-Party Images
 
-Step CA is **pinned and mirrored**: sourced by exact digest `sha256:e9e8fa3262bf37b130962ffddbf6a64ac188f0bbb80959cf3ddc04c6bf294c3d` from `smallstep/step-ca` and mirrored to `cr.virtomat.io/virtomat/coriolis/step-ca:2603.4`. Independent destination verification returned the exact expected digest.
+Step CA is **pinned and mirrored** as historical inventory: sourced by exact digest `sha256:e9e8fa3262bf37b130962ffddbf6a64ac188f0bbb80959cf3ddc04c6bf294c3d` from `smallstep/step-ca` and mirrored to `cr.virtomat.io/virtomat/coriolis/step-ca:2603.4`. Independent destination verification returned the exact expected digest. It is deferred and is not selected for the current initial runtime.
 
 Logger/InfluxDB remain **deferred**. The `influxdb:1.7` candidate digest `2eb372aaa8f3446e6876b8095d97f9a4e90711593995806f1158f4c988b9765e` is not yet locked.
 
@@ -89,7 +89,7 @@ Logger/InfluxDB remain **deferred**. The `influxdb:1.7` candidate digest `2eb372
 
 - The metadata gate is **complete**: the exact `2603.4` image set, immutable digests, platform, users, listeners, and health capability are recorded above.
 - All 26 approved images were **mirrored serially on 2026-08-20** to `cr.virtomat.io/virtomat/coriolis` with preserved and verified manifest digests via `scripts/mirror-images.py`; independent destination verification of Step CA returned the exact expected digest. Logger/InfluxDB remain deferred.
-- **Pull validation passed on 2026-08-20** in `virt-infra-dev-buc-hq` namespace `coriolis`: all exact 21 initial-runtime image references (10 application images at `2603.4`, 10 support images at `2023.1-ubuntu-jammy`, and Step CA at `2603.4`) pulled successfully, validated serially by `scripts/validate-image-pulls.py` using one short-lived Pod at a time with `imagePullPolicy: Always`, explicit context/namespace, and the destination Secret `coriolis-appliance-registry` (type `kubernetes.io/dockerconfigjson`). Each successful Pod was removed; **zero residual validation Pods remain**. Independent main-agent validation of Step CA repeated successfully with the expected digest.
-- The inventory and pull gate are **complete**. The multi-resource policy is frozen in the [Foundational Resource Contract](foundational-resource-contract.md), but runtime integration remains blocked until collision-safe runtime reads/create/guarded SSA, minimal Secret/ConfigMap RBAC, status-then-retry wiring, and exhaustive tests pass; no Coriolis core runtime workloads have been implemented or deployed.
+- **Pull validation passed on 2026-08-20** in `virt-infra-dev-buc-hq` namespace `coriolis`: all exact 21 historically selected image references (10 application images at `2603.4`, 10 support images at `2023.1-ubuntu-jammy`, and Step CA at `2603.4`) pulled successfully, validated serially by `scripts/validate-image-pulls.py` using one short-lived Pod at a time with `imagePullPolicy: Always`, explicit context/namespace, and the destination Secret `coriolis-appliance-registry` (type `kubernetes.io/dockerconfigjson`). Each successful Pod was removed; **zero residual validation Pods remain**. Independent main-agent validation of Step CA repeated successfully with the expected digest. This historical pull result does not select Step CA or web-proxy for the current initial runtime.
+- The inventory and pull gate are **complete**. The current marker-plus-four policy is frozen in the [Foundational Resource Contract](foundational-resource-contract.md), but runtime integration remains blocked until collision-safe runtime reads/create/guarded SSA, minimal Secret/ConfigMap RBAC, status-then-retry wiring, and exhaustive tests pass; no Coriolis core runtime workloads have been implemented or deployed.
 
 Related project tracking: [Roadmap](../ROADMAP.md), [Status](../STATUS.md), and [Appliance Runtime](../../docs/appliance-runtime.md).

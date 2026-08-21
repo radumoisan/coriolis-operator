@@ -5,3 +5,9 @@ metadata:
 spec:
   profile: core
   version: "2603.4"
+  ingress:
+    host: coriolis.app.cloudbase.wiki
+    ingressClassName: nginx
+    tls:
+      mode: certManager
+      clusterIssuer: letsencrypt

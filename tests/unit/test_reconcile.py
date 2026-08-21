@@ -19,7 +19,6 @@ from coriolis_operator.reconcile import (
     MARKER_LEGACY,
     MARKER_MANAGED,
     RETENTION_ANNOTATION,
-    STEP_CA_CREDENTIALS_KEYS,
     SUPPORTED_INITIAL_VERSION,
     SUPPORTED_PROFILE,
     OwnedClassification,
@@ -35,14 +34,13 @@ from coriolis_operator.reconcile import (
     build_resource_metadata,
     build_state_config_map,
     build_status,
-    build_step_ca_credentials_secret,
     classify_existing_marker,
     classify_owned_resource,
     classify_retained_resource,
     collision_conditions,
     generate_coriolis_credentials,
     generate_infrastructure_credentials,
-    generate_step_ca_credentials,
+    kubernetes_coriolis_render_inputs,
     preflight_foundational_resources,
     rejected_conditions,
     state_config_map_name,
@@ -75,7 +73,6 @@ INFRASTRUCTURE_CREDENTIALS = {
     "rabbitmq_password": "rabbitmq synthetic",
     "keystone_admin_password": "admin synthetic",
 }
-STEP_CA_CREDENTIALS = {"init_password": "step-ca synthetic"}
 CORIOLIS_CONFIG = {
     "coriolis-api.wsgi": "wsgi application",
     "wsgi-coriolis.conf": "wsgi config",
@@ -106,7 +103,6 @@ CORIOLIS_CONFIG_SECRET = {"coriolis.conf": "secret config"}
                 "keystone_admin_password",
             },
         ),
-        (generate_step_ca_credentials, {"init_password"}),
     ],
 )
 def test_credential_generators_use_independent_32_byte_tokens(
@@ -128,7 +124,7 @@ def test_credential_generators_use_independent_32_byte_tokens(
     }
 
 
-def test_credential_generators_make_seven_32_byte_factory_calls() -> None:
+def test_credential_generators_make_six_32_byte_factory_calls() -> None:
     calls: list[int] = []
 
     def token_factory(bytes_count: int) -> str:
@@ -137,9 +133,8 @@ def test_credential_generators_make_seven_32_byte_factory_calls() -> None:
 
     generate_coriolis_credentials(token_factory)
     generate_infrastructure_credentials(token_factory)
-    generate_step_ca_credentials(token_factory)
 
-    assert calls == [32] * 7
+    assert calls == [32] * 6
 
 
 @pytest.mark.parametrize(
@@ -147,7 +142,6 @@ def test_credential_generators_make_seven_32_byte_factory_calls() -> None:
     [
         (generate_coriolis_credentials, build_coriolis_credentials_secret),
         (generate_infrastructure_credentials, build_infrastructure_credentials_secret),
-        (generate_step_ca_credentials, build_step_ca_credentials_secret),
     ],
 )
 def test_generated_credentials_compose_with_secret_builders(generator, builder) -> None:
@@ -172,7 +166,6 @@ def test_generated_credentials_compose_with_secret_builders(generator, builder) 
     [
         generate_coriolis_credentials,
         generate_infrastructure_credentials,
-        generate_step_ca_credentials,
     ],
 )
 def test_credential_generators_return_url_safe_non_empty_production_tokens(
@@ -190,7 +183,6 @@ def test_credential_generators_return_url_safe_non_empty_production_tokens(
     [
         generate_coriolis_credentials,
         generate_infrastructure_credentials,
-        generate_step_ca_credentials,
     ],
 )
 def test_credential_generators_reject_invalid_factory_output_without_leakage(
@@ -395,6 +387,33 @@ def test_appliance_resource_name_shared_visible_prefix_differs_by_hash() -> None
 
     assert first != second
     assert first[:45] == second[:45]
+
+
+@pytest.mark.parametrize(
+    "appliance_name",
+    ["example", "example.domain", f"{'a' * 40}.{'b' * 40}.{'c' * 40}.{'d' * 40}"],
+)
+def test_kubernetes_render_inputs_are_fixed_and_derive_component_names(
+    appliance_name: str,
+) -> None:
+    inputs = kubernetes_coriolis_render_inputs(appliance_name)
+
+    assert inputs.bind_address == "0.0.0.0"
+    assert inputs.coriolis_port == 7667
+    assert inputs.coriolis_config_dir == "/etc/coriolis"
+    assert inputs.coriolis_vmware_vix_disklib_log_dir == "/var/log/coriolis/vmware-root"
+    assert inputs.endpoints.rabbitmq_host == appliance_resource_name(
+        appliance_name, "rabbitmq"
+    )
+    assert inputs.endpoints.memcached_host == appliance_resource_name(
+        appliance_name, "memcached"
+    )
+    assert inputs.endpoints.database_host == appliance_resource_name(
+        appliance_name, "mariadb"
+    )
+    assert inputs.endpoints.keystone_host == appliance_resource_name(
+        appliance_name, "keystone"
+    )
 
 
 def test_appliance_resource_name_rejects_invalid_appliance_names() -> None:
@@ -653,12 +672,6 @@ def _assert_standard_metadata(
             "infrastructure-credentials",
             True,
         ),
-        (
-            build_step_ca_credentials_secret,
-            STEP_CA_CREDENTIALS,
-            "step-ca-credentials",
-            True,
-        ),
         (build_coriolis_config_map, CORIOLIS_CONFIG, "coriolis-config", False),
         (
             build_coriolis_config_secret,
@@ -670,7 +683,6 @@ def _assert_standard_metadata(
     ids=(
         "coriolis-credentials",
         "infrastructure-credentials",
-        "step-ca-credentials",
         "coriolis-config",
         "coriolis-config-secret",
     ),
@@ -707,7 +719,6 @@ def test_appliance_resource_builders_metadata_and_names(
     [
         (build_coriolis_credentials_secret, CORIOLIS_CREDENTIALS, True),
         (build_infrastructure_credentials_secret, INFRASTRUCTURE_CREDENTIALS, True),
-        (build_step_ca_credentials_secret, STEP_CA_CREDENTIALS, True),
         (build_coriolis_config_secret, CORIOLIS_CONFIG_SECRET, False),
     ],
 )
@@ -760,7 +771,6 @@ def test_coriolis_config_map_has_only_plain_approved_values() -> None:
     [
         (build_coriolis_credentials_secret, CORIOLIS_CREDENTIALS, True),
         (build_infrastructure_credentials_secret, INFRASTRUCTURE_CREDENTIALS, True),
-        (build_step_ca_credentials_secret, STEP_CA_CREDENTIALS, True),
         (build_coriolis_config_map, CORIOLIS_CONFIG, False),
         (build_coriolis_config_secret, CORIOLIS_CONFIG_SECRET, False),
     ],
@@ -812,14 +822,6 @@ def test_resource_builders_use_existing_metadata_validation() -> None:
             retention="retain",
             values=CORIOLIS_CREDENTIALS,
         )
-    with pytest.raises(ValueError):
-        build_step_ca_credentials_secret(
-            appliance_name="example",
-            namespace="operators",
-            accepted_version="2603.4",
-            retention="",
-            values=STEP_CA_CREDENTIALS,
-        )
 
 
 @pytest.mark.parametrize(
@@ -827,7 +829,6 @@ def test_resource_builders_use_existing_metadata_validation() -> None:
     [
         (build_coriolis_credentials_secret, CORIOLIS_CREDENTIALS, True),
         (build_infrastructure_credentials_secret, INFRASTRUCTURE_CREDENTIALS, True),
-        (build_step_ca_credentials_secret, STEP_CA_CREDENTIALS, True),
         (build_coriolis_config_map, CORIOLIS_CONFIG, False),
         (build_coriolis_config_secret, CORIOLIS_CONFIG_SECRET, False),
     ],
@@ -864,11 +865,6 @@ def test_resource_builders_do_not_mutate_inputs(
             build_infrastructure_credentials_secret,
             INFRASTRUCTURE_CREDENTIALS,
             INFRASTRUCTURE_CREDENTIALS_KEYS,
-        ),
-        (
-            build_step_ca_credentials_secret,
-            STEP_CA_CREDENTIALS,
-            STEP_CA_CREDENTIALS_KEYS,
         ),
     ],
 )
@@ -2055,7 +2051,6 @@ def foundational_kwargs(**overrides: object) -> dict[str, object]:
         "owner": OWNER,
         "coriolis_credentials_secret": None,
         "infrastructure_credentials_secret": None,
-        "step_ca_credentials_secret": None,
         "coriolis_config_map": None,
         "coriolis_config_secret": None,
     }
@@ -2074,16 +2069,14 @@ def test_foundational_preflight_absent_generates_only_retained_credentials() -> 
         **foundational_kwargs(
             coriolis_token_factory=factory,
             infrastructure_token_factory=factory,
-            step_ca_token_factory=factory,
         )
     )
 
     assert set(result.credentials) == {
         "example-coriolis-credentials",
         "example-infrastructure-credentials",
-        "example-step-ca-credentials",
     }
-    assert calls == ["token"] * 7
+    assert calls == ["token"] * 6
     assert "generated-1" not in repr(result)
     assert (
         result.classifications["example-coriolis-config"] is OwnedClassification.ABSENT
@@ -2115,13 +2108,6 @@ def test_foundational_preflight_reuses_retained_models_without_factories() -> No
             retention="retain",
             values=INFRASTRUCTURE_CREDENTIALS,
         ),
-        "step_ca_credentials_secret": build_step_ca_credentials_secret(
-            appliance_name="example",
-            namespace="operators",
-            accepted_version="2603.4",
-            retention="retain",
-            values=STEP_CA_CREDENTIALS,
-        ),
     }
     result = preflight_foundational_resources(
         **foundational_kwargs(
@@ -2130,7 +2116,6 @@ def test_foundational_preflight_reuses_retained_models_without_factories() -> No
             coriolis_config_secret=owned_body("coriolis-config-secret"),
             coriolis_token_factory=lambda _: pytest.fail("factory called"),
             infrastructure_token_factory=lambda _: pytest.fail("factory called"),
-            step_ca_token_factory=lambda _: pytest.fail("factory called"),
         )
     )
 
@@ -2139,7 +2124,6 @@ def test_foundational_preflight_reuses_retained_models_without_factories() -> No
         result.credentials["example-infrastructure-credentials"]
         == INFRASTRUCTURE_CREDENTIALS
     )
-    assert result.credentials["example-step-ca-credentials"] == STEP_CA_CREDENTIALS
     assert all(value.value != "collision" for value in result.classifications.values())
 
 
@@ -2164,7 +2148,6 @@ def test_foundational_preflight_omits_credentials_after_semantic_validation_fail
             coriolis_credentials_secret=invalid,
             infrastructure_token_factory=lambda _: pytest.fail("factory called"),
             coriolis_token_factory=lambda _: pytest.fail("factory called"),
-            step_ca_token_factory=lambda _: pytest.fail("factory called"),
         )
     )
 
@@ -2191,25 +2174,14 @@ def test_foundational_preflight_generates_only_absent_retained_resource() -> Non
     result = preflight_foundational_resources(
         **foundational_kwargs(
             coriolis_credentials_secret=reused,
-            infrastructure_credentials_secret=build_infrastructure_credentials_secret(
-                appliance_name="example",
-                namespace="operators",
-                accepted_version="2603.4",
-                retention="retain",
-                values=INFRASTRUCTURE_CREDENTIALS,
-            ),
-            step_ca_token_factory=lambda size: calls.append(size) or "generated",
+            infrastructure_token_factory=lambda size: calls.append(size) or "generated",
         )
     )
 
-    assert calls == [32]
+    assert calls == [32] * 3
     assert result.credentials["example-coriolis-credentials"] == CORIOLIS_CREDENTIALS
-    assert (
-        result.credentials["example-infrastructure-credentials"]
-        == INFRASTRUCTURE_CREDENTIALS
-    )
-    assert result.credentials["example-step-ca-credentials"] == {
-        "init_password": "generated"
+    assert result.credentials["example-infrastructure-credentials"] == {
+        key: "generated" for key in INFRASTRUCTURE_CREDENTIALS
     }
 
 
@@ -2218,7 +2190,6 @@ def test_foundational_preflight_generates_only_absent_retained_resource() -> Non
     [
         ("coriolis_credentials_secret", "example-coriolis-credentials"),
         ("infrastructure_credentials_secret", "example-infrastructure-credentials"),
-        ("step_ca_credentials_secret", "example-step-ca-credentials"),
         ("coriolis_config_map", "example-coriolis-config"),
         ("coriolis_config_secret", "example-coriolis-config-secret"),
     ],
@@ -2247,13 +2218,6 @@ def test_foundational_metadata_collision_skips_semantics_and_generation(
             retention="retain",
             values=INFRASTRUCTURE_CREDENTIALS,
         ),
-        "step_ca_credentials_secret": build_step_ca_credentials_secret(
-            appliance_name="example",
-            namespace="operators",
-            accepted_version="2603.4",
-            retention="retain",
-            values=STEP_CA_CREDENTIALS,
-        ),
     }
     existing[collision_field] = {"metadata": {}}
     result = preflight_foundational_resources(
@@ -2261,7 +2225,6 @@ def test_foundational_metadata_collision_skips_semantics_and_generation(
             **existing,
             coriolis_token_factory=lambda _: pytest.fail("factory called"),
             infrastructure_token_factory=lambda _: pytest.fail("factory called"),
-            step_ca_token_factory=lambda _: pytest.fail("factory called"),
         )
     )
 

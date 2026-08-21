@@ -9,7 +9,7 @@ from jinja2 import Environment, PackageLoader, StrictUndefined
 
 CONFIG_TEMPLATE_MAP = {
     "coriolis-api.wsgi": "coriolis-api.wsgi.j2",
-    "wsgi-coriolis.conf": "wsgi-coriolis.conf.j2",
+    "wsgi-coriolis.conf": "kubernetes/wsgi-coriolis.conf.j2",
     "vixdisklib.conf": "vixdisklib.conf.j2",
     "api-paste.ini": "api-paste.ini.j2",
     "policy.yml": "policy.yml.j2",
@@ -105,13 +105,20 @@ class SensitiveCoriolisEndpoints:
     """Non-sensitive dependencies required by the sensitive config template."""
 
     rabbitmq_host: str
-    rabbitmq_port: int
     memcached_host: str
     database_host: str
-    keystone_protocol: str
     keystone_host: str
-    keystone_public_port: int
-    keystone_internal_port: int
+
+
+@dataclass(frozen=True)
+class KubernetesCoriolisRenderInputs:
+    """Fixed Kubernetes runtime values and dependency endpoints."""
+
+    bind_address: str
+    coriolis_port: int
+    coriolis_config_dir: str
+    coriolis_vmware_vix_disklib_log_dir: str
+    endpoints: SensitiveCoriolisEndpoints
 
 
 @dataclass(frozen=True)
@@ -167,28 +174,21 @@ def _validate_sensitive_string(value: object) -> str:
     return value
 
 
-def _validate_sensitive_port(value: object) -> int:
-    if type(value) is not int or not 1 <= value <= 65535:
-        raise ValueError(_INVALID_SENSITIVE_INPUT_MESSAGE)
-    return value
-
-
 def render_coriolis_config(
     *,
-    bind_address: str,
-    coriolis_port: int,
-    coriolis_config_dir: str,
-    coriolis_vmware_vix_disklib_log_dir: str,
+    inputs: KubernetesCoriolisRenderInputs,
     accepted_version: str,
 ) -> dict[str, str]:
     """Return the approved non-sensitive Coriolis ConfigMap values."""
-    validated_bind_address = _validate_input(bind_address)
-    validated_config_dir = _validate_input(coriolis_config_dir, path=True)
+    if type(inputs) is not KubernetesCoriolisRenderInputs:
+        raise ValueError(_INVALID_INPUT_MESSAGE)
+    validated_bind_address = _validate_input(inputs.bind_address)
+    validated_config_dir = _validate_input(inputs.coriolis_config_dir, path=True)
     validated_disklib_log_dir = _validate_input(
-        coriolis_vmware_vix_disklib_log_dir, path=True
+        inputs.coriolis_vmware_vix_disklib_log_dir, path=True
     )
     validated_version = _validate_input(accepted_version)
-    if type(coriolis_port) is not int or not 1 <= coriolis_port <= 65535:
+    if type(inputs.coriolis_port) is not int or not 1 <= inputs.coriolis_port <= 65535:
         raise ValueError(_INVALID_INPUT_MESSAGE)
 
     try:
@@ -200,7 +200,7 @@ def render_coriolis_config(
         )
         context = {
             "bind_address": validated_bind_address,
-            "coriolis_port": coriolis_port,
+            "coriolis_port": inputs.coriolis_port,
             "coriolis_config_dir": validated_config_dir,
             "coriolis_vmware_vix_disklib_log_dir": validated_disklib_log_dir,
             "default_coriolis_docker_images_tag": validated_version,
@@ -225,15 +225,9 @@ def render_sensitive_coriolis_config(
         raise ValueError(_INVALID_SENSITIVE_INPUT_MESSAGE)
 
     rabbitmq_host = _validate_sensitive_string(endpoints.rabbitmq_host)
-    rabbitmq_port = _validate_sensitive_port(endpoints.rabbitmq_port)
     memcached_host = _validate_sensitive_string(endpoints.memcached_host)
     database_host = _validate_sensitive_string(endpoints.database_host)
-    keystone_protocol = _validate_sensitive_string(endpoints.keystone_protocol)
-    if keystone_protocol not in {"http", "https"}:
-        raise ValueError(_INVALID_SENSITIVE_INPUT_MESSAGE)
     keystone_host = _validate_sensitive_string(endpoints.keystone_host)
-    keystone_public_port = _validate_sensitive_port(endpoints.keystone_public_port)
-    keystone_internal_port = _validate_sensitive_port(endpoints.keystone_internal_port)
     rabbitmq_password = _validate_sensitive_string(credentials.rabbitmq_password)
     coriolis_database_password = _validate_sensitive_string(
         credentials.coriolis_database_password
@@ -252,12 +246,12 @@ def render_sensitive_coriolis_config(
             keep_trailing_newline=True,
             undefined=StrictUndefined,
         )
-        content = environment.get_template("coriolis.conf.j2").render(
+        content = environment.get_template("kubernetes/coriolis.conf.j2").render(
             {
                 "rabbitmq_user": "openstack",
                 "rabbitmq_password": rabbitmq_password,
                 "rabbitmq_host": rabbitmq_host,
-                "rabbitmq_port": rabbitmq_port,
+                "rabbitmq_port": 5672,
                 "coriolis_debug": True,
                 "coriolis_log_dir": "/var/log/coriolis",
                 "coriolis_export_providers": _EXPORT_PROVIDERS,
@@ -273,10 +267,10 @@ def render_sensitive_coriolis_config(
                 "coriolis_database_password": coriolis_database_password,
                 "database_host": database_host,
                 "coriolis_database_name": "coriolis",
-                "keystone_protocol": keystone_protocol,
+                "keystone_protocol": "http",
                 "keystone_host": keystone_host,
-                "keystone_public_port": keystone_public_port,
-                "keystone_internal_port": keystone_internal_port,
+                "keystone_public_port": 5000,
+                "keystone_internal_port": 5000,
                 "coriolis_keystone_user": "coriolis",
                 "coriolis_keystone_password": coriolis_keystone_password,
                 "coriolis_policy_file": "/etc/coriolis/policy.yml",

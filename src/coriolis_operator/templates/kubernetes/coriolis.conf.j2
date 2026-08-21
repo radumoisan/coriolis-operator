@@ -1,0 +1,132 @@
+[DEFAULT]
+default_messaging_timeout = 60
+messaging_transport_url = rabbit://{{ rabbitmq_user }}:{{ rabbitmq_password }}@{{ rabbitmq_host }}:{{ rabbitmq_port }}/
+
+default_requests_timeout = 60
+
+debug = {{ coriolis_debug }}
+log_dir = {{  coriolis_log_dir }}
+logging_exception_prefix = %(asctime)s.%(msecs)03d TRACE %(name)s %(instance)s
+logging_debug_format_suffix = from (pid=%(process)d) %(funcName)s %(pathname)s:%(lineno)d
+logging_default_format_string = %(asctime)s.%(msecs)03d %(levelname)s %(name)s [-] %(instance)s%(message)s
+logging_context_format_string = %(asctime)s.%(msecs)03d %(levelname)s %(name)s [%(request_id)s] %(instance)s%(message)s
+
+providers=
+{%- for item in coriolis_export_providers %}
+{{ merged_export_modules[item] }},
+{%- endfor %}
+{%- for item in coriolis_import_providers %}
+{{ merged_import_modules[item] }}{% if not loop.last %},{% endif %}
+{% endfor %}
+
+caching = True
+# Time in seconds
+cache_time = 86400
+
+syslog_log_facility = LOG_LOCAL0
+use_syslog = yes
+
+compress_transfers = {{ compress_transfers | default("False", true) }}
+
+{% if enable_coriolis_compressor %}
+compressor_address = {{ compressor_address }}
+
+# Number of seconds to wait for a pending SSH or WinRM command before the
+# socket times out
+default_osmorphing_operation_timeout = 1800
+
+{% endif %}
+[oslo_messaging_rabbit]
+ssl = False
+
+[cache]
+enabled = True
+backend = dogpile.cache.memcached
+backend_argument = url:{{ memcached_host }}:11211
+
+[database]
+connection = mysql://{{ coriolis_database_user }}:{{ coriolis_database_password }}@{{ database_host }}/{{ coriolis_database_name }}
+
+[keystone_authtoken]
+auth_type = password
+auth_uri = {{ keystone_protocol }}://{{ keystone_host }}:{{ keystone_public_port }}/v3
+auth_url = {{ keystone_protocol }}://{{ keystone_host }}:{{ keystone_internal_port }}/v3
+username = {{ coriolis_keystone_user }}
+password = {{ coriolis_keystone_password }}
+user_domain_id = default
+project_name = service
+project_domain_id = default
+
+[trustee]
+auth_type = password
+auth_url = {{ keystone_protocol }}://{{ keystone_host }}:{{ keystone_internal_port }}/v3
+username = {{ coriolis_keystone_user }}
+password = {{ coriolis_keystone_password }}
+user_domain_id = default
+
+[keystone]
+identity_api_version = 3
+auth_url = {{ keystone_protocol }}://{{ keystone_host }}:{{ keystone_public_port }}/v3
+
+[oslo_policy]
+policy_file = {{ coriolis_policy_file }}
+
+[oslo_concurrency]
+lock_path = {{ coriolis_locks_dir_containers }}
+
+[conductor]
+conductor_rpc_timeout = 60
+
+# Whether or not to allow for the debugging of OSMorphing errors
+# by skipping the cleanup stages of failed OSMorphing attempts,
+# allowing for manual inspection.
+debug_os_morphing_errors = False
+
+[scheduler]
+scheduler_rpc_timeout = 60
+
+[minion_manager]
+minion_mananger_rpc_timeout = 60
+
+# The period of time (in minutes) that minion pool refresh operations should
+# occur at. Minion pools which are in ALLOCATED status will be automatically
+# refreshed with the given period, which includes healthchecking each minion
+# machine, as well as deallocating expired machines.
+# The maximum value for this is 60 (thus guaranteeing at least one refresh/hour)
+# Set to 0 to disable automatic pool refreshing completely.
+# Internal default is 10.
+minion_pool_default_refresh_period_minutes = 0
+
+[deployer_manager]
+deployer_manager_rpc_timeout = 60
+
+[worker]
+worker_rpc_timeout = 60
+export_base_path = {{ coriolis_export_dir }}
+
+[replicator]
+default_requests_timeout = 60
+
+[taskflow]
+# The maximum timeout (in seconds) for the taskflow classes which adapt
+# Coriolis worker service tasks to taskflow's task model. This does *not*
+# affect timeouts for Replica/Migration tasks which are run by the Conductor.
+# Default is 3600.
+worker_task_execution_timeout = 3600
+
+[serialization]
+temp_keypair_password = {{ temp_keypair_password }}
+
+[proxy]
+# url = http://proxy:3128
+# Optional proxy credentials
+# username =
+# password =
+# Optional comma separated list of proxy exclusions
+# no_proxy =
+
+{% for provider in coriolis_providers %}
+
+{% include ("providers/" + provider + ".conf.j2") %}
+
+{% endfor %}

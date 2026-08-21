@@ -10,6 +10,11 @@ from datetime import UTC, datetime
 from enum import Enum
 from typing import Any
 
+from coriolis_operator.configuration import (
+    KubernetesCoriolisRenderInputs,
+    SensitiveCoriolisEndpoints,
+)
+
 STATE_CONFIG_MAP_SUFFIX = "-operator-state"
 CONFIG_MAP_NAME_MAX_LENGTH = 253
 DNS_LABEL_MAX_LENGTH = 63
@@ -67,7 +72,6 @@ INFRASTRUCTURE_CREDENTIALS_KEYS = frozenset(
         "keystone_admin_password",
     }
 )
-STEP_CA_CREDENTIALS_KEYS = frozenset({"init_password"})
 CORIOLIS_CONFIG_KEYS = frozenset(
     {
         "coriolis-api.wsgi",
@@ -165,6 +169,24 @@ def appliance_resource_name(appliance_name: str, component: str) -> str:
     suffix = f"-{name_hash}-{component}"
     prefix = visible_prefix[: DNS_LABEL_MAX_LENGTH - len(suffix)].rstrip("-")
     return f"{prefix}{suffix}"
+
+
+def kubernetes_coriolis_render_inputs(
+    appliance_name: str,
+) -> KubernetesCoriolisRenderInputs:
+    """Return fixed Kubernetes configuration inputs for an appliance."""
+    return KubernetesCoriolisRenderInputs(
+        bind_address="0.0.0.0",
+        coriolis_port=7667,
+        coriolis_config_dir="/etc/coriolis",
+        coriolis_vmware_vix_disklib_log_dir="/var/log/coriolis/vmware-root",
+        endpoints=SensitiveCoriolisEndpoints(
+            rabbitmq_host=appliance_resource_name(appliance_name, "rabbitmq"),
+            memcached_host=appliance_resource_name(appliance_name, "memcached"),
+            database_host=appliance_resource_name(appliance_name, "mariadb"),
+            keystone_host=appliance_resource_name(appliance_name, "keystone"),
+        ),
+    )
 
 
 def appliance_identity(appliance_name: str) -> str:
@@ -309,13 +331,6 @@ def generate_infrastructure_credentials(
     return _generate_credentials(INFRASTRUCTURE_CREDENTIALS_KEYS, token_factory)
 
 
-def generate_step_ca_credentials(
-    token_factory: Callable[[int], str] = secrets.token_urlsafe,
-) -> dict[str, str]:
-    """Generate an independent value for the retained step-ca credentials Secret."""
-    return _generate_credentials(STEP_CA_CREDENTIALS_KEYS, token_factory)
-
-
 def _build_retained_secret(
     *,
     appliance_name: str,
@@ -382,26 +397,6 @@ def build_infrastructure_credentials_secret(
         retention=retention,
         values=values,
         expected_keys=INFRASTRUCTURE_CREDENTIALS_KEYS,
-    )
-
-
-def build_step_ca_credentials_secret(
-    *,
-    appliance_name: str,
-    namespace: str,
-    accepted_version: str,
-    retention: str,
-    values: Mapping[str, str],
-) -> dict[str, Any]:
-    """Build the retained step-ca credentials Secret apply body."""
-    return _build_retained_secret(
-        appliance_name=appliance_name,
-        namespace=namespace,
-        accepted_version=accepted_version,
-        component="step-ca-credentials",
-        retention=retention,
-        values=values,
-        expected_keys=STEP_CA_CREDENTIALS_KEYS,
     )
 
 
@@ -750,12 +745,10 @@ def preflight_foundational_resources(
     owner: Mapping[str, Any],
     coriolis_credentials_secret: Any | None,
     infrastructure_credentials_secret: Any | None,
-    step_ca_credentials_secret: Any | None,
     coriolis_config_map: Any | None,
     coriolis_config_secret: Any | None,
     coriolis_token_factory: Callable[[int], str] = secrets.token_urlsafe,
     infrastructure_token_factory: Callable[[int], str] = secrets.token_urlsafe,
-    step_ca_token_factory: Callable[[int], str] = secrets.token_urlsafe,
 ) -> FoundationalResourcePreflight:
     """Classify foundational resources before validating or generating credentials."""
     retained = (
@@ -772,13 +765,6 @@ def preflight_foundational_resources(
             INFRASTRUCTURE_CREDENTIALS_KEYS,
             generate_infrastructure_credentials,
             infrastructure_token_factory,
-        ),
-        (
-            "step-ca-credentials",
-            step_ca_credentials_secret,
-            STEP_CA_CREDENTIALS_KEYS,
-            generate_step_ca_credentials,
-            step_ca_token_factory,
         ),
     )
     owned = (

@@ -7,6 +7,7 @@ import pytest
 
 from coriolis_operator import configuration
 from coriolis_operator.configuration import (
+    KubernetesCoriolisRenderInputs,
     SensitiveCoriolisConfig,
     SensitiveCoriolisCredentials,
     SensitiveCoriolisEndpoints,
@@ -20,10 +21,13 @@ from coriolis_operator.reconcile import (
 )
 
 RENDER_KWARGS = {
-    "bind_address": "127.0.0.1",
-    "coriolis_port": 8443,
-    "coriolis_config_dir": "/etc/coriolis",
-    "coriolis_vmware_vix_disklib_log_dir": "/var/log/coriolis/vixdisklib",
+    "inputs": KubernetesCoriolisRenderInputs(
+        bind_address="0.0.0.0",
+        coriolis_port=7667,
+        coriolis_config_dir="/etc/coriolis",
+        coriolis_vmware_vix_disklib_log_dir="/var/log/coriolis/vmware-root",
+        endpoints=None,  # type: ignore[arg-type]
+    ),
     "accepted_version": "2603.4",
 }
 CONFIG_OUTPUTS = {
@@ -36,13 +40,9 @@ CONFIG_OUTPUTS = {
 }
 SENSITIVE_ENDPOINTS = SensitiveCoriolisEndpoints(
     rabbitmq_host="rabbitmq.synthetic.test",
-    rabbitmq_port=5671,
     memcached_host="memcached.synthetic.test",
     database_host="database.synthetic.test",
-    keystone_protocol="https",
     keystone_host="keystone.synthetic.test",
-    keystone_public_port=5000,
-    keystone_internal_port=35357,
 )
 SENSITIVE_CREDENTIALS = SensitiveCoriolisCredentials(
     rabbitmq_password="RABBIT_SENTINEL_41e9",
@@ -105,68 +105,20 @@ OWNER = {
 def test_render_coriolis_config_is_exact_deterministic_and_non_sensitive() -> None:
     first = render_coriolis_config(**RENDER_KWARGS)
     second = render_coriolis_config(**RENDER_KWARGS)
-    daemon_process = (
-        "WSGIDaemonProcess coriolis-api processes=5 threads=1 "
-        "user=${APACHE_RUN_USER} group=${APACHE_RUN_GROUP} "
-        "display-name=coriolis-api"
-    )
-    log_format = (
-        'LogFormat "%{X-Forwarded-For}i %l %u %t \\"%r\\" %>s %b %D '
-        '\\"%{Referer}i\\" \\"%{User-Agent}i\\"" logformat'
-    )
 
     assert first == second
     assert set(first) == CONFIG_OUTPUTS == CORIOLIS_CONFIG_KEYS
     assert first["coriolis-api.wsgi"] == (
         "from coriolis import service\n\napplication = service.get_application()\n"
     )
-    assert (
-        first["wsgi-coriolis.conf"]
-        == """LoadModule ssl_module /usr/lib/apache2/modules/mod_ssl.so
-Listen 127.0.0.1:8443
-
-ServerSignature Off
-ServerTokens Prod
-TraceEnable off
-TimeOut 60
-KeepAliveTimeout 60
-
-ErrorLog \"/var/log/coriolis/coriolis-error.log\"
-<IfModule log_config_module>
-    CustomLog \"/var/log/coriolis/coriolis-api.log\" common
-</IfModule>
-
-<VirtualHost 127.0.0.1:8443>
-    ServerName https://127.0.0.1:8443
-    __DAEMON_PROCESS__
-    WSGIProcessGroup coriolis-api
-    WSGIScriptAlias / /usr/local/bin/coriolis-api.wsgi
-    WSGIApplicationGroup %{GLOBAL}
-    WSGIPassAuthorization On
-    <IfVersion >= 2.4>
-      ErrorLogFormat \"%{cu}t %M\"
-    </IfVersion>
-    <Directory /usr/local/bin>
-        <IfVersion >= 2.4>
-            Require all granted
-        </IfVersion>
-        <IfVersion < 2.4>
-            Order allow,deny
-            Allow from all
-        </IfVersion>
-    </Directory>
-
-    ErrorLog \"/var/log/coriolis/coriolis-error.log\"
-    __LOG_FORMAT__
-    CustomLog \"/var/log/coriolis/coriolis-api.log\" logformat
-
-    SSLEngine on
-    SSLCertificateFile \"/etc/coriolis/ssl/coriolis.crt\"
-    SSLCertificateKeyFile \"/etc/coriolis/ssl/coriolis.key\"
-</VirtualHost>
-""".replace("__DAEMON_PROCESS__", daemon_process).replace("__LOG_FORMAT__", log_format)
+    wsgi = first["wsgi-coriolis.conf"]
+    assert "Listen 0.0.0.0:7667" in wsgi
+    assert "ServerName http://0.0.0.0:7667" in wsgi
+    assert "WSGIDaemonProcess coriolis-api" in wsgi
+    assert not any(
+        token in wsgi for token in ("ssl_module", "SSLEngine", "Certificate")
     )
-    assert first["vixdisklib.conf"] == "tmpDirectory = /var/log/coriolis/vixdisklib\n"
+    assert first["vixdisklib.conf"] == "tmpDirectory = /var/log/coriolis/vmware-root\n"
     assert first["coriolis.release"] == "2603.4\n"
     template_root = files("coriolis_operator").joinpath("templates")
     for output_name, template_name in {
@@ -216,6 +168,7 @@ def test_package_resources_include_templates_and_attribution() -> None:
         "SOURCE.md",
         "coriolis.conf.j2",
         "providers",
+        "kubernetes",
     }
     assert {child.name for child in template_root.joinpath("providers").iterdir()} == {
         "openstack.conf.j2",
@@ -237,23 +190,42 @@ def test_package_resources_include_templates_and_attribution() -> None:
     }
 
 
+def test_kubernetes_templates_have_only_the_approved_plaintext_delta() -> None:
+    template_root = files("coriolis_operator").joinpath("templates")
+    upstream_coriolis = template_root.joinpath("coriolis.conf.j2").read_text()
+    derived_coriolis = template_root.joinpath("kubernetes/coriolis.conf.j2").read_text()
+    upstream_wsgi = template_root.joinpath("wsgi-coriolis.conf.j2").read_text()
+    derived_wsgi = template_root.joinpath(
+        "kubernetes/wsgi-coriolis.conf.j2"
+    ).read_text()
+
+    assert derived_coriolis == (
+        upstream_coriolis.replace(
+            "ssl = True\n"
+            "ssl_ca_file = {{ coriolis_config_dir }}/ssl/ca/coriolis-ca.crt\n",
+            "ssl = False\n",
+        ).replace("cafile = {{ coriolis_config_dir }}/ssl/ca/coriolis-ca.crt\n", "")
+    )
+    assert derived_wsgi == (
+        upstream_wsgi.replace(
+            "LoadModule ssl_module /usr/lib/apache2/modules/mod_ssl.so\n", ""
+        )
+        .replace("ServerName https://", "ServerName http://")
+        .replace(
+            "\n    SSLEngine on\n"
+            '    SSLCertificateFile "{{ coriolis_config_dir }}/ssl/coriolis.crt"\n'
+            '    SSLCertificateKeyFile "{{ coriolis_config_dir }}/ssl/coriolis.key"\n',
+            "\n",
+        )
+    )
+
+
 @pytest.mark.parametrize(
     ("field", "value"),
     [
-        ("bind_address", 1),
-        ("coriolis_config_dir", 1),
-        ("coriolis_vmware_vix_disklib_log_dir", 1),
+        ("inputs", 1),
         ("accepted_version", 1),
-        ("coriolis_port", True),
-        ("coriolis_port", "8443"),
-        ("coriolis_port", 0),
-        ("coriolis_port", 65536),
-        ("bind_address", ""),
         ("accepted_version", "   "),
-        ("coriolis_config_dir", "relative/path"),
-        ("coriolis_vmware_vix_disklib_log_dir", "relative/path"),
-        ("bind_address", "127.0.0.1\rmalicious"),
-        ("coriolis_config_dir", "/etc/coriolis\nmalicious"),
         ("accepted_version", "2603.4\0malicious"),
     ],
 )
@@ -293,13 +265,16 @@ def test_render_failure_is_fixed_and_has_no_cause(
 def test_sensitive_records_are_exact_frozen_and_redact_credentials() -> None:
     assert tuple(field.name for field in fields(SensitiveCoriolisEndpoints)) == (
         "rabbitmq_host",
-        "rabbitmq_port",
         "memcached_host",
         "database_host",
-        "keystone_protocol",
         "keystone_host",
-        "keystone_public_port",
-        "keystone_internal_port",
+    )
+    assert tuple(field.name for field in fields(KubernetesCoriolisRenderInputs)) == (
+        "bind_address",
+        "coriolis_port",
+        "coriolis_config_dir",
+        "coriolis_vmware_vix_disklib_log_dir",
+        "endpoints",
     )
     assert tuple(field.name for field in fields(SensitiveCoriolisCredentials)) == (
         "rabbitmq_password",
@@ -359,15 +334,15 @@ def test_sensitive_render_has_frozen_providers_and_fixed_values() -> None:
     )
     assert all(content.count(module) == 1 for module in PROVIDER_MODULES)
     for fixed_line in (
-        "messaging_transport_url = rabbit://openstack:RABBIT_SENTINEL_41e9@rabbitmq.synthetic.test:5671/",
+        "messaging_transport_url = rabbit://openstack:RABBIT_SENTINEL_41e9@rabbitmq.synthetic.test:5672/",
         "debug = True",
         "log_dir = /var/log/coriolis",
         "compress_transfers = False",
-        "ssl_ca_file = /etc/coriolis/ssl/ca/coriolis-ca.crt",
+        "ssl = False",
         "backend_argument = url:memcached.synthetic.test:11211",
         "connection = mysql://coriolis:DATABASE_SENTINEL_7c2a@database.synthetic.test/coriolis",
-        "auth_uri = https://keystone.synthetic.test:5000/v3",
-        "auth_url = https://keystone.synthetic.test:35357/v3",
+        "auth_uri = http://keystone.synthetic.test:5000/v3",
+        "auth_url = http://keystone.synthetic.test:5000/v3",
         "username = coriolis",
         "policy_file = /etc/coriolis/policy.yml",
         "lock_path = /opt/coriolis/locks",
@@ -378,6 +353,8 @@ def test_sensitive_render_has_frozen_providers_and_fixed_values() -> None:
     ):
         assert fixed_line in content
     assert "compressor_address" not in content
+    assert "ssl_ca_file" not in content
+    assert "cafile" not in content
 
 
 def test_sensitive_credentials_only_render_at_contracted_locations() -> None:
@@ -435,12 +412,6 @@ def test_sensitive_config_composes_only_with_secret_builder() -> None:
         ("credentials", "rabbitmq_password", "password\0malicious"),
         ("credentials", "coriolis_database_password", 1),
         ("endpoints", "rabbitmq_host", type("StringSubclass", (str,), {})("host")),
-        ("endpoints", "rabbitmq_port", True),
-        ("endpoints", "rabbitmq_port", "5671"),
-        ("endpoints", "rabbitmq_port", 0),
-        ("endpoints", "rabbitmq_port", 65536),
-        ("endpoints", "keystone_public_port", type("IntSubclass", (int,), {})(5000)),
-        ("endpoints", "keystone_protocol", "ftp"),
     ],
 )
 def test_sensitive_render_rejects_invalid_values_without_leakage(
@@ -485,13 +456,9 @@ def test_sensitive_render_rejects_wrong_record_types_and_malformed_records() -> 
     with pytest.raises(TypeError):
         SensitiveCoriolisEndpoints(
             "rabbitmq",
-            5671,
             "memcached",
             "database",
-            "https",
             "keystone",
-            5000,
-            35357,
             "extra",
         )
     with pytest.raises(TypeError):

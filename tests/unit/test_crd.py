@@ -7,6 +7,12 @@ from coriolis_operator.reconcile import SUPPORTED_INITIAL_VERSION, SUPPORTED_PRO
 CRD_PATH = (
     Path(__file__).resolve().parents[2] / "helm" / "crds" / "coriolisappliances.yaml"
 )
+SAMPLE_PATH = (
+    Path(__file__).resolve().parents[2]
+    / "config"
+    / "samples"
+    / "coriolisappliance.yaml"
+)
 
 
 def _load_schema() -> dict:
@@ -58,3 +64,47 @@ def test_crd_initial_version_matches_controller_constant() -> None:
 def test_crd_has_no_cel_immutability_rules() -> None:
     schema = _load_schema()
     assert not _contains_key(schema, "x-kubernetes-validations")
+
+
+def test_crd_defines_structural_ingress_defaults_and_tls_mode_shape() -> None:
+    schema = _load_schema()
+    ingress = schema["properties"]["spec"]["properties"]["ingress"]
+
+    assert ingress["type"] == "object"
+    assert ingress["default"] == {
+        "host": "coriolis.app.cloudbase.wiki",
+        "ingressClassName": "nginx",
+        "tls": {"mode": "certManager"},
+    }
+    assert ingress["properties"]["host"] == {
+        "type": "string",
+        "default": "coriolis.app.cloudbase.wiki",
+    }
+    assert ingress["properties"]["ingressClassName"] == {
+        "type": "string",
+        "default": "nginx",
+    }
+    assert ingress["properties"]["tls"] == {
+        "type": "object",
+        "default": {"mode": "certManager"},
+        "properties": {
+            "mode": {
+                "type": "string",
+                "enum": ["certManager", "existingSecret"],
+                "default": "certManager",
+            },
+            "clusterIssuer": {"type": "string"},
+            "tlsSecretName": {"type": "string"},
+        },
+    }
+
+
+def test_sample_uses_explicit_dev_cert_manager_ingress_settings() -> None:
+    with SAMPLE_PATH.open() as sample_file:
+        sample = yaml.safe_load(sample_file)
+
+    assert sample["spec"]["ingress"] == {
+        "host": "coriolis.app.cloudbase.wiki",
+        "ingressClassName": "nginx",
+        "tls": {"mode": "certManager", "clusterIssuer": "letsencrypt"},
+    }
