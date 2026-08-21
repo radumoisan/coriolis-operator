@@ -5,6 +5,7 @@ import hashlib
 import re
 import secrets
 from collections.abc import Callable, Mapping, Sequence
+from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from enum import Enum
 from typing import Any
@@ -95,6 +96,22 @@ class RetainedClassification(Enum):
     ABSENT = "absent"
     REUSE = "reuse"
     COLLISION = "collision"
+
+
+class OwnedClassification(Enum):
+    """Classification of an existing resource against operator-owned identity."""
+
+    ABSENT = "absent"
+    MANAGED = "managed"
+    COLLISION = "collision"
+
+
+@dataclass(frozen=True)
+class FoundationalResourcePreflight:
+    """Pure preflight outcome for foundational appliance resources."""
+
+    classifications: Mapping[str, RetainedClassification | OwnedClassification]
+    credentials: Mapping[str, Mapping[str, str]] = field(repr=False)
 
 
 def state_config_map_name(resource_name: str) -> str:
@@ -674,6 +691,148 @@ def classify_retained_resource(
         if annotations.get(key) != value:
             return RetainedClassification.COLLISION
     return RetainedClassification.REUSE
+
+
+def classify_owned_resource(
+    *,
+    existing: Any,
+    resource_name: str,
+    namespace: str,
+    appliance_name: str,
+    component: str,
+    accepted_version: str,
+    owner: Mapping[str, Any],
+) -> OwnedClassification:
+    """Classify an existing resource against the operator-owned identity."""
+    if existing is None:
+        return OwnedClassification.ABSENT
+    metadata = _field(existing, "metadata")
+    if metadata is None:
+        return OwnedClassification.COLLISION
+    if _field(metadata, "name") != resource_name:
+        return OwnedClassification.COLLISION
+    if _field(metadata, "namespace") != namespace:
+        return OwnedClassification.COLLISION
+
+    expected = build_resource_metadata(
+        resource_name=resource_name,
+        namespace=namespace,
+        appliance_name=appliance_name,
+        component=component,
+        accepted_version=accepted_version,
+        owner=owner,
+    )
+    labels = _mapping_value(_field(metadata, "labels"))
+    annotations = _mapping_value(_field(metadata, "annotations"))
+    if RETENTION_ANNOTATION in annotations:
+        return OwnedClassification.COLLISION
+    for key, value in expected["labels"].items():
+        if labels.get(key) != value:
+            return OwnedClassification.COLLISION
+    if annotations.get(APPLIANCE_NAME_ANNOTATION) != expected["annotations"].get(
+        APPLIANCE_NAME_ANNOTATION
+    ):
+        return OwnedClassification.COLLISION
+    if not _owner_references_match(
+        _controller_owner_reference(_field(metadata, "ownerReferences")),
+        _controller_owner_reference(expected.get("ownerReferences")),
+    ):
+        return OwnedClassification.COLLISION
+    return OwnedClassification.MANAGED
+
+
+def preflight_foundational_resources(
+    *,
+    appliance_name: str,
+    namespace: str,
+    accepted_version: str,
+    retention: str,
+    owner: Mapping[str, Any],
+    coriolis_credentials_secret: Any | None,
+    infrastructure_credentials_secret: Any | None,
+    step_ca_credentials_secret: Any | None,
+    coriolis_config_map: Any | None,
+    coriolis_config_secret: Any | None,
+    coriolis_token_factory: Callable[[int], str] = secrets.token_urlsafe,
+    infrastructure_token_factory: Callable[[int], str] = secrets.token_urlsafe,
+    step_ca_token_factory: Callable[[int], str] = secrets.token_urlsafe,
+) -> FoundationalResourcePreflight:
+    """Classify foundational resources before validating or generating credentials."""
+    retained = (
+        (
+            "coriolis-credentials",
+            coriolis_credentials_secret,
+            CORIOLIS_CREDENTIALS_KEYS,
+            generate_coriolis_credentials,
+            coriolis_token_factory,
+        ),
+        (
+            "infrastructure-credentials",
+            infrastructure_credentials_secret,
+            INFRASTRUCTURE_CREDENTIALS_KEYS,
+            generate_infrastructure_credentials,
+            infrastructure_token_factory,
+        ),
+        (
+            "step-ca-credentials",
+            step_ca_credentials_secret,
+            STEP_CA_CREDENTIALS_KEYS,
+            generate_step_ca_credentials,
+            step_ca_token_factory,
+        ),
+    )
+    owned = (
+        ("coriolis-config", coriolis_config_map),
+        ("coriolis-config-secret", coriolis_config_secret),
+    )
+    names = {
+        component: appliance_resource_name(appliance_name, component)
+        for component, *_ in (*retained, *owned)
+    }
+    classifications: dict[str, RetainedClassification | OwnedClassification] = {}
+    for component, existing, _, _, _ in retained:
+        resource_name = names[component]
+        classifications[resource_name] = classify_retained_resource(
+            existing=existing,
+            resource_name=resource_name,
+            namespace=namespace,
+            appliance_name=appliance_name,
+            component=component,
+            accepted_version=accepted_version,
+            retention=retention,
+        )
+    for component, existing in owned:
+        resource_name = names[component]
+        classifications[resource_name] = classify_owned_resource(
+            existing=existing,
+            resource_name=resource_name,
+            namespace=namespace,
+            appliance_name=appliance_name,
+            component=component,
+            accepted_version=accepted_version,
+            owner=owner,
+        )
+    if any(value.value == "collision" for value in classifications.values()):
+        return FoundationalResourcePreflight(classifications, {})
+
+    credentials: dict[str, Mapping[str, str]] = {}
+    for component, existing, expected_keys, _, _ in retained:
+        resource_name = names[component]
+        if classifications[resource_name] is RetainedClassification.REUSE:
+            try:
+                credentials[resource_name] = validated_retained_secret_values(
+                    existing=existing, expected_keys=expected_keys
+                )
+            except ValueError:
+                classifications[resource_name] = RetainedClassification.COLLISION
+    if any(value.value == "collision" for value in classifications.values()):
+        return FoundationalResourcePreflight(classifications, {})
+
+    for component, _, _, generator, token_factory in retained:
+        resource_name = names[component]
+        if classifications[resource_name] is RetainedClassification.ABSENT:
+            credentials[resource_name] = generator(token_factory)
+    return FoundationalResourcePreflight(classifications, credentials)
 
 
 def collision_conditions(namespace: str, name: str) -> list[Condition]:

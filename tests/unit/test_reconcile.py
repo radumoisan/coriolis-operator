@@ -22,6 +22,7 @@ from coriolis_operator.reconcile import (
     STEP_CA_CREDENTIALS_KEYS,
     SUPPORTED_INITIAL_VERSION,
     SUPPORTED_PROFILE,
+    OwnedClassification,
     RetainedClassification,
     accepted_conditions,
     appliance_identity,
@@ -36,11 +37,13 @@ from coriolis_operator.reconcile import (
     build_status,
     build_step_ca_credentials_secret,
     classify_existing_marker,
+    classify_owned_resource,
     classify_retained_resource,
     collision_conditions,
     generate_coriolis_credentials,
     generate_infrastructure_credentials,
     generate_step_ca_credentials,
+    preflight_foundational_resources,
     rejected_conditions,
     state_config_map_name,
     validated_retained_secret_values,
@@ -1951,3 +1954,334 @@ def test_retained_no_input_mutation() -> None:
     before = copy.deepcopy(body)
     classify(body)
     assert body == before
+
+
+def owned_body(component: str = "coriolis-config") -> dict:
+    return {
+        "metadata": build_resource_metadata(
+            resource_name=appliance_resource_name("example", component),
+            namespace="operators",
+            appliance_name="example",
+            component=component,
+            accepted_version=SUPPORTED_INITIAL_VERSION,
+            owner=OWNER,
+        )
+    }
+
+
+def classify_owned(
+    existing: object, component: str = "coriolis-config"
+) -> OwnedClassification:
+    return classify_owned_resource(
+        existing=existing,
+        resource_name=appliance_resource_name("example", component),
+        namespace="operators",
+        appliance_name="example",
+        component=component,
+        accepted_version=SUPPORTED_INITIAL_VERSION,
+        owner=OWNER,
+    )
+
+
+def test_owned_classifier_accepts_exact_mapping_and_model_with_content_drift() -> None:
+    body = owned_body()
+    body["data"] = {"unexpected": "drift"}
+    body["type"] = "not-opaque"
+    body["metadata"]["labels"]["example.com/extra"] = "x"
+    body["metadata"]["annotations"]["example.com/extra"] = "y"
+    model = to_v1_config_map(body)
+    secret_model = client.V1Secret(metadata=model.metadata, type="not-opaque")
+
+    assert classify_owned(None) is OwnedClassification.ABSENT
+    assert classify_owned(body) is OwnedClassification.MANAGED
+    assert classify_owned(model) is OwnedClassification.MANAGED
+    assert classify_owned(secret_model) is OwnedClassification.MANAGED
+
+
+@pytest.mark.parametrize(
+    "mutate",
+    [
+        lambda body: body["metadata"].update(name="other"),
+        lambda body: body["metadata"].update(namespace="other"),
+        lambda body: body["metadata"]["labels"].pop("app.kubernetes.io/managed-by"),
+        lambda body: body["metadata"]["labels"].update(
+            {"coriolis.cloudbase.it/component": "other"}
+        ),
+        lambda body: body["metadata"]["annotations"].pop(APPLIANCE_NAME_ANNOTATION),
+        lambda body: body["metadata"]["annotations"].update(
+            {APPLIANCE_NAME_ANNOTATION: "other"}
+        ),
+        lambda body: body["metadata"]["annotations"].update(
+            {RETENTION_ANNOTATION: "retain"}
+        ),
+        lambda body: body["metadata"].pop("ownerReferences"),
+        lambda body: body["metadata"]["ownerReferences"][0].update(controller=False),
+        lambda body: body["metadata"]["ownerReferences"][0].update(name="other"),
+        lambda body: body["metadata"]["ownerReferences"][0].update(uid="other"),
+    ],
+    ids=(
+        "wrong-name",
+        "wrong-namespace",
+        "missing-label",
+        "conflicting-label",
+        "missing-annotation",
+        "conflicting-annotation",
+        "retention",
+        "missing-owner",
+        "controller-false",
+        "changed-owner-name",
+        "changed-owner-uid",
+    ),
+)
+def test_owned_classifier_rejects_identity_collisions(mutate) -> None:
+    body = owned_body()
+    mutate(body)
+    assert classify_owned(body) is OwnedClassification.COLLISION
+
+
+def test_owned_classifier_does_not_mutate_input() -> None:
+    body = owned_body()
+    before = copy.deepcopy(body)
+    classify_owned(body)
+    assert body == before
+
+
+def foundational_kwargs(**overrides: object) -> dict[str, object]:
+    kwargs: dict[str, object] = {
+        "appliance_name": "example",
+        "namespace": "operators",
+        "accepted_version": SUPPORTED_INITIAL_VERSION,
+        "retention": "retain",
+        "owner": OWNER,
+        "coriolis_credentials_secret": None,
+        "infrastructure_credentials_secret": None,
+        "step_ca_credentials_secret": None,
+        "coriolis_config_map": None,
+        "coriolis_config_secret": None,
+    }
+    kwargs.update(overrides)
+    return kwargs
+
+
+def test_foundational_preflight_absent_generates_only_retained_credentials() -> None:
+    calls: list[str] = []
+
+    def factory(_: int) -> str:
+        calls.append("token")
+        return f"generated-{len(calls)}"
+
+    result = preflight_foundational_resources(
+        **foundational_kwargs(
+            coriolis_token_factory=factory,
+            infrastructure_token_factory=factory,
+            step_ca_token_factory=factory,
+        )
+    )
+
+    assert set(result.credentials) == {
+        "example-coriolis-credentials",
+        "example-infrastructure-credentials",
+        "example-step-ca-credentials",
+    }
+    assert calls == ["token"] * 7
+    assert "generated-1" not in repr(result)
+    assert (
+        result.classifications["example-coriolis-config"] is OwnedClassification.ABSENT
+    )
+    assert (
+        result.classifications["example-coriolis-config-secret"]
+        is OwnedClassification.ABSENT
+    )
+
+
+def test_foundational_preflight_reuses_retained_models_without_factories() -> None:
+    coriolis_secret = build_coriolis_credentials_secret(
+        appliance_name="example",
+        namespace="operators",
+        accepted_version="2603.4",
+        retention="retain",
+        values=CORIOLIS_CREDENTIALS,
+    )
+    retained_secrets = {
+        "coriolis_credentials_secret": client.V1Secret(
+            metadata=to_v1_retained(coriolis_secret).metadata,
+            type="Opaque",
+            data=coriolis_secret["data"],
+        ),
+        "infrastructure_credentials_secret": build_infrastructure_credentials_secret(
+            appliance_name="example",
+            namespace="operators",
+            accepted_version="2603.4",
+            retention="retain",
+            values=INFRASTRUCTURE_CREDENTIALS,
+        ),
+        "step_ca_credentials_secret": build_step_ca_credentials_secret(
+            appliance_name="example",
+            namespace="operators",
+            accepted_version="2603.4",
+            retention="retain",
+            values=STEP_CA_CREDENTIALS,
+        ),
+    }
+    result = preflight_foundational_resources(
+        **foundational_kwargs(
+            **retained_secrets,
+            coriolis_config_map=owned_body(),
+            coriolis_config_secret=owned_body("coriolis-config-secret"),
+            coriolis_token_factory=lambda _: pytest.fail("factory called"),
+            infrastructure_token_factory=lambda _: pytest.fail("factory called"),
+            step_ca_token_factory=lambda _: pytest.fail("factory called"),
+        )
+    )
+
+    assert result.credentials["example-coriolis-credentials"] == CORIOLIS_CREDENTIALS
+    assert (
+        result.credentials["example-infrastructure-credentials"]
+        == INFRASTRUCTURE_CREDENTIALS
+    )
+    assert result.credentials["example-step-ca-credentials"] == STEP_CA_CREDENTIALS
+    assert all(value.value != "collision" for value in result.classifications.values())
+
+
+def test_foundational_preflight_omits_credentials_after_semantic_validation_failure(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    invalid = build_coriolis_credentials_secret(
+        appliance_name="example",
+        namespace="operators",
+        accepted_version="2603.4",
+        retention="retain",
+        values=CORIOLIS_CREDENTIALS,
+    )
+    invalid["data"]["coriolis_database_password"] = "encoded-secret-sentinel"
+    validated = MagicMock(wraps=validated_retained_secret_values)
+    monkeypatch.setattr(
+        "coriolis_operator.reconcile.validated_retained_secret_values", validated
+    )
+
+    result = preflight_foundational_resources(
+        **foundational_kwargs(
+            coriolis_credentials_secret=invalid,
+            infrastructure_token_factory=lambda _: pytest.fail("factory called"),
+            coriolis_token_factory=lambda _: pytest.fail("factory called"),
+            step_ca_token_factory=lambda _: pytest.fail("factory called"),
+        )
+    )
+
+    assert validated.call_count == 1
+    assert result.credentials == {}
+    assert (
+        result.classifications["example-coriolis-credentials"]
+        is RetainedClassification.COLLISION
+    )
+    assert "encoded-secret-sentinel" not in repr(result)
+    assert "db synthetic" not in repr(result)
+
+
+def test_foundational_preflight_generates_only_absent_retained_resource() -> None:
+    reused = build_coriolis_credentials_secret(
+        appliance_name="example",
+        namespace="operators",
+        accepted_version="2603.4",
+        retention="retain",
+        values=CORIOLIS_CREDENTIALS,
+    )
+    calls: list[int] = []
+
+    result = preflight_foundational_resources(
+        **foundational_kwargs(
+            coriolis_credentials_secret=reused,
+            infrastructure_credentials_secret=build_infrastructure_credentials_secret(
+                appliance_name="example",
+                namespace="operators",
+                accepted_version="2603.4",
+                retention="retain",
+                values=INFRASTRUCTURE_CREDENTIALS,
+            ),
+            step_ca_token_factory=lambda size: calls.append(size) or "generated",
+        )
+    )
+
+    assert calls == [32]
+    assert result.credentials["example-coriolis-credentials"] == CORIOLIS_CREDENTIALS
+    assert (
+        result.credentials["example-infrastructure-credentials"]
+        == INFRASTRUCTURE_CREDENTIALS
+    )
+    assert result.credentials["example-step-ca-credentials"] == {
+        "init_password": "generated"
+    }
+
+
+@pytest.mark.parametrize(
+    ("collision_field", "resource_name"),
+    [
+        ("coriolis_credentials_secret", "example-coriolis-credentials"),
+        ("infrastructure_credentials_secret", "example-infrastructure-credentials"),
+        ("step_ca_credentials_secret", "example-step-ca-credentials"),
+        ("coriolis_config_map", "example-coriolis-config"),
+        ("coriolis_config_secret", "example-coriolis-config-secret"),
+    ],
+)
+def test_foundational_metadata_collision_skips_semantics_and_generation(
+    monkeypatch: pytest.MonkeyPatch,
+    collision_field: str,
+    resource_name: str,
+) -> None:
+    validated = MagicMock()
+    monkeypatch.setattr(
+        "coriolis_operator.reconcile.validated_retained_secret_values", validated
+    )
+    existing: dict[str, object] = {
+        "coriolis_credentials_secret": build_coriolis_credentials_secret(
+            appliance_name="example",
+            namespace="operators",
+            accepted_version="2603.4",
+            retention="retain",
+            values=CORIOLIS_CREDENTIALS,
+        ),
+        "infrastructure_credentials_secret": build_infrastructure_credentials_secret(
+            appliance_name="example",
+            namespace="operators",
+            accepted_version="2603.4",
+            retention="retain",
+            values=INFRASTRUCTURE_CREDENTIALS,
+        ),
+        "step_ca_credentials_secret": build_step_ca_credentials_secret(
+            appliance_name="example",
+            namespace="operators",
+            accepted_version="2603.4",
+            retention="retain",
+            values=STEP_CA_CREDENTIALS,
+        ),
+    }
+    existing[collision_field] = {"metadata": {}}
+    result = preflight_foundational_resources(
+        **foundational_kwargs(
+            **existing,
+            coriolis_token_factory=lambda _: pytest.fail("factory called"),
+            infrastructure_token_factory=lambda _: pytest.fail("factory called"),
+            step_ca_token_factory=lambda _: pytest.fail("factory called"),
+        )
+    )
+
+    validated.assert_not_called()
+    assert result.credentials == {}
+    assert result.classifications[resource_name].value == "collision"
+
+
+def test_foundational_preflight_does_not_mutate_existing_resources() -> None:
+    existing = build_coriolis_credentials_secret(
+        appliance_name="example",
+        namespace="operators",
+        accepted_version="2603.4",
+        retention="retain",
+        values=CORIOLIS_CREDENTIALS,
+    )
+    before = copy.deepcopy(existing)
+
+    preflight_foundational_resources(
+        **foundational_kwargs(coriolis_credentials_secret=existing)
+    )
+
+    assert existing == before
