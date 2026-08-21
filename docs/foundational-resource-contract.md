@@ -231,17 +231,57 @@ These slice records establish pure/API behavior only. The subsequent marker-plus
 
 ## :material-book-open-page-variant-outline: Dependency And Resource Plan
 
-The historical bootstrap play imports `coriolis/common` then `bootstrap/step-ca`; the appliance play begins with MariaDB, then compressor/common, then logger, API, conductor, transfer-cron, scheduler, minion-manager, deployer-manager, worker, web, web-proxy, licensing server, console editor, Metal Hub, validation, and licensing UI. This is immutable upstream evidence, not current Kubernetes runtime ordering.
+This is a documentation-only, pre-implementation dependency workload evidence and eligibility contract. It is not a workload manifest contract. No dependency workload, Job, PVC, probe, readiness behavior, RBAC, or runtime behavior exists from this contract.
 
-Kolla facts and `coriolis.conf.j2` prove appliance dependencies on MariaDB (`3306`), RabbitMQ (historical `5671` upstream; Kubernetes contract `5672` plaintext), Keystone (`5000`), Barbican (`9311`), and Memcached (`11211`). They prove endpoints, not Kubernetes creation/readiness order.
+### :material-application-edit-outline: Approved Mirror Identities
 
-The future evidence-informed order is MariaDB, Kolla infrastructure services, `coriolis/common`, then runtime components. Step CA and web-proxy are explicitly deferred from initial Kubernetes runtime. Mapping this to Jobs, probes, bootstrap, and readiness remains later design work.
+The approved support-image identities are frozen from `scripts/mirror-images.py`:
+
+- RabbitMQ: `cr.virtomat.io/virtomat/coriolis/rabbitmq:2023.1-ubuntu-jammy@sha256:a595bf6f306ded2b6ad01f068ef69255df72eb73d471ba73ce9bbf0470d15d8a`
+- Memcached: `cr.virtomat.io/virtomat/coriolis/memcached:2023.1-ubuntu-jammy@sha256:746b93082a4f6d07f464e93d4b14f5e30510abf17a9ae0a4af20e111408c8f1e`
+- MariaDB: `cr.virtomat.io/virtomat/coriolis/mariadb-server:2023.1-ubuntu-jammy@sha256:22cb109d23d1aa6a6acb17e54657b5b9cd753837b01345b52fc3c35cbbd9981e`
+- Keystone: `cr.virtomat.io/virtomat/coriolis/keystone:2023.1-ubuntu-jammy@sha256:7c57962762f5e6fdb1a109097e8f3e2e5f6218ad9c09f10a585adb67ed245cf0`
+
+The mirrored tags were pull-validated. The tag-plus-digest strings themselves were not cluster-tested. Future workload manifests must pin the approved mirror digest and use the read-only external `coriolis-appliance-registry` pull Secret.
+
+### :material-application-edit-outline: Dependency Evidence Matrix
+
+| Dependency | Fixed Service and source-backed consumption | Exact eligibility blockers |
+| --- | --- | --- |
+| RabbitMQ | Plaintext Kubernetes Service `5672`; source Kolla TLS is historical and must not be copied. Known config: `/etc/kolla/rabbitmq/rabbitmq.conf`. Coriolis uses user `openstack` and `rabbitmq_password`; Coriolis common creates no RabbitMQ user, vhost, or policy. | OCI User/Entrypoint/Cmd; plaintext Kolla config; writable path and persistence policy; user/default-vhost provisioning; probe. |
+| Memcached | Service `11211`; no credentials, provisioning, or configuration found. | OCI metadata; launch/config mechanism; writable or ephemeral policy; probe. |
+| MariaDB | Service `3306`; `/etc/kolla/mariadb/galera.cnf` adjusts `max_allowed_packet=64M` and `innodb_log_file_size=256M`. Admin uses `database_password`. Coriolis common idempotently creates database/user `coriolis` with `coriolis_database_password` and grants `coriolis.*:ALL` from `%`. | OCI metadata; single-node, non-Galera configuration; data path/PVC contract; startup/bootstrap; probe. |
+| Keystone | HTTP Service `5000`; `/etc/kolla/keystone/wsgi-keystone.conf`; admin uses `keystone_admin_password`. Coriolis common idempotently creates user `coriolis`, admin role on `service`, `migration` service, and RegionOne admin/internal/public endpoints. | OCI metadata; WSGI config and command; MariaDB schema/sync; fernet/bootstrap state; writable paths; probe. |
+
+`coriolis-dbsync` is an Alembic-to-head command proven in `coriolis-oss`. No local source proves its invocation, selected image, or ordering. No Job is selected.
+
+### :material-application-edit-outline: Durable Workload Invariants
+
+- Only the four existing dependency Services are in scope. Barbican, Step CA, and web-proxy are excluded.
+- Generated workloads, Jobs, and configuration resources use controller owner references. Retained PVCs are ownerless, exact-match reuse only, and are never automatically deleted; retained credentials are never automatically rotated.
+- Credential values never appear in environment variables, metadata, status, events, logs, or documentation. Configuration files and projected Secrets remain the value boundary.
+- Desired-state preparation completes before writes. Only `404` is absent. Collisions are mutation-free. Managed rebuildable resources use guarded SSA.
+- The marker records foundational completion only. `Ready=False/RuntimeNotImplemented` remains until mandatory dependencies, Jobs, Coriolis workloads, and internal checks succeed.
+
+### :material-application-edit-outline: Eligibility Sequence
+
+Complete all four OCI, configuration, and probe interfaces first. MariaDB is the first candidate contract and vertical slice because source evidence places database provisioning first, but it is not implementation-eligible until its storage, startup, and probe gates close. RabbitMQ and Memcached follow; Keystone follows MariaDB; Coriolis common bootstrap follows healthy dependencies. Historical Ansible order is evidence, not Kubernetes readiness proof.
+
+Before code for any dependency, require evidence for:
+
+- OCI User, Entrypoint, and Cmd.
+- Configuration copy or start mechanism, non-secret environment, security context, and writable/data paths.
+- Storage class, size, access mode, mount, and retention where storage applies.
+- Idempotent bootstrap command, image, authentication, inputs, outputs, retry, and completion behavior.
+- Startup, readiness, and liveness probes; replica and disruption behavior; dependency readiness.
+
+If evidence is absent, stop rather than infer.
 
 ## :material-book-open-page-variant-outline: Unresolved Gates
 
-The marker API/migration, metadata, retained-resource classifier, builders, credential generation, retained Secret validation, non-sensitive renderer, preflight, sensitive renderer, Kubernetes render-input factory, derived template variants, and ingress schema/resolver are local pure/API slices. The marker-plus-four runtime gate is committed locally at `862777d`, with status commit `f219977`; both are unpushed and undeployed. The four-Service slice is committed locally at `797235b` on `dev`, unpushed and undeployed, retains its read prefix, pre-reads the four Services in frozen order, completes all reads/classification/foundational preflight/rendering/manifest construction before writes, uses guarded SSA for managed Services, writes foundational resources then Services in order with marker last, and has no rollback. Validation passed: 252 unit tests, Ruff lint, Ruff format check (35 files already formatted), mypy, Helm lint/template, and `git diff --check`; Service RBAC is exactly `get`/`create`/`patch`. It adds no workloads, endpoints, Ingresses, Jobs, release/chart/image, or deployment behavior.
+This evidence contract is local, unpushed, and undeployed. The marker API/migration, metadata, retained-resource classifier, builders, credential generation, retained Secret validation, renderers, preflight, Kubernetes render-input factory, derived template variants, ingress schema/resolver, marker-plus-four runtime gate (`862777d` with status `f219977`), and four-Service slice (`797235b`) retain their recorded status. Current validation passed: 252 unit tests, Ruff lint/format, mypy, Helm lint/template, and `git diff --check`.
 
-Remaining gates are dependency workload/bootstrap/storage/readiness design and implementation; probes; credential rotation; provider private material; optional component credentials; Barbican and other backend Services; Ingress route emission after each backend Service exists; and remaining runtime design. No runtime readiness is claimed.
+Implementation remains blocked on the required per-dependency OCI/configuration/security/writable-path/storage/bootstrap/probe/replica/disruption/readiness evidence, MariaDB single-node and persistence decisions, Keystone schema/fernet/bootstrap evidence, and a selected, proven `coriolis-dbsync` Job contract. Credential rotation, provider private material, optional component credentials, Barbican and other backend Services, and Ingress routes after backend workloads remain deferred. No runtime readiness is claimed.
 
 ### :material-application-edit-outline: Milestone History
 

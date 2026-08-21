@@ -44,7 +44,7 @@
 
 ## Later Milestones
 
-- Design and implement dependency workloads, bootstrap, storage, and readiness; remaining backend Services and Ingress routes stay deferred until their backends are defined.
+- The local documentation-only dependency workload evidence gate is recorded. Close OCI, configuration, storage, bootstrap, and probe blockers for all four dependencies, beginning with MariaDB's single-node, persistence, startup, and probe contract. Implement workloads only after eligibility; remaining backend Services and Ingress routes stay deferred until their backends are defined.
 - Add safe upgrade and production lifecycle capabilities after explicit contracts and operational review.
 
 ## Pending Decisions

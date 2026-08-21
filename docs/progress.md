@@ -181,3 +181,7 @@ Implemented the current uncommitted, unpushed, and undeployed Service slice: Rab
 ## :material-book-open-page-variant-outline: 2026-08-22: Four Dependency Services Committed Locally
 
 The four-Service implementation is committed locally at `797235b` on `dev`, unpushed and undeployed: RabbitMQ `5672`, Memcached `11211`, MariaDB `3306`, and Keystone `5000`. Full validation passed with 252 unit tests, Ruff lint/format, mypy, Helm lint/template, and `git diff --check`; deployed `0.5.3` remains unchanged and marker-only.
+
+## :material-book-open-page-variant-outline: 2026-08-22: Dependency Workload Evidence Gate Documented Locally
+
+Documented a local, unpushed, and undeployed workload evidence gate: exact approved support-image identities and source-backed dependency facts are frozen, while missing OCI, runtime, storage, and probe facts are fail-closed blockers. MariaDB is the first candidate after eligibility closes; no behavior changed. Validation passed: 252 unit tests, Ruff lint/format, mypy, Helm lint/template, and `git diff --check`.
