@@ -103,7 +103,15 @@ This pure slice is **committed locally at `35eac9b` on `dev`, but not pushed or 
 - Documentation validation also confirmed explicit internal dependency inputs, source-audited identities/paths, credential mappings, strict value-safe validation, redacted interface boundary, no CRD fields, and exactly `coriolis.cloudbase.it/retention: state-credentials` on all three generated credential Secrets. TLS/CA material, provider connection/private data, optional credentials, dependency Services/workloads, bootstrap, storage, readiness, and rotation remain deferred.
 - `git diff --check` passed. This is documentation validation evidence, not code-test evidence; no code test count is claimed.
 
-The required next sequence is pure sensitive renderer implementation/tests, then a frozen multi-resource read/apply failure, status, atomicity, and marker-last policy, then runtime five-resource pre-reads, minimal RBAC, and SSA. Runtime integration is not currently unblocked.
+At `574efcf`, the next sequence was pure renderer implementation/tests, then multi-resource semantics; this is retained documentation-contract history.
+
+## :material-book-open-page-variant-outline: Pure Sensitive Configuration Rendering Slice
+
+- 40 focused configuration tests and 215 total tests passed. Coverage includes `SensitiveCoriolisEndpoints`, `SensitiveCoriolisCredentials`, redacted one-key `SensitiveCoriolisConfig`, `render_sensitive_coriolis_config`, frozen/exact unmutated inputs, redacted credential/output reprs, fixed/category-only value-safe errors, exact one-key composition with the existing configuration-Secret builder, and ConfigMap-boundary rejection.
+- Jinja `PackageLoader`, `StrictUndefined`, disabled autoescape, and trailing newline validation passed for the immutable upstream base plus all 16 provider fragments; 17/17 source byte parity and offline wheel inspection of exactly 25 expected template resources passed. Frozen provider lists/order/module maps, source-audited values/paths, source/license attribution, prohibited custom overrides, and disabled compression/compressor are covered.
+- Ruff lint/format, strict mypy, Helm lint/template, and `git diff --check` passed.
+
+The pure renderer is **committed locally at `9bb20f3` on `dev`, but not pushed or deployed**; deployed `0.5.3` remains marker-only. No `main.py`, reconciliation, Kubernetes reads/writes/SSA, RBAC, CRD, runtime resources/workloads, chart/release/image version, deployment, TLS/CA/bootstrap, provider/private data, optional credentials, storage, readiness, or rotation behavior changed. The next sequence is frozen multi-resource read/apply failure, reconciliation status, atomicity, and marker-last semantics, then collision-safe runtime pre-reads for all five resources, minimal Secret/ConfigMap RBAC, and SSA. Runtime integration is not currently unblocked.
 
 Live-cluster controller lifecycle validation passed for release `0.5.2` in the approved `coriolis` namespace. The currently deployed `0.5.3` retains the marker-only controller behavior and predates this local API slice; full lifecycle validation was not repeated for `0.5.3`.
 

@@ -123,6 +123,13 @@
 - The immutable upstream base template and all 16 provider fragments are frozen, preserving authoritative provider lists/order/module maps. Custom module overrides and compression/compressor are disabled initially. Explicit internal dependency inputs, fixed source-audited identities/paths, credential mappings, strict value-safe validation, and a redacted interface boundary are frozen without CRD fields.
 - All three generated credential Secrets use exactly `coriolis.cloudbase.it/retention: state-credentials`. TLS/CA material, provider connection/private data, optional credentials, dependency Services/workloads, bootstrap, storage, readiness, and rotation remain deferred. Source review covered every base-template variable and all fragments; `git diff --check` passed. This documentation-only contract is **committed locally at `574efcf` on `dev`, but not pushed or deployed**; deployed `0.5.3` remains marker-only.
 
+## Completed Locally: Pure Sensitive Configuration Rendering
+
+- Implemented `SensitiveCoriolisEndpoints`, `SensitiveCoriolisCredentials`, redacted one-key `SensitiveCoriolisConfig`, and `render_sensitive_coriolis_config`, committed locally at `9bb20f3` on `dev`, but not pushed or deployed; deployed `0.5.3` remains marker-only.
+- The exact one-key `coriolis.conf` output composes with the existing configuration-Secret builder and is rejected at the ConfigMap boundary. Inputs are frozen/exact and unmutated; credential/output reprs are redacted; errors are fixed/category-only and value-safe.
+- Jinja uses `PackageLoader`, `StrictUndefined`, disabled autoescape, and a trailing newline with byte-identical immutable upstream base and all 16 provider fragments. Frozen provider lists/order/module maps, source-audited values/paths, source/license attribution, prohibited custom overrides, and disabled compression/compressor are enforced.
+- Validation passed: 40 focused configuration tests, 215 total tests, Ruff lint/format, strict mypy, Helm lint/template, `git diff --check`, 17/17 source byte parity, and offline wheel inspection with exactly 25 expected template resources. No `main.py`, reconciliation, Kubernetes reads/writes/SSA, RBAC, CRD, runtime resources/workloads, chart/release/image version, deployment, TLS/CA/bootstrap, provider/private data, optional credentials, storage, readiness, or rotation behavior changed.
+
 ## Pending CIXpress Integration
 
 - Receive and add the exact CIXpress pipeline configuration, Template, and Job manifests.
@@ -133,12 +140,11 @@
 ## Planned: Kubernetes-Native Core Runtime
 
 1. Image inventory and pull gate are complete. RC4 failed (Build `868` exported an OVA but no `2608*` tag exists, so RC4 is OVA-only and must not be used); the approved fallback is exact official release `2603.4`. Recorded immutable digests, entrypoints, users, listeners, health capabilities, compatibility, and `registry.cloudbase.it/appliance` access in [the image inventory ledger](docs/image-inventory.md), and mirrored all 26 approved images to `cr.virtomat.io/virtomat/coriolis` (see the mirror section above). Pull validation in `virt-infra-dev-buc-hq` namespace `coriolis` passed using the destination Secret `coriolis-appliance-registry` (type `kubernetes.io/dockerconfigjson`): all 21 initial-runtime image references pulled successfully and no pull-validation Pods remain. This gate is complete.
-2. Implement and test the pure sensitive `coriolis.conf` renderer from the frozen contract at `574efcf`.
-3. Freeze multi-resource read/apply failure, status, atomicity, and marker-last semantics.
-4. Only then implement runtime five-resource pre-reads, minimal RBAC, and SSA. Runtime integration is not currently unblocked; retained adoption/runtime construction remains separately deferred. Decoded values remain internal and must never be logged, statused, or evented. TLS/optional credentials/storage/probes/readiness/bootstrap/rotation remain deferred. No runtime workloads are implemented or deployed.
-5. Implement MariaDB, RabbitMQ, Memcached, Keystone, Barbican, Step CA, InfluxDB/logger compatibility, API, conductor, scheduler, transfer cron, minion manager, deployer manager, privileged worker, compressor, web, and web proxy.
-6. Add server-side apply, controller watches, status/readiness, tests, and development acceptance. `Ready=True` requires mandatory Jobs, dependencies, workloads, and internal UI/API checks.
-7. Retain PVCs, CA state, and state credentials on deletion; delete only operator-owned workloads, Services, Jobs, and generated ConfigMaps. Never delete pre-existing referenced Secrets. Avoid a destructive finalizer.
+2. Freeze multi-resource read/apply failure, reconciliation status, atomicity, and marker-last semantics.
+3. Only then implement runtime collision-safe pre-reads for all five resources, minimal Secret/ConfigMap RBAC, and SSA. Runtime integration is not currently unblocked; retained adoption/runtime construction remains separately deferred. Decoded values remain internal and must never be logged, statused, or evented. TLS/optional credentials/storage/probes/readiness/bootstrap/rotation remain deferred. No runtime workloads are implemented or deployed.
+4. Implement MariaDB, RabbitMQ, Memcached, Keystone, Barbican, Step CA, InfluxDB/logger compatibility, API, conductor, scheduler, transfer cron, minion manager, deployer manager, privileged worker, compressor, web, and web proxy.
+5. Add server-side apply, controller watches, status/readiness, tests, and development acceptance. `Ready=True` requires mandatory Jobs, dependencies, workloads, and internal UI/API checks.
+6. Retain PVCs, CA state, and state credentials on deletion; delete only operator-owned workloads, Services, Jobs, and generated ConfigMaps. Never delete pre-existing referenced Secrets. Avoid a destructive finalizer.
 
 ## Pending Decisions
 
