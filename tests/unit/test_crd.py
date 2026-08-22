@@ -99,7 +99,7 @@ def test_crd_defines_structural_ingress_defaults_and_tls_mode_shape() -> None:
     }
 
 
-def test_crd_adds_optional_mariadb_storage_and_resources_without_defaults() -> None:
+def test_crd_adds_optional_storage_and_resources_without_defaults() -> None:
     schema = _load_schema()
     spec = schema["properties"]["spec"]
 
@@ -114,7 +114,15 @@ def test_crd_adds_optional_mariadb_storage_and_resources_without_defaults() -> N
                     "storageClassName": {"type": "string", "minLength": 1},
                     "size": {"type": "string", "minLength": 1},
                 },
-            }
+            },
+            "rabbitmq": {
+                "type": "object",
+                "required": ["storageClassName", "size"],
+                "properties": {
+                    "storageClassName": {"type": "string", "minLength": 1},
+                    "size": {"type": "string", "minLength": 1},
+                },
+            },
         },
     }
     assert spec["properties"]["resources"] == {
@@ -134,7 +142,22 @@ def test_crd_adds_optional_mariadb_storage_and_resources_without_defaults() -> N
                     }
                     for resource_type in ("requests", "limits")
                 },
-            }
+            },
+            "rabbitmq": {
+                "type": "object",
+                "required": ["requests", "limits"],
+                "properties": {
+                    resource_type: {
+                        "type": "object",
+                        "required": ["cpu", "memory"],
+                        "properties": {
+                            "cpu": {"type": "string", "minLength": 1},
+                            "memory": {"type": "string", "minLength": 1},
+                        },
+                    }
+                    for resource_type in ("requests", "limits")
+                },
+            },
         },
     }
 

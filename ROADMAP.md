@@ -44,7 +44,7 @@
 
 ## Later Milestones
 
-- MariaDB image, reconciliation, and anonymous-account prevention are released as `0.5.6`; its accepted single-node POC validated clean first boot, RWO, fsGroup, retained reuse, persistence, probes, and termination. Memcached reconciliation is released as `0.5.8` and its isolated single-node POC validated the ephemeral Deployment, Service endpoint, protocol, replacement, and cleanup contract. RabbitMQ evidence follows next. MariaDB CSI/cross-node and production backup/restore, HA, and RPO/RTO acceptance remain later gates.
+- MariaDB image, reconciliation, and anonymous-account prevention are released as `0.5.6`; its accepted single-node POC validated clean first boot, RWO, fsGroup, retained reuse, persistence, probes, and termination. Memcached reconciliation is released as `0.5.8` and its isolated single-node POC validated the ephemeral Deployment, Service endpoint, protocol, replacement, and cleanup contract. RabbitMQ has local runtime evidence and reconciliation; publication and its released-artifact POC follow next. MariaDB/RabbitMQ CSI cross-node and production backup/restore, HA, and RPO/RTO acceptance remain later gates.
 - Add safe upgrade and production lifecycle capabilities after explicit contracts and operational review.
 
 ## Pending Decisions

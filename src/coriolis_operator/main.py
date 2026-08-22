@@ -18,6 +18,7 @@ from coriolis_operator.mariadb import (
     SensitiveMariaDBCredentials,
     resolve_mariadb_settings,
 )
+from coriolis_operator.rabbitmq import resolve_rabbitmq_settings
 from coriolis_operator.reconcile import (
     DEPENDENCY_SERVICES,
     MARKER_COLLISION,
@@ -43,6 +44,7 @@ from coriolis_operator.reconcile import (
     preflight_foundational_resources,
     preflight_mariadb_resources,
     preflight_memcached_resource,
+    preflight_rabbitmq_resources,
     rejected_conditions,
     retry_conditions,
 )
@@ -247,6 +249,9 @@ def reconcile_appliance(
         mariadb_settings = resolve_mariadb_settings(
             storage=spec.get("storage"), resources=spec.get("resources")
         )
+        rabbitmq_settings = resolve_rabbitmq_settings(
+            storage=spec.get("storage"), resources=spec.get("resources")
+        )
     except ValueError:
         return build_status(
             generation,
@@ -290,6 +295,9 @@ def reconcile_appliance(
         )
         mariadb_stateful_set_name = appliance_resource_name(name, "mariadb")
         memcached_deployment_name = appliance_resource_name(name, "memcached")
+        rabbitmq_data_pvc_name = appliance_resource_name(name, "rabbitmq-data")
+        rabbitmq_config_map_name = appliance_resource_name(name, "rabbitmq-config")
+        rabbitmq_stateful_set_name = appliance_resource_name(name, "rabbitmq")
     except ReconcileRetry:
         raise
     except Exception:
@@ -395,6 +403,30 @@ def reconcile_appliance(
     memcached_deployment_existing = _read_or_absent(
         workloads_api.read_namespaced_deployment,
         name=memcached_deployment_name,
+        namespace=namespace,
+        generation=generation,
+        accepted_version=accepted_version,
+        status=status,
+    )
+    rabbitmq_data_pvc_existing = _read_or_absent(
+        api.read_namespaced_persistent_volume_claim,
+        name=rabbitmq_data_pvc_name,
+        namespace=namespace,
+        generation=generation,
+        accepted_version=accepted_version,
+        status=status,
+    )
+    rabbitmq_config_map_existing = _read_or_absent(
+        api.read_namespaced_config_map,
+        name=rabbitmq_config_map_name,
+        namespace=namespace,
+        generation=generation,
+        accepted_version=accepted_version,
+        status=status,
+    )
+    rabbitmq_stateful_set_existing = _read_or_absent(
+        workloads_api.read_namespaced_stateful_set,
+        name=rabbitmq_stateful_set_name,
         namespace=namespace,
         generation=generation,
         accepted_version=accepted_version,
@@ -573,6 +605,58 @@ def reconcile_appliance(
             )
 
     try:
+        rabbitmq_preflight = preflight_rabbitmq_resources(
+            appliance_name=name,
+            namespace=namespace,
+            accepted_version=requested_version,
+            settings=rabbitmq_settings,
+            owner=owner,
+            rabbitmq_data_pvc=rabbitmq_data_pvc_existing,
+            rabbitmq_config_map=rabbitmq_config_map_existing,
+            rabbitmq_stateful_set=rabbitmq_stateful_set_existing,
+        )
+        rabbitmq_collision = next(
+            (
+                resource_name
+                for resource_name, classification in (
+                    rabbitmq_preflight.classifications.items()
+                )
+                if classification.value == "collision"
+            ),
+            None,
+        )
+    except ReconcileRetry:
+        raise
+    except Exception:
+        raise _retry_status(
+            generation, accepted_version, status, "ResourceApplyFailed"
+        ) from None
+    if rabbitmq_collision is not None:
+        return build_status(
+            generation,
+            accepted_version=accepted_version,
+            conditions=collision_conditions(namespace, rabbitmq_collision),
+            prior_conditions=_prior_conditions(status),
+        )
+    for existing, classification in (
+        (
+            rabbitmq_config_map_existing,
+            rabbitmq_preflight.classifications[rabbitmq_config_map_name],
+        ),
+        (
+            rabbitmq_stateful_set_existing,
+            rabbitmq_preflight.classifications[rabbitmq_stateful_set_name],
+        ),
+    ):
+        if (
+            classification is OwnedClassification.MANAGED
+            and _resource_version(existing) is None
+        ):
+            raise _retry_status(
+                generation, accepted_version, status, "ResourceApplyFailed"
+            )
+
+    try:
         memcached_preflight = preflight_memcached_resource(
             appliance_name=name,
             namespace=namespace,
@@ -605,6 +689,11 @@ def reconcile_appliance(
         mariadb_config_secret_body,
         mariadb_stateful_set_body,
     ) = mariadb_preflight.manifests
+    (
+        rabbitmq_data_pvc_body,
+        rabbitmq_config_map_body,
+        rabbitmq_stateful_set_body,
+    ) = rabbitmq_preflight.manifests
 
     try:
         inputs = kubernetes_coriolis_render_inputs(name)
@@ -761,6 +850,44 @@ def reconcile_appliance(
             "stateful_set",
             mariadb_stateful_set_body,
             mariadb_stateful_set_existing,
+        ),
+    ):
+        _create_or_apply(
+            resource_api,
+            kind=kind,
+            body=body,
+            existing=existing,
+            category="ResourceApplyFailed",
+            generation=generation,
+            accepted_version=accepted_version,
+            status=status,
+        )
+    if (
+        rabbitmq_preflight.classifications[rabbitmq_data_pvc_name]
+        is RetainedClassification.ABSENT
+    ):
+        _create_or_apply(
+            api,
+            kind="persistent_volume_claim",
+            body=rabbitmq_data_pvc_body,
+            existing=None,
+            category="ResourceApplyFailed",
+            generation=generation,
+            accepted_version=accepted_version,
+            status=status,
+        )
+    for resource_api, kind, body, existing in (
+        (
+            api,
+            "config_map",
+            rabbitmq_config_map_body,
+            rabbitmq_config_map_existing,
+        ),
+        (
+            workloads_api,
+            "stateful_set",
+            rabbitmq_stateful_set_body,
+            rabbitmq_stateful_set_existing,
         ),
     ):
         _create_or_apply(

@@ -2,6 +2,13 @@
 
 Validate the work relevant to each change.
 
+## :material-book-open-page-variant-outline: Current Local RabbitMQ Validation
+
+- Local RabbitMQ reconciliation is uncommitted, unpushed, undeployed, and runtime-incomplete. Full validation passed: `uv run pytest tests/unit` (355 passed), Ruff lint/format, mypy, Helm lint/template, and `git diff --check`.
+- Coverage includes optional explicit RabbitMQ storage/resources settings validation; collision-first reads and preflight; exact ownerless retained RWO Filesystem PVC create/no-write reuse; owner ConfigMap and restricted one-replica StatefulSet construction; existing Service and retained infrastructure-Secret references; direct file-only bootstrap/probes; guarded SSA; no new RBAC verbs; MariaDB then RabbitMQ then Memcached writes; and marker-last ordering. `Ready=False/RuntimeNotImplemented` remains expected.
+- Local image/runtime evidence covers approved `rabbitmq:2023.1-ubuntu-jammy@sha256:a595bf6f306ded2b6ad01f068ef69255df72eb73d471ba73ce9bbf0470d15d8a`, image ID `sha256:f9e28ef3ed172cfdda9e6c3d56c509ceaee672b516381343244ed40332a19e73`, direct server/diagnostics, restricted filesystem/security context, file-only definitions, retained-volume restart, and sanitized broker checks. This is not a Kubernetes POC.
+- Required POC gates are target storage fsGroup/RWO, authenticated AMQP through Service DNS, EndpointSlice, normal replacement/same-node remount/persistence, CR recreation retained reuse/no-write, and cleanup. CSI cross-node, backup/restore, HA, RPO/RTO, and credential rotation are later gates. Keystone follows only after RabbitMQ POC acceptance.
+
 ## :material-book-open-page-variant-outline: Current MariaDB Reconciliation Validation
 
 - The development stack through MariaDB reconciliation is published on `origin/dev` at `55212b0`, including the foundational gate, four-Service slice, MariaDB evidence/contract, and pure preparation commit `5a2dfce`; it is undeployed.
@@ -16,8 +23,8 @@ The four-Service slice, MariaDB pure desired-state preparation, and reconciliati
 - In disposable single-node namespace `coriolis-memcached-validation-20260822`, CR `memcached-validation` created the Memcached Deployment in 44s; the original Deployment reached Ready 3s later, and MariaDB and Memcached both reached `1/1`. The released operator image was `cr.virtomat.io/virtomat/coriolis/operator:0.5.8` with imageID `sha256:9af4b018c2a7c0a23635d115d5335477b17bb81a731979bd0c93083c88461af4`; the Memcached Pod imageID matched approved digest `sha256:746b93082a4f6d07f464e93d4b14f5e30510abf17a9ae0a4af20e111408c8f1e`.
 - The live Deployment passed its CR owner, one-replica `Recreate`, exact approved Memcached digest, direct command/args, port/pull Secret, UID/GID `42457`, disabled automount/service links, 30-second grace, restricted context, exact protocol probes, and absence of init containers, volumes/mounts, environment, configuration, credentials, PVC, and resource API. The Service selector and EndpointSlice targeted the Ready Pod on TCP `11211`.
 - Service-DNS `version` and fixed set/get passed. Normal Pod deletion produced a distinct-UID replacement Ready in 3.603s with zero restarts, the same digest, and a ready endpoint; the original key returned only `END`, then fresh version/set/get passed. This proves ephemerality only, not persistence, HA, credentials, configuration, resource API, production readiness, or overall appliance readiness.
-- The CR correctly remained `Ready=False/RuntimeNotImplemented` while reconciled dependencies were healthy. Normal cleanup removed the CR, Helm release, namespace, retained PVC, Delete-policy PV `pvc-b2856ccb-88ed-4d60-9878-89ef06331be8`, and copied registry Secret; the namespace/PV/release are absent, the node is Ready and schedulable, and zero appliances remain cluster-wide. Argo runs only healthy `coriolis-operator:0.5.8`, `1/1`, with no legacy selector overlap or appliance CR.
-- Local validation remains `uv run --offline pytest tests/unit` (326 passed), Ruff lint/format, mypy, Helm lint/template, and `git diff --check`. RabbitMQ evidence is next; MariaDB CSI/cross-node and production gates remain open.
+- The CR correctly remained `Ready=False/RuntimeNotImplemented` while reconciled dependencies were healthy. Normal cleanup removed the CR, Helm release, namespace, retained PVC, Delete-policy PV `pvc-b2856ccb-88ed-4d60-9878-89ef06331be8`, and copied registry Secret; at that POC cleanup point the namespace/PV/release were absent, the node was Ready and schedulable, and zero appliances remained cluster-wide. That historical POC used Argo `coriolis-operator:0.5.8`; the current Argo deployment is healthy docs-only `0.5.9`, `1/1`, with zero appliance CRs and no POC workload.
+- That Memcached source baseline remains `uv run --offline pytest tests/unit` (326 passed), Ruff lint/format, mypy, Helm lint/template, and `git diff --check`. Current RabbitMQ local validation is documented above; its released-artifact POC is next. MariaDB CSI/cross-node and production gates remain open.
 
 ## :material-book-open-page-variant-outline: Live MariaDB POC
 
@@ -153,7 +160,7 @@ The pure renderer is **committed locally at `9bb20f3` on `dev`, but not pushed o
 
 This migration is **committed locally at `e2ddb30` on `dev`, but not pushed or deployed**. It adds no `main.py`, runtime Kubernetes I/O, SSA/RBAC, actual Service/Ingress/workload resources, or release/chart/image/deployment behavior; deployed `0.5.3` remains marker-only.
 
-Live-cluster controller lifecycle validation passed for release `0.5.2` in the approved `coriolis` namespace and was not repeated in full for later releases. Argo currently runs healthy `0.5.8` with no appliance CR; the released Memcached implementation passed its separate isolated POC.
+Live-cluster controller lifecycle validation passed for release `0.5.2` in the approved `coriolis` namespace and was not repeated in full for later releases. The separate Memcached POC used healthy `0.5.8`; Argo currently runs healthy docs-only `0.5.9` with no appliance CR.
 
 The approved dev cluster is `infra-dev-buc-hq` (`virt-infra-dev-buc-hq`); CIXpress remains approved for read-only pipeline troubleshooting and monitoring only. The dedicated operator namespace is `coriolis`. See [Development Environment](dev-environment.md).
 

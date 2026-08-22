@@ -15,6 +15,7 @@ from coriolis_operator.mariadb import (
     SensitiveMariaDBCredentials,
     resolve_mariadb_settings,
 )
+from coriolis_operator.rabbitmq import resolve_rabbitmq_settings
 from coriolis_operator.reconcile import (
     APPLIANCE_NAME_ANNOTATION,
     CORIOLIS_CREDENTIALS_KEYS,
@@ -52,6 +53,7 @@ from coriolis_operator.reconcile import (
     kubernetes_coriolis_render_inputs,
     preflight_foundational_resources,
     preflight_mariadb_resources,
+    preflight_rabbitmq_resources,
     rejected_conditions,
     state_config_map_name,
     validated_retained_secret_values,
@@ -95,6 +97,13 @@ CORIOLIS_CONFIG_SECRET = {"coriolis.conf": "secret config"}
 MARIADB_STORAGE = {"mariadb": {"storageClassName": "synthetic-storage", "size": "10Gi"}}
 MARIADB_RESOURCES = {
     "mariadb": {
+        "requests": {"cpu": "250m", "memory": "512Mi"},
+        "limits": {"cpu": "1", "memory": "1Gi"},
+    }
+}
+RABBITMQ_STORAGE = {"rabbitmq": {"storageClassName": "rabbitmq-storage", "size": "1Gi"}}
+RABBITMQ_RESOURCES = {
+    "rabbitmq": {
         "requests": {"cpu": "250m", "memory": "512Mi"},
         "limits": {"cpu": "1", "memory": "1Gi"},
     }
@@ -228,8 +237,8 @@ def sample_meta(generation: int = 7) -> dict:
 def valid_spec(*, include_profile: bool = True) -> dict:
     spec = {
         "version": "2603.4",
-        "storage": copy.deepcopy(MARIADB_STORAGE),
-        "resources": copy.deepcopy(MARIADB_RESOURCES),
+        "storage": copy.deepcopy(MARIADB_STORAGE | RABBITMQ_STORAGE),
+        "resources": copy.deepcopy(MARIADB_RESOURCES | RABBITMQ_RESOURCES),
     }
     if include_profile:
         spec["profile"] = "core"
@@ -259,10 +268,13 @@ def make_core_api(existing=None) -> MagicMock:
 def make_apps_api(existing=None) -> MagicMock:
     api = MagicMock()
     api.api_client.default_headers = {}
-    if existing is None:
-        api.read_namespaced_stateful_set.side_effect = _api_exception(404)
-    else:
-        api.read_namespaced_stateful_set.return_value = existing
+
+    def read_stateful_set(*, name: str, namespace: str) -> object:
+        if name == "example-mariadb" and existing is not None:
+            return existing
+        raise _api_exception(404)
+
+    api.read_namespaced_stateful_set.side_effect = read_stateful_set
     api.read_namespaced_deployment.side_effect = _api_exception(404)
     return api
 
@@ -290,6 +302,24 @@ def mariadb_bodies() -> dict[str, dict]:
     }
 
 
+def rabbitmq_bodies() -> dict[str, dict]:
+    preflight = preflight_rabbitmq_resources(
+        appliance_name="example",
+        namespace="operators",
+        accepted_version="2603.4",
+        settings=resolve_rabbitmq_settings(
+            storage=RABBITMQ_STORAGE, resources=RABBITMQ_RESOURCES
+        ),
+        owner=OWNER,
+        rabbitmq_data_pvc=None,
+        rabbitmq_config_map=None,
+        rabbitmq_stateful_set=None,
+    )
+    return {
+        body["metadata"]["name"]: copy.deepcopy(body) for body in preflight.manifests
+    }
+
+
 def configure_mariadb_existing(
     core_api: MagicMock, apps_api: MagicMock, existing: dict[str, dict]
 ) -> None:
@@ -307,14 +337,23 @@ def configure_mariadb_existing(
 
     core_api.read_namespaced_config_map.side_effect = read_config_map
     core_api.read_namespaced_secret.side_effect = read_secret
-    if "example-mariadb-data" in existing:
-        core_api.read_namespaced_persistent_volume_claim.side_effect = None
-        core_api.read_namespaced_persistent_volume_claim.return_value = existing[
-            "example-mariadb-data"
-        ]
-    if "example-mariadb" in existing:
-        apps_api.read_namespaced_stateful_set.side_effect = None
-        apps_api.read_namespaced_stateful_set.return_value = existing["example-mariadb"]
+
+    def read_persistent_volume_claim(*, name: str, namespace: str) -> object:
+        assert namespace == "operators"
+        if name in existing:
+            return existing[name]
+        raise _api_exception(404)
+
+    def read_stateful_set(*, name: str, namespace: str) -> object:
+        assert namespace == "operators"
+        if name in existing:
+            return existing[name]
+        raise _api_exception(404)
+
+    core_api.read_namespaced_persistent_volume_claim.side_effect = (
+        read_persistent_volume_claim
+    )
+    apps_api.read_namespaced_stateful_set.side_effect = read_stateful_set
 
 
 def api_writes(api: MagicMock) -> list:
@@ -1174,9 +1213,9 @@ def test_build_status_reports_accepted_api_only_slice() -> None:
                 "Reconciled",
                 "True",
                 "Reconciled",
-                "The foundational appliance resources, dependency Services, "
-                "MariaDB resources, and controller state marker were reconciled "
-                "in Kubernetes; runtime readiness is not implemented yet.",
+                "The foundational appliance resources, dependency Services, MariaDB, "
+                "RabbitMQ, and Memcached resources, and controller state marker were "
+                "reconciled in Kubernetes; runtime readiness is not implemented yet.",
             ),
             condition(
                 "Ready",
@@ -1312,6 +1351,12 @@ def test_reconcile_appliance_server_side_applies_state_and_returns_status() -> N
         call.read_namespaced_secret(
             name="example-mariadb-config-secret", namespace="operators"
         ),
+        call.read_namespaced_persistent_volume_claim(
+            name="example-rabbitmq-data", namespace="operators"
+        ),
+        call.read_namespaced_config_map(
+            name="example-rabbitmq-config", namespace="operators"
+        ),
         call.create_namespaced_secret(namespace="operators", body=ANY),
         call.create_namespaced_secret(namespace="operators", body=ANY),
         call.create_namespaced_config_map(namespace="operators", body=ANY),
@@ -1323,6 +1368,8 @@ def test_reconcile_appliance_server_side_applies_state_and_returns_status() -> N
         call.create_namespaced_persistent_volume_claim(namespace="operators", body=ANY),
         call.create_namespaced_config_map(namespace="operators", body=ANY),
         call.create_namespaced_secret(namespace="operators", body=ANY),
+        call.create_namespaced_persistent_volume_claim(namespace="operators", body=ANY),
+        call.create_namespaced_config_map(namespace="operators", body=ANY),
         call.create_namespaced_config_map(namespace="operators", body=ANY),
     ]
     assert status["observedGeneration"] == 7
@@ -2566,6 +2613,7 @@ def test_managed_resources_use_resource_version_and_marker_is_last() -> None:
         desired_body(),
         managed_config,
         _api_exception(404),
+        _api_exception(404),
     ]
     api.read_namespaced_secret.side_effect = [_api_exception(404)] * 4
 
@@ -2628,6 +2676,7 @@ def test_existing_managed_resource_without_resource_version_retries_before_write
         marker,
         _api_exception(404),
         _api_exception(404),
+        _api_exception(404),
     ]
 
     with pytest.raises(main.ReconcileRetry) as excinfo:
@@ -2650,6 +2699,7 @@ def test_apply_header_is_removed_before_later_create() -> None:
     api.read_namespaced_config_map.side_effect = [
         _api_exception(404),
         managed_config,
+        _api_exception(404),
         _api_exception(404),
     ]
     api.read_namespaced_secret.side_effect = [_api_exception(404)] * 4
@@ -2740,6 +2790,7 @@ def test_foundational_managed_apply_conflict_stops_later_writes_and_marker() -> 
     api.read_namespaced_config_map.side_effect = [
         _api_exception(404),
         managed_config,
+        _api_exception(404),
         _api_exception(404),
     ]
     api.read_namespaced_secret.side_effect = [_api_exception(404)] * 4
@@ -3068,7 +3119,8 @@ def test_invalid_runtime_configuration_conditions_are_stable() -> None:
         if reason == "InvalidRuntimeConfiguration"
     }
     assert messages == {
-        "Complete valid MariaDB storage and resource configuration is required."
+        "Complete valid MariaDB and RabbitMQ storage and resource configuration is "
+        "required."
     }
 
 
@@ -3105,7 +3157,8 @@ def test_invalid_mariadb_configuration_is_stable_without_api_access(
     assert status["observedGeneration"] == 7
     assert status["conditions"][2]["reason"] == "InvalidRuntimeConfiguration"
     assert status["conditions"][2]["message"] == (
-        "Complete valid MariaDB storage and resource configuration is required."
+        "Complete valid MariaDB and RabbitMQ storage and resource configuration is "
+        "required."
     )
 
 
@@ -3184,6 +3237,9 @@ def test_mariadb_reads_and_writes_follow_the_frozen_cross_api_order() -> None:
         ("read", "secret", "example-mariadb-config-secret"),
         ("read", "statefulset", "example-mariadb"),
         ("read", "deployment", "example-memcached"),
+        ("read", "pvc", "example-rabbitmq-data"),
+        ("read", "configmap", "example-rabbitmq-config"),
+        ("read", "statefulset", "example-rabbitmq"),
     ]
     assert [event for event in events if event[0] == "write"] == [
         ("write", "secret", "example-coriolis-credentials"),
@@ -3198,6 +3254,9 @@ def test_mariadb_reads_and_writes_follow_the_frozen_cross_api_order() -> None:
         ("write", "configmap", "example-mariadb-config"),
         ("write", "secret", "example-mariadb-config-secret"),
         ("write", "statefulset", "example-mariadb"),
+        ("write", "pvc", "example-rabbitmq-data"),
+        ("write", "configmap", "example-rabbitmq-config"),
+        ("write", "statefulset", "example-rabbitmq"),
         ("write", "deployment", "example-memcached"),
         ("write", "configmap", "example-operator-state"),
     ]
@@ -3260,7 +3319,11 @@ def test_mariadb_reuses_pvc_without_write_and_guarded_applies_managed_resources(
         apps_api=apps_api,
     )
 
-    core_api.create_namespaced_persistent_volume_claim.assert_not_called()
+    pvc_creates = [
+        item.kwargs["body"]["metadata"]["name"]
+        for item in core_api.create_namespaced_persistent_volume_claim.call_args_list
+    ]
+    assert "example-mariadb-data" not in pvc_creates
     core_api.patch_namespaced_persistent_volume_claim.assert_not_called()
     config_apply = core_api.patch_namespaced_config_map.call_args.kwargs
     secret_apply = core_api.patch_namespaced_secret.call_args.kwargs
@@ -3276,6 +3339,267 @@ def test_mariadb_reuses_pvc_without_write_and_guarded_applies_managed_resources(
     assert apps_api.api_client.default_headers["Content-Type"] == "application/json"
     marker = core_api.create_namespaced_config_map.call_args.kwargs["body"]
     assert marker["metadata"]["name"] == "example-operator-state"
+
+
+@pytest.mark.parametrize(
+    "spec",
+    [
+        {"profile": "core", "version": "2603.4"},
+        {
+            "profile": "core",
+            "version": "2603.4",
+            "storage": MARIADB_STORAGE,
+            "resources": MARIADB_RESOURCES,
+        },
+        {
+            "profile": "core",
+            "version": "2603.4",
+            "storage": MARIADB_STORAGE | RABBITMQ_STORAGE,
+            "resources": MARIADB_RESOURCES
+            | {
+                "rabbitmq": {
+                    "requests": {"cpu": "2", "memory": "512Mi"},
+                    "limits": {"cpu": "1", "memory": "1Gi"},
+                }
+            },
+        },
+    ],
+)
+def test_invalid_rabbitmq_configuration_is_mutation_free_before_api_access(
+    monkeypatch: pytest.MonkeyPatch, spec: dict
+) -> None:
+    assert_no_api_instantiation(monkeypatch)
+
+    status = reconcile_appliance(spec=spec, meta=sample_meta())
+
+    assert status["conditions"][2]["reason"] == "InvalidRuntimeConfiguration"
+    assert status["conditions"][2]["message"] == (
+        "Complete valid MariaDB and RabbitMQ storage and resource configuration is "
+        "required."
+    )
+
+
+@pytest.mark.parametrize(
+    "resource_name",
+    ["example-rabbitmq-data", "example-rabbitmq-config", "example-rabbitmq"],
+)
+def test_rabbitmq_collision_at_each_position_is_mutation_free(
+    resource_name: str,
+) -> None:
+    core_api = make_core_api()
+    apps_api = make_apps_api()
+    collided = rabbitmq_bodies()[resource_name]
+    collided["metadata"]["labels"]["app.kubernetes.io/managed-by"] = "other"
+    configure_mariadb_existing(core_api, apps_api, {resource_name: collided})
+
+    status = reconcile_appliance(
+        spec=valid_spec(), meta=sample_meta(), core_api=core_api, apps_api=apps_api
+    )
+
+    assert status["conditions"][2]["reason"] == "ResourceCollision"
+    assert f"operators/{resource_name}" in status["conditions"][2]["message"]
+    assert api_writes(core_api) == []
+    assert api_writes(apps_api) == []
+
+
+@pytest.mark.parametrize(
+    "resource_name",
+    ["example-rabbitmq-data", "example-rabbitmq-config", "example-rabbitmq"],
+)
+def test_non_404_at_each_rabbitmq_read_position_prevents_writes(
+    resource_name: str,
+) -> None:
+    core_api = make_core_api()
+    apps_api = make_apps_api()
+
+    def fail_target(*, name: str, namespace: str) -> object:
+        assert namespace == "operators"
+        if name == resource_name:
+            raise client.ApiException(status=403, reason="rabbitmq-read-sentinel")
+        raise _api_exception(404)
+
+    if resource_name == "example-rabbitmq-data":
+        core_api.read_namespaced_persistent_volume_claim.side_effect = fail_target
+    elif resource_name == "example-rabbitmq-config":
+        core_api.read_namespaced_config_map.side_effect = fail_target
+    else:
+        apps_api.read_namespaced_stateful_set.side_effect = fail_target
+
+    with pytest.raises(main.ReconcileRetry) as excinfo:
+        reconcile_appliance(
+            spec=valid_spec(), meta=sample_meta(), core_api=core_api, apps_api=apps_api
+        )
+
+    assert excinfo.value.status["conditions"][2]["reason"] == "ResourceReadFailed"
+    assert "rabbitmq-read-sentinel" not in repr(excinfo.value.status)
+    assert api_writes(core_api) == []
+    assert api_writes(apps_api) == []
+
+
+@pytest.mark.parametrize(
+    "resource_name", ["example-rabbitmq-config", "example-rabbitmq"]
+)
+def test_managed_rabbitmq_without_resource_version_retries_before_writes(
+    resource_name: str,
+) -> None:
+    core_api = make_core_api()
+    apps_api = make_apps_api()
+    configure_mariadb_existing(
+        core_api, apps_api, {resource_name: rabbitmq_bodies()[resource_name]}
+    )
+
+    with pytest.raises(main.ReconcileRetry) as excinfo:
+        reconcile_appliance(
+            spec=valid_spec(), meta=sample_meta(), core_api=core_api, apps_api=apps_api
+        )
+
+    assert excinfo.value.status["conditions"][2]["reason"] == "ResourceApplyFailed"
+    assert api_writes(core_api) == []
+    assert api_writes(apps_api) == []
+
+
+def test_rabbitmq_reuses_pvc_and_guarded_applies_before_memcached() -> None:
+    core_api = make_core_api()
+    apps_api = make_apps_api()
+    existing = rabbitmq_bodies()
+    for resource_name in ("example-rabbitmq-config", "example-rabbitmq"):
+        existing[resource_name]["metadata"]["resourceVersion"] = "19"
+    configure_mariadb_existing(core_api, apps_api, existing)
+
+    reconcile_appliance(
+        spec=valid_spec(), meta=sample_meta(), core_api=core_api, apps_api=apps_api
+    )
+
+    assert "example-rabbitmq-data" not in [
+        item.kwargs["body"]["metadata"]["name"]
+        for item in core_api.create_namespaced_persistent_volume_claim.call_args_list
+    ]
+    config_apply = core_api.patch_namespaced_config_map.call_args_list[-1].kwargs
+    stateful_apply = apps_api.patch_namespaced_stateful_set.call_args.kwargs
+    assert config_apply["name"] == "example-rabbitmq-config"
+    assert stateful_apply["name"] == "example-rabbitmq"
+    assert config_apply["body"]["metadata"]["resourceVersion"] == "19"
+    assert stateful_apply["body"]["metadata"]["resourceVersion"] == "19"
+    write_names = [
+        item.kwargs.get("body", {})
+        .get("metadata", {})
+        .get("name", item.kwargs.get("name"))
+        for item in apps_api.method_calls
+        if item[0].startswith(("create_namespaced", "patch_namespaced"))
+    ]
+    assert write_names.index("example-rabbitmq") < write_names.index(
+        "example-memcached"
+    )
+
+
+@pytest.mark.parametrize(
+    "resource_name",
+    ["example-rabbitmq-data", "example-rabbitmq-config", "example-rabbitmq"],
+)
+def test_rabbitmq_apply_failure_is_sanitized_and_skips_memcached_and_marker(
+    resource_name: str,
+) -> None:
+    core_api = make_core_api()
+    apps_api = make_apps_api()
+
+    def fail_target(*, namespace: str, body: dict) -> None:
+        if body["metadata"]["name"] == resource_name:
+            raise client.ApiException(status=409, reason="rabbitmq-apply-sentinel")
+
+    if resource_name == "example-rabbitmq-data":
+        core_api.create_namespaced_persistent_volume_claim.side_effect = fail_target
+    elif resource_name == "example-rabbitmq-config":
+        core_api.create_namespaced_config_map.side_effect = fail_target
+    else:
+        apps_api.create_namespaced_stateful_set.side_effect = fail_target
+
+    with pytest.raises(main.ReconcileRetry) as excinfo:
+        reconcile_appliance(
+            spec=valid_spec(), meta=sample_meta(), core_api=core_api, apps_api=apps_api
+        )
+
+    assert excinfo.value.status["conditions"][2]["reason"] == "ResourceApplyFailed"
+    assert "rabbitmq-apply-sentinel" not in repr(excinfo.value.status)
+    apps_api.create_namespaced_deployment.assert_not_called()
+    assert "example-operator-state" not in [
+        item.kwargs["body"]["metadata"]["name"]
+        for item in core_api.create_namespaced_config_map.call_args_list
+    ]
+
+
+@pytest.mark.parametrize(
+    "resource_name", ["example-rabbitmq-config", "example-rabbitmq"]
+)
+def test_rabbitmq_patch_failure_is_sanitized_and_skips_memcached_and_marker(
+    resource_name: str,
+) -> None:
+    core_api = make_core_api()
+    apps_api = make_apps_api()
+    existing = rabbitmq_bodies()
+    for name in ("example-rabbitmq-config", "example-rabbitmq"):
+        existing[name]["metadata"]["resourceVersion"] = "21"
+    configure_mariadb_existing(core_api, apps_api, existing)
+    failure = client.ApiException(status=409, reason="rabbitmq-patch-sentinel")
+    if resource_name == "example-rabbitmq-config":
+        core_api.patch_namespaced_config_map.side_effect = failure
+    else:
+        apps_api.patch_namespaced_stateful_set.side_effect = failure
+
+    with pytest.raises(main.ReconcileRetry) as excinfo:
+        reconcile_appliance(
+            spec=valid_spec(), meta=sample_meta(), core_api=core_api, apps_api=apps_api
+        )
+
+    assert excinfo.value.status["conditions"][2]["reason"] == "ResourceApplyFailed"
+    assert "rabbitmq-patch-sentinel" not in repr(excinfo.value.status)
+    apps_api.create_namespaced_deployment.assert_not_called()
+    assert "example-operator-state" not in [
+        item.kwargs["body"]["metadata"]["name"]
+        for item in core_api.create_namespaced_config_map.call_args_list
+    ]
+
+
+def test_rabbitmq_preflight_and_manifests_do_not_receive_or_expose_password(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    core_api = make_core_api()
+    infrastructure = build_infrastructure_credentials_secret(
+        appliance_name="example",
+        namespace="operators",
+        accepted_version="2603.4",
+        retention="state-credentials",
+        values={**INFRASTRUCTURE_CREDENTIALS, "rabbitmq_password": "rabbit-secret"},
+    )
+    core_api.read_namespaced_secret.side_effect = [
+        _api_exception(404),
+        infrastructure,
+        _api_exception(404),
+        _api_exception(404),
+    ]
+    captured: dict[str, object] = {}
+    preflight = main.preflight_rabbitmq_resources
+
+    def capture(**kwargs: object) -> object:
+        captured.update(kwargs)
+        return preflight(**kwargs)
+
+    monkeypatch.setattr(main, "preflight_rabbitmq_resources", capture)
+    status = reconcile_appliance(
+        spec=valid_spec(), meta=sample_meta(), core_api=core_api
+    )
+
+    assert "rabbit-secret" not in repr(captured)
+    assert "rabbitmq_password" not in captured
+    rabbitmq_bodies_written = [
+        item.kwargs["body"]
+        for item in (
+            core_api.create_namespaced_persistent_volume_claim.call_args_list
+            + core_api.create_namespaced_config_map.call_args_list
+        )
+        if item.kwargs["body"]["metadata"]["name"].startswith("example-rabbitmq")
+    ]
+    assert all("rabbit-secret" not in repr(body) for body in rabbitmq_bodies_written)
+    assert "rabbit-secret" not in repr(status)
 
 
 @pytest.mark.parametrize(

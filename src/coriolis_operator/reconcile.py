@@ -51,6 +51,26 @@ from coriolis_operator.memcached import (
     MEMCACHED_RUN_AS_ID,
     MEMCACHED_TERMINATION_GRACE_PERIOD_SECONDS,
 )
+from coriolis_operator.rabbitmq import (
+    RABBITMQ_CONFIG_DIR,
+    RABBITMQ_CONFIG_KEYS,
+    RABBITMQ_DATA_DIR,
+    RABBITMQ_DIAGNOSTICS,
+    RABBITMQ_IMAGE,
+    RABBITMQ_IMAGE_PULL_SECRET_NAME,
+    RABBITMQ_LOG_DIR,
+    RABBITMQ_PORT,
+    RABBITMQ_PVC_ACCESS_MODE,
+    RABBITMQ_PVC_RETENTION_VALUE,
+    RABBITMQ_PVC_VOLUME_MODE,
+    RABBITMQ_REPLICAS,
+    RABBITMQ_RUN_AS_ID,
+    RABBITMQ_RUNTIME_DIR,
+    RABBITMQ_SECRET_DIR,
+    RABBITMQ_TERMINATION_GRACE_PERIOD_SECONDS,
+    RabbitMQSettings,
+    render_rabbitmq_config,
+)
 
 STATE_CONFIG_MAP_SUFFIX = "-operator-state"
 CONFIG_MAP_NAME_MAX_LENGTH = 253
@@ -70,13 +90,14 @@ RUNTIME_NOT_IMPLEMENTED_MESSAGE = "The appliance runtime is not implemented yet.
 NOT_DEGRADED_MESSAGE = "The appliance is not degraded."
 NOT_RECONCILED_MESSAGE = "No resources were applied to Kubernetes."
 RECONCILED_MESSAGE = (
-    "The foundational appliance resources, dependency Services, MariaDB resources, "
-    "and controller state marker were reconciled in Kubernetes; runtime readiness is "
-    "not implemented yet."
+    "The foundational appliance resources, dependency Services, MariaDB, RabbitMQ, "
+    "and Memcached resources, and controller state marker were reconciled in "
+    "Kubernetes; runtime readiness is not implemented yet."
 )
 UPGRADE_NOT_SUPPORTED_MESSAGE = "The core profile has no supported upgrade path."
 INVALID_RUNTIME_CONFIGURATION_MESSAGE = (
-    "Complete valid MariaDB storage and resource configuration is required."
+    "Complete valid MariaDB and RabbitMQ storage and resource configuration is "
+    "required."
 )
 RESOURCE_COLLISION_MESSAGE = (
     "The existing resource '{namespace}/{name}' conflicts with operator-managed "
@@ -187,6 +208,14 @@ class FoundationalResourcePreflight:
 @dataclass(frozen=True)
 class MariaDBResourcePreflight:
     """Pure preflight outcome and apply-ordered MariaDB resource bodies."""
+
+    classifications: Mapping[str, RetainedClassification | OwnedClassification]
+    manifests: tuple[dict[str, Any], ...] = field(repr=False)
+
+
+@dataclass(frozen=True)
+class RabbitMQResourcePreflight:
+    """Pure preflight outcome and apply-ordered RabbitMQ resource bodies."""
 
     classifications: Mapping[str, RetainedClassification | OwnedClassification]
     manifests: tuple[dict[str, Any], ...] = field(repr=False)
@@ -1403,6 +1432,363 @@ def preflight_mariadb_resources(
                 values=secret_values,
             ),
             build_mariadb_stateful_set(
+                appliance_name=appliance_name,
+                namespace=namespace,
+                accepted_version=accepted_version,
+                owner=owner,
+                settings=settings,
+            ),
+        ),
+    )
+
+
+def build_rabbitmq_data_pvc(
+    *,
+    appliance_name: str,
+    namespace: str,
+    accepted_version: str,
+    settings: RabbitMQSettings,
+) -> dict[str, Any]:
+    """Build the ownerless retained RabbitMQ data claim."""
+    component = "rabbitmq-data"
+    return {
+        "apiVersion": "v1",
+        "kind": "PersistentVolumeClaim",
+        "metadata": build_resource_metadata(
+            resource_name=appliance_resource_name(appliance_name, component),
+            namespace=namespace,
+            appliance_name=appliance_name,
+            component=component,
+            accepted_version=accepted_version,
+            retention=RABBITMQ_PVC_RETENTION_VALUE,
+        ),
+        "spec": {
+            "storageClassName": settings.storage.storage_class_name,
+            "accessModes": [RABBITMQ_PVC_ACCESS_MODE],
+            "volumeMode": RABBITMQ_PVC_VOLUME_MODE,
+            "resources": {"requests": {"storage": settings.storage.size}},
+        },
+    }
+
+
+def build_rabbitmq_config_map(
+    *,
+    appliance_name: str,
+    namespace: str,
+    accepted_version: str,
+    owner: Mapping[str, Any],
+    values: Mapping[str, str],
+) -> dict[str, Any]:
+    """Build the owner-referenced RabbitMQ configuration ConfigMap."""
+    component = "rabbitmq-config"
+    resource_name = appliance_resource_name(appliance_name, component)
+    return {
+        "apiVersion": "v1",
+        "kind": "ConfigMap",
+        "metadata": build_resource_metadata(
+            resource_name=resource_name,
+            namespace=namespace,
+            appliance_name=appliance_name,
+            component=component,
+            accepted_version=accepted_version,
+            owner=owner,
+        ),
+        "data": _validated_opaque_values(values, RABBITMQ_CONFIG_KEYS, resource_name),
+    }
+
+
+def _rabbitmq_container_security_context() -> dict[str, Any]:
+    return {
+        "runAsNonRoot": True,
+        "readOnlyRootFilesystem": True,
+        "allowPrivilegeEscalation": False,
+        "capabilities": {"drop": ["ALL"]},
+        "seccompProfile": {"type": "RuntimeDefault"},
+    }
+
+
+def build_rabbitmq_stateful_set(
+    *,
+    appliance_name: str,
+    namespace: str,
+    accepted_version: str,
+    owner: Mapping[str, Any],
+    settings: RabbitMQSettings,
+) -> dict[str, Any]:
+    """Build the RabbitMQ StatefulSet using the retained data claim."""
+    component = "rabbitmq"
+    resource_name = appliance_resource_name(appliance_name, component)
+    metadata = build_resource_metadata(
+        resource_name=resource_name,
+        namespace=namespace,
+        appliance_name=appliance_name,
+        component=component,
+        accepted_version=accepted_version,
+        owner=owner,
+    )
+    selector = {
+        "coriolis.cloudbase.it/appliance": appliance_identity(appliance_name),
+        "coriolis.cloudbase.it/component": component,
+    }
+    config_items = [
+        {"key": "rabbitmq.conf", "path": "rabbitmq.conf", "mode": 0o444},
+        {"key": "start-rabbitmq.sh", "path": "start-rabbitmq.sh", "mode": 0o555},
+    ]
+    diagnostics = RABBITMQ_DIAGNOSTICS
+    running_and_listener = (
+        f"{diagnostics} -q check_running && {diagnostics} -q check_port_listener "
+        f"{RABBITMQ_PORT}"
+    )
+    container = {
+        "name": component,
+        "image": RABBITMQ_IMAGE,
+        "command": [RABBITMQ_CONFIG_DIR + "/start-rabbitmq.sh"],
+        "ports": [
+            {"name": component, "containerPort": RABBITMQ_PORT, "protocol": "TCP"}
+        ],
+        "resources": {
+            "requests": {
+                "cpu": settings.resources.requests_cpu,
+                "memory": settings.resources.requests_memory,
+            },
+            "limits": {
+                "cpu": settings.resources.limits_cpu,
+                "memory": settings.resources.limits_memory,
+            },
+        },
+        "securityContext": _rabbitmq_container_security_context(),
+        "volumeMounts": [
+            {"name": "data", "mountPath": RABBITMQ_DATA_DIR},
+            {"name": "runtime", "mountPath": RABBITMQ_RUNTIME_DIR},
+            {"name": "logs", "mountPath": RABBITMQ_LOG_DIR},
+            {"name": "config", "mountPath": RABBITMQ_CONFIG_DIR, "readOnly": True},
+            {"name": "secret", "mountPath": RABBITMQ_SECRET_DIR, "readOnly": True},
+        ],
+        "startupProbe": {
+            "exec": {"command": ["/bin/sh", "-ec", running_and_listener]},
+            "periodSeconds": 5,
+            "timeoutSeconds": 5,
+            "failureThreshold": 36,
+        },
+        "readinessProbe": {
+            "exec": {
+                "command": [
+                    "/bin/sh",
+                    "-ec",
+                    f"{running_and_listener} && {diagnostics} -q check_local_alarms",
+                ]
+            },
+            "periodSeconds": 5,
+            "timeoutSeconds": 5,
+            "failureThreshold": 3,
+            "successThreshold": 1,
+        },
+        "livenessProbe": {
+            "exec": {"command": ["/bin/sh", "-ec", f"{diagnostics} -q check_running"]},
+            "periodSeconds": 10,
+            "timeoutSeconds": 5,
+            "failureThreshold": 6,
+        },
+    }
+    return {
+        "apiVersion": "apps/v1",
+        "kind": "StatefulSet",
+        "metadata": metadata,
+        "spec": {
+            "serviceName": resource_name,
+            "replicas": RABBITMQ_REPLICAS,
+            "selector": {"matchLabels": selector},
+            "template": {
+                "metadata": {"labels": dict(metadata["labels"])},
+                "spec": {
+                    "automountServiceAccountToken": False,
+                    "enableServiceLinks": False,
+                    "imagePullSecrets": [{"name": RABBITMQ_IMAGE_PULL_SECRET_NAME}],
+                    "securityContext": {
+                        "runAsUser": RABBITMQ_RUN_AS_ID,
+                        "runAsGroup": RABBITMQ_RUN_AS_ID,
+                        "fsGroup": RABBITMQ_RUN_AS_ID,
+                        "fsGroupChangePolicy": "OnRootMismatch",
+                    },
+                    "terminationGracePeriodSeconds": (
+                        RABBITMQ_TERMINATION_GRACE_PERIOD_SECONDS
+                    ),
+                    "containers": [container],
+                    "volumes": [
+                        {
+                            "name": "data",
+                            "persistentVolumeClaim": {
+                                "claimName": appliance_resource_name(
+                                    appliance_name, "rabbitmq-data"
+                                )
+                            },
+                        },
+                        {"name": "runtime", "emptyDir": {}},
+                        {"name": "logs", "emptyDir": {}},
+                        {
+                            "name": "config",
+                            "configMap": {
+                                "name": appliance_resource_name(
+                                    appliance_name, "rabbitmq-config"
+                                ),
+                                "items": config_items,
+                            },
+                        },
+                        {
+                            "name": "secret",
+                            "secret": {
+                                "secretName": appliance_resource_name(
+                                    appliance_name,
+                                    "infrastructure-credentials",
+                                ),
+                                "items": [
+                                    {
+                                        "key": "rabbitmq_password",
+                                        "path": "rabbitmq_password",
+                                        "mode": 0o440,
+                                    }
+                                ],
+                            },
+                        },
+                    ],
+                },
+            },
+        },
+    }
+
+
+def classify_rabbitmq_data_pvc(
+    *,
+    existing: Any,
+    appliance_name: str,
+    namespace: str,
+    accepted_version: str,
+    settings: RabbitMQSettings,
+) -> RetainedClassification:
+    """Classify a retained RabbitMQ claim, including immutable desired fields."""
+    resource_name = appliance_resource_name(appliance_name, "rabbitmq-data")
+    classification = classify_retained_resource(
+        existing=existing,
+        resource_name=resource_name,
+        namespace=namespace,
+        appliance_name=appliance_name,
+        component="rabbitmq-data",
+        accepted_version=accepted_version,
+        retention=RABBITMQ_PVC_RETENTION_VALUE,
+    )
+    if classification is not RetainedClassification.REUSE:
+        return classification
+    if (_field(existing, "apiVersion") not in (None, "v1")) or (
+        _field(existing, "kind") not in (None, "PersistentVolumeClaim")
+    ):
+        return RetainedClassification.COLLISION
+    spec = _field(existing, "spec")
+    if spec is None:
+        return RetainedClassification.COLLISION
+    if isinstance(spec, Mapping) and set(spec) - {
+        "storageClassName",
+        "accessModes",
+        "volumeMode",
+        "resources",
+        "volumeName",
+    }:
+        return RetainedClassification.COLLISION
+    if _field(spec, "storageClassName") != settings.storage.storage_class_name:
+        return RetainedClassification.COLLISION
+    access_modes = _field(spec, "accessModes")
+    if not isinstance(access_modes, Sequence) or isinstance(access_modes, str):
+        return RetainedClassification.COLLISION
+    if list(access_modes) != [RABBITMQ_PVC_ACCESS_MODE]:
+        return RetainedClassification.COLLISION
+    if _field(spec, "volumeMode") != RABBITMQ_PVC_VOLUME_MODE:
+        return RetainedClassification.COLLISION
+    if any(
+        _field(spec, field_name) is not None
+        for field_name in (
+            "selector",
+            "dataSource",
+            "dataSourceRef",
+            "volumeAttributesClassName",
+        )
+    ):
+        return RetainedClassification.COLLISION
+    resources = _field(spec, "resources")
+    if isinstance(resources, Mapping) and set(resources) - {"requests", "limits"}:
+        return RetainedClassification.COLLISION
+    requests = _field(resources, "requests")
+    if not isinstance(requests, Mapping) or set(requests) != {"storage"}:
+        return RetainedClassification.COLLISION
+    if _positive_quantity(requests.get("storage")) != _positive_quantity(
+        settings.storage.size
+    ):
+        return RetainedClassification.COLLISION
+    limits = _field(resources, "limits")
+    if limits not in (None, {}) and (not isinstance(limits, Mapping) or bool(limits)):
+        return RetainedClassification.COLLISION
+    return RetainedClassification.REUSE
+
+
+def preflight_rabbitmq_resources(
+    *,
+    appliance_name: str,
+    namespace: str,
+    accepted_version: str,
+    settings: RabbitMQSettings,
+    owner: Mapping[str, Any],
+    rabbitmq_data_pvc: Any | None,
+    rabbitmq_config_map: Any | None,
+    rabbitmq_stateful_set: Any | None,
+) -> RabbitMQResourcePreflight:
+    """Classify RabbitMQ resources before rendering or building manifests."""
+    resources = (
+        ("rabbitmq-data", rabbitmq_data_pvc),
+        ("rabbitmq-config", rabbitmq_config_map),
+        ("rabbitmq", rabbitmq_stateful_set),
+    )
+    classifications: dict[str, RetainedClassification | OwnedClassification] = {}
+    for component, existing in resources:
+        resource_name = appliance_resource_name(appliance_name, component)
+        if component == "rabbitmq-data":
+            classification: RetainedClassification | OwnedClassification = (
+                classify_rabbitmq_data_pvc(
+                    existing=existing,
+                    appliance_name=appliance_name,
+                    namespace=namespace,
+                    accepted_version=accepted_version,
+                    settings=settings,
+                )
+            )
+        else:
+            classification = classify_owned_resource(
+                existing=existing,
+                resource_name=resource_name,
+                namespace=namespace,
+                appliance_name=appliance_name,
+                component=component,
+                accepted_version=accepted_version,
+                owner=owner,
+            )
+        classifications[resource_name] = classification
+        if classification.value == "collision":
+            return RabbitMQResourcePreflight(classifications, ())
+    config_values = render_rabbitmq_config()
+    return RabbitMQResourcePreflight(
+        classifications,
+        (
+            build_rabbitmq_data_pvc(
+                appliance_name=appliance_name,
+                namespace=namespace,
+                accepted_version=accepted_version,
+                settings=settings,
+            ),
+            build_rabbitmq_config_map(
+                appliance_name=appliance_name,
+                namespace=namespace,
+                accepted_version=accepted_version,
+                owner=owner,
+                values=config_values,
+            ),
+            build_rabbitmq_stateful_set(
                 appliance_name=appliance_name,
                 namespace=namespace,
                 accepted_version=accepted_version,
