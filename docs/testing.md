@@ -2,15 +2,15 @@
 
 Validate the work relevant to each change.
 
-## :material-book-open-page-variant-outline: Current Foundational And Service Validation
+## :material-book-open-page-variant-outline: Current MariaDB Reconciliation Validation
 
 - The foundational gate is committed locally at `862777d`, with status commit `f219977`; both are unpushed and undeployed.
-- Validation passed: `uv run pytest tests/unit` (252 passed); Ruff lint; Ruff format check (35 files already formatted); mypy; Helm lint/template; and `git diff --check`.
-- Coverage includes the marker-plus-four foundational gate and the current Service slice: the existing read prefix, then RabbitMQ `5672`, Memcached `11211`, MariaDB `3306`, and Keystone `5000` Service pre-reads in order; only `404` absent; all reads/classification/preflight/rendering/manifest construction before writes; guarded SSA for managed Services; foundational writes, then Services in frozen order, marker last; no rollback; sanitized retry failures; stable `ResourceCollision`; and `Ready=False/RuntimeNotImplemented`.
+- Validation passed: `uv run pytest tests/unit` (316 passed); Ruff lint/format; mypy; Helm lint/template; and `git diff --check`.
+- Coverage includes the marker-plus-four foundational gate and Service slice, followed by MariaDB desired-state preparation and local reconciliation integration: ordered reads; only `404` absent; all validation, classification, preflight, rendering, and manifest construction before writes; stable mutation-free `InvalidRuntimeConfiguration`; exact PVC create/no-write reuse; guarded ConfigMap, Secret, Service, and StatefulSet SSA; foundational writes, Services in frozen order, MariaDB resources, then marker last; PVC `get`/`create`; StatefulSet `get`/`create`/`patch`; no rollback; sanitized retry failures; stable `ResourceCollision`; and `Ready=False/RuntimeNotImplemented`.
 
-The four-Service slice is committed locally at `797235b` on `dev`, unpushed and undeployed. No workloads, endpoints, Ingress resources, Jobs, storage, bootstrap, probes/readiness, rotation, additional Services, or deployment was added; deployed `0.5.3` remains marker-only.
+The four-Service slice is committed locally at `797235b` on `dev`, unpushed and undeployed. MariaDB pure desired-state preparation is committed locally at `5a2dfce`, unpushed and undeployed; its reconciliation integration is local, unpushed, and undeployed. Target-storage validation is next. Production backup/restore, HA, and RPO/RTO remain open; deployed `0.5.3` remains marker-only.
 
-The next stage is dependency workload/bootstrap/storage/readiness design and implementation. Barbican and all other Services remain deferred; no Ingress route is emitted before its backend Service exists.
+Barbican and all other Services remain deferred; no Ingress route is emitted before its backend Service exists.
 
 For the controller skeleton, these local validations have passed:
 

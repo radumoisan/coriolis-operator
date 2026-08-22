@@ -59,10 +59,14 @@ RUNTIME_NOT_IMPLEMENTED_MESSAGE = "The appliance runtime is not implemented yet.
 NOT_DEGRADED_MESSAGE = "The appliance is not degraded."
 NOT_RECONCILED_MESSAGE = "No resources were applied to Kubernetes."
 RECONCILED_MESSAGE = (
-    "The foundational appliance resources, dependency Services, and controller state "
-    "marker were reconciled in Kubernetes; runtime readiness is not implemented yet."
+    "The foundational appliance resources, dependency Services, MariaDB resources, "
+    "and controller state marker were reconciled in Kubernetes; runtime readiness is "
+    "not implemented yet."
 )
 UPGRADE_NOT_SUPPORTED_MESSAGE = "The core profile has no supported upgrade path."
+INVALID_RUNTIME_CONFIGURATION_MESSAGE = (
+    "Complete valid MariaDB storage and resource configuration is required."
+)
 RESOURCE_COLLISION_MESSAGE = (
     "The existing resource '{namespace}/{name}' conflicts with operator-managed "
     "identity and was not modified."
@@ -174,7 +178,7 @@ class MariaDBResourcePreflight:
     """Pure preflight outcome and apply-ordered MariaDB resource bodies."""
 
     classifications: Mapping[str, RetainedClassification | OwnedClassification]
-    manifests: tuple[Mapping[str, Any], ...] = field(repr=False)
+    manifests: tuple[dict[str, Any], ...] = field(repr=False)
 
 
 def state_config_map_name(resource_name: str) -> str:
@@ -1356,6 +1360,29 @@ def collision_conditions(namespace: str, name: str) -> list[Condition]:
         ("Reconciled", "False", "ResourceCollision", message),
         ("Ready", "False", "RuntimeNotImplemented", RUNTIME_NOT_IMPLEMENTED_MESSAGE),
         ("Degraded", "True", "ResourceCollision", message),
+        (
+            "Upgradeable",
+            "False",
+            "UpgradeNotSupported",
+            UPGRADE_NOT_SUPPORTED_MESSAGE,
+        ),
+    ]
+
+
+def invalid_runtime_configuration_conditions() -> list[Condition]:
+    """Return stable conditions for incomplete or invalid runtime configuration."""
+    reason = "InvalidRuntimeConfiguration"
+    return [
+        (
+            "Accepted",
+            "True",
+            "Accepted",
+            "The requested profile and version are supported.",
+        ),
+        ("Progressing", "False", reason, INVALID_RUNTIME_CONFIGURATION_MESSAGE),
+        ("Reconciled", "False", reason, INVALID_RUNTIME_CONFIGURATION_MESSAGE),
+        ("Ready", "False", "RuntimeNotImplemented", RUNTIME_NOT_IMPLEMENTED_MESSAGE),
+        ("Degraded", "True", reason, INVALID_RUNTIME_CONFIGURATION_MESSAGE),
         (
             "Upgradeable",
             "False",

@@ -11,6 +11,10 @@ from kubernetes import client
 
 from coriolis_operator import main
 from coriolis_operator.main import reconcile_appliance
+from coriolis_operator.mariadb import (
+    SensitiveMariaDBCredentials,
+    resolve_mariadb_settings,
+)
 from coriolis_operator.reconcile import (
     APPLIANCE_NAME_ANNOTATION,
     CORIOLIS_CREDENTIALS_KEYS,
@@ -43,8 +47,10 @@ from coriolis_operator.reconcile import (
     collision_conditions,
     generate_coriolis_credentials,
     generate_infrastructure_credentials,
+    invalid_runtime_configuration_conditions,
     kubernetes_coriolis_render_inputs,
     preflight_foundational_resources,
+    preflight_mariadb_resources,
     rejected_conditions,
     state_config_map_name,
     validated_retained_secret_values,
@@ -85,6 +91,13 @@ CORIOLIS_CONFIG = {
     "coriolis.release": "2603.4",
 }
 CORIOLIS_CONFIG_SECRET = {"coriolis.conf": "secret config"}
+MARIADB_STORAGE = {"mariadb": {"storageClassName": "synthetic-storage", "size": "10Gi"}}
+MARIADB_RESOURCES = {
+    "mariadb": {
+        "requests": {"cpu": "250m", "memory": "512Mi"},
+        "limits": {"cpu": "1", "memory": "1Gi"},
+    }
+}
 
 
 @pytest.mark.parametrize(
@@ -211,6 +224,17 @@ def sample_meta(generation: int = 7) -> dict:
     }
 
 
+def valid_spec(*, include_profile: bool = True) -> dict:
+    spec = {
+        "version": "2603.4",
+        "storage": copy.deepcopy(MARIADB_STORAGE),
+        "resources": copy.deepcopy(MARIADB_RESOURCES),
+    }
+    if include_profile:
+        spec["profile"] = "core"
+    return spec
+
+
 def _api_exception(status: int) -> Exception:
     return client.ApiException(status=status)
 
@@ -227,7 +251,81 @@ def make_core_api(existing=None) -> MagicMock:
     api.read_namespaced_config_map.side_effect = read_config_map
     api.read_namespaced_secret.side_effect = _api_exception(404)
     api.read_namespaced_service.side_effect = _api_exception(404)
+    api.read_namespaced_persistent_volume_claim.side_effect = _api_exception(404)
     return api
+
+
+def make_apps_api(existing=None) -> MagicMock:
+    api = MagicMock()
+    api.api_client.default_headers = {}
+    if existing is None:
+        api.read_namespaced_stateful_set.side_effect = _api_exception(404)
+    else:
+        api.read_namespaced_stateful_set.return_value = existing
+    return api
+
+
+def mariadb_bodies() -> dict[str, dict]:
+    preflight = preflight_mariadb_resources(
+        appliance_name="example",
+        namespace="operators",
+        accepted_version="2603.4",
+        settings=resolve_mariadb_settings(
+            storage=MARIADB_STORAGE, resources=MARIADB_RESOURCES
+        ),
+        credentials=SensitiveMariaDBCredentials(
+            database_password="database synthetic",
+            coriolis_database_password="db synthetic",
+        ),
+        owner=OWNER,
+        mariadb_data_pvc=None,
+        mariadb_config_map=None,
+        mariadb_config_secret=None,
+        mariadb_stateful_set=None,
+    )
+    return {
+        body["metadata"]["name"]: copy.deepcopy(body) for body in preflight.manifests
+    }
+
+
+def configure_mariadb_existing(
+    core_api: MagicMock, apps_api: MagicMock, existing: dict[str, dict]
+) -> None:
+    def read_config_map(*, name: str, namespace: str) -> object:
+        assert namespace == "operators"
+        if name in existing:
+            return existing[name]
+        raise _api_exception(404)
+
+    def read_secret(*, name: str, namespace: str) -> object:
+        assert namespace == "operators"
+        if name in existing:
+            return existing[name]
+        raise _api_exception(404)
+
+    core_api.read_namespaced_config_map.side_effect = read_config_map
+    core_api.read_namespaced_secret.side_effect = read_secret
+    if "example-mariadb-data" in existing:
+        core_api.read_namespaced_persistent_volume_claim.side_effect = None
+        core_api.read_namespaced_persistent_volume_claim.return_value = existing[
+            "example-mariadb-data"
+        ]
+    if "example-mariadb" in existing:
+        apps_api.read_namespaced_stateful_set.side_effect = None
+        apps_api.read_namespaced_stateful_set.return_value = existing["example-mariadb"]
+
+
+def api_writes(api: MagicMock) -> list:
+    return [
+        item
+        for item in api.method_calls
+        if item[0].startswith(("create_namespaced", "patch_namespaced", "delete"))
+    ]
+
+
+@pytest.fixture(autouse=True)
+def stub_apps_api(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(main.client, "AppsV1Api", make_apps_api)
 
 
 def desired_body(meta=None) -> dict:
@@ -322,9 +420,10 @@ def condition(
 
 def assert_no_api_instantiation(monkeypatch: pytest.MonkeyPatch) -> None:
     def fail(*args: object, **kwargs: object) -> None:
-        raise AssertionError("CoreV1Api must not be instantiated")
+        raise AssertionError("Kubernetes API client must not be instantiated")
 
     monkeypatch.setattr(main.client, "CoreV1Api", fail)
+    monkeypatch.setattr(main.client, "AppsV1Api", fail)
 
 
 def test_state_config_map_name_is_deterministic() -> None:
@@ -1073,9 +1172,9 @@ def test_build_status_reports_accepted_api_only_slice() -> None:
                 "Reconciled",
                 "True",
                 "Reconciled",
-                "The foundational appliance resources, dependency Services, and "
-                "controller state marker were reconciled in Kubernetes; runtime "
-                "readiness is not implemented yet.",
+                "The foundational appliance resources, dependency Services, "
+                "MariaDB resources, and controller state marker were reconciled "
+                "in Kubernetes; runtime readiness is not implemented yet.",
             ),
             condition(
                 "Ready",
@@ -1177,7 +1276,7 @@ def test_reconcile_appliance_server_side_applies_state_and_returns_status() -> N
     core_api = make_core_api()
 
     status = reconcile_appliance(
-        spec={"profile": "core", "version": "2603.4"},
+        spec=valid_spec(),
         meta=sample_meta(),
         core_api=core_api,
     )
@@ -1202,6 +1301,15 @@ def test_reconcile_appliance_server_side_applies_state_and_returns_status() -> N
         call.read_namespaced_service(name="example-memcached", namespace="operators"),
         call.read_namespaced_service(name="example-mariadb", namespace="operators"),
         call.read_namespaced_service(name="example-keystone", namespace="operators"),
+        call.read_namespaced_persistent_volume_claim(
+            name="example-mariadb-data", namespace="operators"
+        ),
+        call.read_namespaced_config_map(
+            name="example-mariadb-config", namespace="operators"
+        ),
+        call.read_namespaced_secret(
+            name="example-mariadb-config-secret", namespace="operators"
+        ),
         call.create_namespaced_secret(namespace="operators", body=ANY),
         call.create_namespaced_secret(namespace="operators", body=ANY),
         call.create_namespaced_config_map(namespace="operators", body=ANY),
@@ -1210,6 +1318,9 @@ def test_reconcile_appliance_server_side_applies_state_and_returns_status() -> N
         call.create_namespaced_service(namespace="operators", body=ANY),
         call.create_namespaced_service(namespace="operators", body=ANY),
         call.create_namespaced_service(namespace="operators", body=ANY),
+        call.create_namespaced_persistent_volume_claim(namespace="operators", body=ANY),
+        call.create_namespaced_config_map(namespace="operators", body=ANY),
+        call.create_namespaced_secret(namespace="operators", body=ANY),
         call.create_namespaced_config_map(namespace="operators", body=ANY),
     ]
     assert status["observedGeneration"] == 7
@@ -1242,12 +1353,16 @@ def test_reconcile_omitted_profile_defaults_to_core() -> None:
     core_api = make_core_api()
 
     status = reconcile_appliance(
-        spec={"version": "2603.4"},
+        spec=valid_spec(include_profile=False),
         meta=sample_meta(),
         core_api=core_api,
     )
 
-    body = core_api.create_namespaced_config_map.call_args_list[1].kwargs["body"]
+    body = next(
+        item.kwargs["body"]
+        for item in core_api.create_namespaced_config_map.call_args_list
+        if item.kwargs["body"]["metadata"]["name"] == "example-operator-state"
+    )
     assert body["data"]["profile"] == SUPPORTED_PROFILE
     assert status["acceptedVersion"] == "2603.4"
 
@@ -1256,7 +1371,7 @@ def test_reconcile_treats_empty_accepted_version_as_absent() -> None:
     core_api = make_core_api()
 
     status = reconcile_appliance(
-        spec={"version": "2603.4"},
+        spec=valid_spec(include_profile=False),
         meta=sample_meta(),
         status={"acceptedVersion": "", "conditions": []},
         core_api=core_api,
@@ -1391,7 +1506,7 @@ def test_reconcile_with_accepted_version_matching_requested_applies_normally() -
     core_api = make_core_api()
 
     status = reconcile_appliance(
-        spec={"profile": "core", "version": "2603.4"},
+        spec=valid_spec(),
         meta=sample_meta(generation=8),
         status={
             "acceptedVersion": "2603.4",
@@ -1424,7 +1539,7 @@ def test_handler_updates_patch_status_and_returns_none(
     patch = MagicMock()
 
     result = main._handle_reconcile(
-        {"profile": "core", "version": "2603.4"},
+        valid_spec(),
         {"name": "example"},
         patch,
         {"conditions": []},
@@ -1432,7 +1547,7 @@ def test_handler_updates_patch_status_and_returns_none(
 
     assert result is None
     reconcile.assert_called_once_with(
-        spec={"profile": "core", "version": "2603.4"},
+        spec=valid_spec(),
         meta={"name": "example"},
         status={"conditions": []},
     )
@@ -1447,7 +1562,7 @@ def test_profile_field_handler_routes_through_reconcile(
     patch = MagicMock()
 
     result = main.update_appliance_profile(
-        spec={"profile": "core", "version": "2603.4"},
+        spec=valid_spec(),
         meta={"name": "example"},
         patch=patch,
         status={"conditions": []},
@@ -1455,7 +1570,7 @@ def test_profile_field_handler_routes_through_reconcile(
 
     assert result is None
     handled.assert_called_once_with(
-        {"profile": "core", "version": "2603.4"},
+        valid_spec(),
         {"name": "example"},
         patch,
         {"conditions": []},
@@ -1472,7 +1587,7 @@ def test_handler_patches_sanitized_status_before_retry(
 
     with pytest.raises(kopf.TemporaryError):
         main._handle_reconcile(
-            {"profile": "core", "version": "2603.4"},
+            valid_spec(),
             {
                 "name": "example",
                 "namespace": "operators",
@@ -1562,7 +1677,7 @@ def test_reconcile_matching_managed_marker_proceeds_with_unchanged_body() -> Non
     core_api = make_core_api(existing=desired_body())
 
     status = reconcile_appliance(
-        spec={"profile": "core", "version": "2603.4"},
+        spec=valid_spec(),
         meta=sample_meta(),
         core_api=core_api,
     )
@@ -1581,7 +1696,7 @@ def test_reconcile_compatible_legacy_marker_normalizes_stale_generation() -> Non
     core_api = make_core_api(existing=legacy_marker(generation="1"))
 
     status = reconcile_appliance(
-        spec={"profile": "core", "version": "2603.4"},
+        spec=valid_spec(),
         meta=sample_meta(),
         core_api=core_api,
     )
@@ -1608,7 +1723,7 @@ def test_reconcile_compatible_legacy_dotted_and_long_names_proceed(
     core_api = make_core_api(existing=legacy_marker(meta=meta, generation="1"))
 
     status = reconcile_appliance(
-        spec={"profile": "core", "version": "2603.4"},
+        spec=valid_spec(),
         meta=meta,
         core_api=core_api,
     )
@@ -1626,7 +1741,7 @@ def test_reconcile_collision_blocks_and_never_patches(mutate) -> None:
     core_api = make_core_api(existing=mutate(desired_body()))
 
     status = reconcile_appliance(
-        spec={"profile": "core", "version": "2603.4"},
+        spec=valid_spec(),
         meta=sample_meta(),
         core_api=core_api,
     )
@@ -1665,7 +1780,7 @@ def test_reconcile_collision_preserves_prior_accepted_version_and_transition() -
     ]
 
     status = reconcile_appliance(
-        spec={"profile": "core", "version": "2603.4"},
+        spec=valid_spec(),
         meta=sample_meta(generation=8),
         status={"acceptedVersion": "2603.4", "conditions": prior_conditions},
         core_api=core_api,
@@ -1684,7 +1799,7 @@ def test_reconcile_non_404_read_error_requests_sanitized_retry() -> None:
 
     with pytest.raises(main.ReconcileRetry) as excinfo:
         reconcile_appliance(
-            spec={"profile": "core", "version": "2603.4"},
+            spec=valid_spec(),
             meta=sample_meta(),
             core_api=core_api,
         )
@@ -1699,7 +1814,7 @@ def test_reconcile_generic_read_error_requests_sanitized_retry() -> None:
 
     with pytest.raises(main.ReconcileRetry) as excinfo:
         reconcile_appliance(
-            spec={"profile": "core", "version": "2603.4"},
+            spec=valid_spec(),
             meta=sample_meta(),
             core_api=core_api,
         )
@@ -1802,7 +1917,7 @@ def test_reconcile_matching_managed_v1_config_map_proceeds() -> None:
     core_api = make_core_api(existing=to_v1_config_map(desired_body()))
 
     status = reconcile_appliance(
-        spec={"profile": "core", "version": "2603.4"},
+        spec=valid_spec(),
         meta=sample_meta(),
         core_api=core_api,
     )
@@ -1815,7 +1930,7 @@ def test_reconcile_compatible_legacy_v1_config_map_normalizes_generation() -> No
     core_api = make_core_api(existing=to_v1_legacy_marker(generation="1"))
 
     status = reconcile_appliance(
-        spec={"profile": "core", "version": "2603.4"},
+        spec=valid_spec(),
         meta=sample_meta(),
         core_api=core_api,
     )
@@ -1832,7 +1947,7 @@ def test_reconcile_retention_annotation_collides_and_skips_ssa() -> None:
     core_api = make_core_api(existing=existing)
 
     status = reconcile_appliance(
-        spec={"profile": "core", "version": "2603.4"},
+        spec=valid_spec(),
         meta=sample_meta(),
         core_api=core_api,
     )
@@ -2361,11 +2476,10 @@ def test_foundational_gate_reuses_retained_secrets_without_writing_them() -> Non
             values=INFRASTRUCTURE_CREDENTIALS,
         ),
         _api_exception(404),
+        _api_exception(404),
     ]
 
-    reconcile_appliance(
-        spec={"profile": "core", "version": "2603.4"}, meta=sample_meta(), core_api=api
-    )
+    reconcile_appliance(spec=valid_spec(), meta=sample_meta(), core_api=api)
 
     created_secret_names = [
         call.kwargs["body"]["metadata"]["name"]
@@ -2374,9 +2488,16 @@ def test_foundational_gate_reuses_retained_secrets_without_writing_them() -> Non
     patched_secret_names = [
         call.kwargs["name"] for call in api.patch_namespaced_secret.call_args_list
     ]
-    assert created_secret_names == ["example-coriolis-config-secret"]
+    assert created_secret_names == [
+        "example-coriolis-config-secret",
+        "example-mariadb-config-secret",
+    ]
     assert patched_secret_names == []
-    config_secret = api.create_namespaced_secret.call_args.kwargs["body"]
+    config_secret = next(
+        item.kwargs["body"]
+        for item in api.create_namespaced_secret.call_args_list
+        if item.kwargs["body"]["metadata"]["name"] == "example-coriolis-config-secret"
+    )
     rendered = base64.b64decode(config_secret["data"]["coriolis.conf"]).decode()
     assert CORIOLIS_CREDENTIALS["coriolis_database_password"] in rendered
     assert INFRASTRUCTURE_CREDENTIALS["rabbitmq_password"] in rendered
@@ -2396,13 +2517,12 @@ def test_foundational_gate_collision_has_no_writes_after_complete_reads() -> Non
         collided,
         _api_exception(404),
         _api_exception(404),
+        _api_exception(404),
     ]
 
-    status = reconcile_appliance(
-        spec={"profile": "core", "version": "2603.4"}, meta=sample_meta(), core_api=api
-    )
+    status = reconcile_appliance(spec=valid_spec(), meta=sample_meta(), core_api=api)
 
-    assert api.read_namespaced_secret.call_count == 3
+    assert api.read_namespaced_secret.call_count == 4
     assert api.create_namespaced_secret.call_count == 0
     assert api.create_namespaced_config_map.call_count == 0
     assert {item["reason"] for item in status["conditions"]} >= {"ResourceCollision"}
@@ -2420,7 +2540,7 @@ def test_create_absence_and_already_exists_have_distinct_outcomes(
 
     if status_code == 404:
         status = reconcile_appliance(
-            spec={"profile": "core", "version": "2603.4"},
+            spec=valid_spec(),
             meta=sample_meta(),
             core_api=api,
         )
@@ -2428,7 +2548,7 @@ def test_create_absence_and_already_exists_have_distinct_outcomes(
     else:
         with pytest.raises(main.ReconcileRetry) as excinfo:
             reconcile_appliance(
-                spec={"profile": "core", "version": "2603.4"},
+                spec=valid_spec(),
                 meta=sample_meta(),
                 core_api=api,
             )
@@ -2440,12 +2560,14 @@ def test_managed_resources_use_resource_version_and_marker_is_last() -> None:
     api = make_core_api(existing=desired_body())
     managed_config = owned_body()
     managed_config["metadata"]["resourceVersion"] = "17"
-    api.read_namespaced_config_map.side_effect = [desired_body(), managed_config]
-    api.read_namespaced_secret.side_effect = [_api_exception(404)] * 3
+    api.read_namespaced_config_map.side_effect = [
+        desired_body(),
+        managed_config,
+        _api_exception(404),
+    ]
+    api.read_namespaced_secret.side_effect = [_api_exception(404)] * 4
 
-    reconcile_appliance(
-        spec={"profile": "core", "version": "2603.4"}, meta=sample_meta(), core_api=api
-    )
+    reconcile_appliance(spec=valid_spec(), meta=sample_meta(), core_api=api)
 
     config_apply = api.patch_namespaced_config_map.call_args_list[0].kwargs
     marker_apply = api.patch_namespaced_config_map.call_args_list[1].kwargs
@@ -2458,20 +2580,20 @@ def test_managed_resources_use_resource_version_and_marker_is_last() -> None:
 
 def test_apply_conflict_keeps_prior_writes_and_preserves_accepted_version() -> None:
     api = make_core_api(existing=desired_body())
-    api.read_namespaced_secret.side_effect = [_api_exception(404)] * 3
+    api.read_namespaced_secret.side_effect = [_api_exception(404)] * 4
     api.patch_namespaced_config_map.side_effect = client.ApiException(
         status=409, reason="rendered-secret-must-not-leak"
     )
 
     with pytest.raises(main.ReconcileRetry) as excinfo:
         reconcile_appliance(
-            spec={"profile": "core", "version": "2603.4"},
+            spec=valid_spec(),
             meta=sample_meta(),
             status={"acceptedVersion": "2603.4", "conditions": []},
             core_api=api,
         )
 
-    assert api.create_namespaced_secret.call_count == 3
+    assert api.create_namespaced_secret.call_count == 4
     assert excinfo.value.status["acceptedVersion"] == "2603.4"
     assert excinfo.value.status["conditions"][2]["reason"] == "MarkerApplyFailed"
     assert "rendered-secret-must-not-leak" not in repr(excinfo.value.status)
@@ -2485,7 +2607,7 @@ def test_initial_retry_does_not_establish_accepted_version() -> None:
 
     with pytest.raises(main.ReconcileRetry) as excinfo:
         reconcile_appliance(
-            spec={"profile": "core", "version": "2603.4"},
+            spec=valid_spec(),
             meta=sample_meta(),
             core_api=api,
         )
@@ -2497,14 +2619,18 @@ def test_existing_managed_resource_without_resource_version_retries_before_write
     None
 ):
     api = make_core_api(existing=desired_body())
-    api.read_namespaced_secret.side_effect = [_api_exception(404)] * 3
+    api.read_namespaced_secret.side_effect = [_api_exception(404)] * 4
     marker = desired_body()
     marker["metadata"].pop("resourceVersion")
-    api.read_namespaced_config_map.side_effect = [marker, _api_exception(404)]
+    api.read_namespaced_config_map.side_effect = [
+        marker,
+        _api_exception(404),
+        _api_exception(404),
+    ]
 
     with pytest.raises(main.ReconcileRetry) as excinfo:
         reconcile_appliance(
-            spec={"profile": "core", "version": "2603.4"},
+            spec=valid_spec(),
             meta=sample_meta(),
             core_api=api,
         )
@@ -2519,8 +2645,12 @@ def test_apply_header_is_removed_before_later_create() -> None:
     api = make_core_api()
     managed_config = owned_body()
     managed_config["metadata"]["resourceVersion"] = "17"
-    api.read_namespaced_config_map.side_effect = [_api_exception(404), managed_config]
-    api.read_namespaced_secret.side_effect = [_api_exception(404)] * 3
+    api.read_namespaced_config_map.side_effect = [
+        _api_exception(404),
+        managed_config,
+        _api_exception(404),
+    ]
+    api.read_namespaced_secret.side_effect = [_api_exception(404)] * 4
 
     def create_secret(*, namespace: str, body: dict) -> None:
         if body["metadata"]["name"] == "example-coriolis-config-secret":
@@ -2528,22 +2658,20 @@ def test_apply_header_is_removed_before_later_create() -> None:
 
     api.create_namespaced_secret.side_effect = create_secret
 
-    reconcile_appliance(
-        spec={"profile": "core", "version": "2603.4"}, meta=sample_meta(), core_api=api
-    )
+    reconcile_appliance(spec=valid_spec(), meta=sample_meta(), core_api=api)
 
     assert "Content-Type" not in api.api_client.default_headers
 
 
 def test_apply_header_is_restored_after_patch_failure() -> None:
     api = make_core_api(existing=desired_body())
-    api.read_namespaced_secret.side_effect = [_api_exception(404)] * 3
+    api.read_namespaced_secret.side_effect = [_api_exception(404)] * 4
     api.patch_namespaced_config_map.side_effect = client.ApiException(status=409)
     api.api_client.default_headers["Content-Type"] = "application/json"
 
     with pytest.raises(main.ReconcileRetry):
         reconcile_appliance(
-            spec={"profile": "core", "version": "2603.4"},
+            spec=valid_spec(),
             meta=sample_meta(),
             core_api=api,
         )
@@ -2557,7 +2685,7 @@ def test_retry_status_has_the_frozen_condition_contract() -> None:
 
     with pytest.raises(main.ReconcileRetry) as excinfo:
         reconcile_appliance(
-            spec={"profile": "core", "version": "2603.4"},
+            spec=valid_spec(),
             meta=sample_meta(),
             core_api=api,
         )
@@ -2589,11 +2717,10 @@ def test_foundational_collision_message_is_generic_and_value_safe() -> None:
         collided,
         _api_exception(404),
         _api_exception(404),
+        _api_exception(404),
     ]
 
-    status = reconcile_appliance(
-        spec={"profile": "core", "version": "2603.4"}, meta=sample_meta(), core_api=api
-    )
+    status = reconcile_appliance(spec=valid_spec(), meta=sample_meta(), core_api=api)
 
     message = status["conditions"][1]["message"]
     assert message == (
@@ -2608,13 +2735,17 @@ def test_foundational_managed_apply_conflict_stops_later_writes_and_marker() -> 
     api = make_core_api()
     managed_config = owned_body()
     managed_config["metadata"]["resourceVersion"] = "17"
-    api.read_namespaced_config_map.side_effect = [_api_exception(404), managed_config]
-    api.read_namespaced_secret.side_effect = [_api_exception(404)] * 3
+    api.read_namespaced_config_map.side_effect = [
+        _api_exception(404),
+        managed_config,
+        _api_exception(404),
+    ]
+    api.read_namespaced_secret.side_effect = [_api_exception(404)] * 4
     api.patch_namespaced_config_map.side_effect = client.ApiException(status=409)
 
     with pytest.raises(main.ReconcileRetry) as excinfo:
         reconcile_appliance(
-            spec={"profile": "core", "version": "2603.4"},
+            spec=valid_spec(),
             meta=sample_meta(),
             core_api=api,
         )
@@ -2645,7 +2776,7 @@ def test_non_404_at_each_foundational_read_position_prevents_writes(
 
     with pytest.raises(main.ReconcileRetry) as excinfo:
         reconcile_appliance(
-            spec={"profile": "core", "version": "2603.4"},
+            spec=valid_spec(),
             meta=sample_meta(),
             core_api=api,
         )
@@ -2681,7 +2812,7 @@ def test_preparation_failures_are_sanitized_and_prevent_writes(
 
     with pytest.raises(main.ReconcileRetry) as excinfo:
         reconcile_appliance(
-            spec={"profile": "core", "version": "2603.4"},
+            spec=valid_spec(),
             meta=sample_meta(),
             core_api=api,
         )
@@ -2707,7 +2838,7 @@ def test_credential_generation_failure_is_sanitized_before_writes(
 
     with pytest.raises(main.ReconcileRetry) as excinfo:
         reconcile_appliance(
-            spec={"profile": "core", "version": "2603.4"},
+            spec=valid_spec(),
             meta=sample_meta(),
             core_api=api,
         )
@@ -2728,9 +2859,7 @@ def test_core_api_construction_failure_patches_sanitized_status_before_retry(
     patch = MagicMock()
 
     with pytest.raises(kopf.TemporaryError):
-        main._handle_reconcile(
-            {"profile": "core", "version": "2603.4"}, sample_meta(), patch
-        )
+        main._handle_reconcile(valid_spec(), sample_meta(), patch)
 
     reconciled = patch.status.update.call_args.args[0]
     assert reconciled["conditions"][2]["reason"] == "ResourceReadFailed"
@@ -2756,7 +2885,7 @@ def test_dependency_services_read_and_create_in_order() -> None:
     api = make_core_api()
 
     reconcile_appliance(
-        spec={"profile": "core", "version": "2603.4"},
+        spec=valid_spec(),
         meta=sample_meta(),
         core_api=api,
     )
@@ -2797,7 +2926,7 @@ def test_managed_dependency_services_use_guarded_ssa_and_restore_content_type() 
     api.patch_namespaced_service.side_effect = patch_service
 
     reconcile_appliance(
-        spec={"profile": "core", "version": "2603.4"},
+        spec=valid_spec(),
         meta=sample_meta(),
         core_api=api,
     )
@@ -2826,7 +2955,7 @@ def test_dependency_service_collision_has_no_writes_after_all_service_reads() ->
     ]
 
     status = reconcile_appliance(
-        spec={"profile": "core", "version": "2603.4"},
+        spec=valid_spec(),
         meta=sample_meta(),
         core_api=api,
     )
@@ -2853,7 +2982,7 @@ def test_dependency_service_read_error_and_missing_version_retry() -> None:
     for api in (read_error_api, missing_version_api):
         with pytest.raises(main.ReconcileRetry) as excinfo:
             reconcile_appliance(
-                spec={"profile": "core", "version": "2603.4"},
+                spec=valid_spec(),
                 meta=sample_meta(),
                 core_api=api,
             )
@@ -2889,7 +3018,7 @@ def test_dependency_service_apply_failure_prevents_marker_write(operation: str) 
 
     with pytest.raises(main.ReconcileRetry) as excinfo:
         reconcile_appliance(
-            spec={"profile": "core", "version": "2603.4"},
+            spec=valid_spec(),
             meta=sample_meta(),
             core_api=api,
         )
@@ -2915,3 +3044,438 @@ def test_dependency_service_apply_failure_prevents_marker_write(operation: str) 
     assert api.create_namespaced_secret.call_count == 3
     api.patch_namespaced_config_map.assert_not_called()
     assert not [method for method in api.method_calls if method[0].startswith("delete")]
+
+
+def test_invalid_runtime_configuration_conditions_are_stable() -> None:
+    assert [
+        (condition_type, status, reason)
+        for condition_type, status, reason, _ in (
+            invalid_runtime_configuration_conditions()
+        )
+    ] == [
+        ("Accepted", "True", "Accepted"),
+        ("Progressing", "False", "InvalidRuntimeConfiguration"),
+        ("Reconciled", "False", "InvalidRuntimeConfiguration"),
+        ("Ready", "False", "RuntimeNotImplemented"),
+        ("Degraded", "True", "InvalidRuntimeConfiguration"),
+        ("Upgradeable", "False", "UpgradeNotSupported"),
+    ]
+    messages = {
+        message
+        for _, _, reason, message in invalid_runtime_configuration_conditions()
+        if reason == "InvalidRuntimeConfiguration"
+    }
+    assert messages == {
+        "Complete valid MariaDB storage and resource configuration is required."
+    }
+
+
+@pytest.mark.parametrize(
+    "spec",
+    [
+        {"profile": "core", "version": "2603.4"},
+        {
+            "profile": "core",
+            "version": "2603.4",
+            "storage": MARIADB_STORAGE,
+        },
+        {
+            "profile": "core",
+            "version": "2603.4",
+            "storage": MARIADB_STORAGE,
+            "resources": {
+                "mariadb": {
+                    "requests": {"cpu": "2", "memory": "512Mi"},
+                    "limits": {"cpu": "1", "memory": "1Gi"},
+                }
+            },
+        },
+    ],
+)
+def test_invalid_mariadb_configuration_is_stable_without_api_access(
+    monkeypatch: pytest.MonkeyPatch, spec: dict
+) -> None:
+    assert_no_api_instantiation(monkeypatch)
+
+    status = reconcile_appliance(spec=spec, meta=sample_meta())
+
+    assert "acceptedVersion" not in status
+    assert status["observedGeneration"] == 7
+    assert status["conditions"][2]["reason"] == "InvalidRuntimeConfiguration"
+    assert status["conditions"][2]["message"] == (
+        "Complete valid MariaDB storage and resource configuration is required."
+    )
+
+
+def test_invalid_mariadb_configuration_preserves_accepted_version(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    assert_no_api_instantiation(monkeypatch)
+
+    status = reconcile_appliance(
+        spec={"profile": "core", "version": "2603.4"},
+        meta=sample_meta(generation=8),
+        status={"acceptedVersion": "2603.4", "conditions": []},
+    )
+
+    assert status["acceptedVersion"] == "2603.4"
+    assert status["observedGeneration"] == 8
+    assert status["conditions"][2]["reason"] == "InvalidRuntimeConfiguration"
+
+
+def test_mariadb_reads_and_writes_follow_the_frozen_cross_api_order() -> None:
+    core_api = make_core_api()
+    apps_api = make_apps_api()
+    events: list[tuple[str, str, str]] = []
+
+    def absent_read(resource: str):
+        def read(*, name: str, namespace: str) -> object:
+            assert namespace == "operators"
+            events.append(("read", resource, name))
+            raise _api_exception(404)
+
+        return read
+
+    def successful_create(resource: str):
+        def create(*, namespace: str, body: dict) -> None:
+            assert namespace == "operators"
+            events.append(("write", resource, body["metadata"]["name"]))
+
+        return create
+
+    core_api.read_namespaced_config_map.side_effect = absent_read("configmap")
+    core_api.read_namespaced_secret.side_effect = absent_read("secret")
+    core_api.read_namespaced_service.side_effect = absent_read("service")
+    core_api.read_namespaced_persistent_volume_claim.side_effect = absent_read("pvc")
+    apps_api.read_namespaced_stateful_set.side_effect = absent_read("statefulset")
+    core_api.create_namespaced_config_map.side_effect = successful_create("configmap")
+    core_api.create_namespaced_secret.side_effect = successful_create("secret")
+    core_api.create_namespaced_service.side_effect = successful_create("service")
+    core_api.create_namespaced_persistent_volume_claim.side_effect = successful_create(
+        "pvc"
+    )
+    apps_api.create_namespaced_stateful_set.side_effect = successful_create(
+        "statefulset"
+    )
+
+    status = reconcile_appliance(
+        spec=valid_spec(),
+        meta=sample_meta(),
+        core_api=core_api,
+        apps_api=apps_api,
+    )
+
+    assert [event for event in events if event[0] == "read"] == [
+        ("read", "configmap", "example-operator-state"),
+        ("read", "secret", "example-coriolis-credentials"),
+        ("read", "secret", "example-infrastructure-credentials"),
+        ("read", "configmap", "example-coriolis-config"),
+        ("read", "secret", "example-coriolis-config-secret"),
+        ("read", "service", "example-rabbitmq"),
+        ("read", "service", "example-memcached"),
+        ("read", "service", "example-mariadb"),
+        ("read", "service", "example-keystone"),
+        ("read", "pvc", "example-mariadb-data"),
+        ("read", "configmap", "example-mariadb-config"),
+        ("read", "secret", "example-mariadb-config-secret"),
+        ("read", "statefulset", "example-mariadb"),
+    ]
+    assert [event for event in events if event[0] == "write"] == [
+        ("write", "secret", "example-coriolis-credentials"),
+        ("write", "secret", "example-infrastructure-credentials"),
+        ("write", "configmap", "example-coriolis-config"),
+        ("write", "secret", "example-coriolis-config-secret"),
+        ("write", "service", "example-rabbitmq"),
+        ("write", "service", "example-memcached"),
+        ("write", "service", "example-mariadb"),
+        ("write", "service", "example-keystone"),
+        ("write", "pvc", "example-mariadb-data"),
+        ("write", "configmap", "example-mariadb-config"),
+        ("write", "secret", "example-mariadb-config-secret"),
+        ("write", "statefulset", "example-mariadb"),
+        ("write", "configmap", "example-operator-state"),
+    ]
+    assert status["acceptedVersion"] == "2603.4"
+    assert status["conditions"][2]["reason"] == "Reconciled"
+    assert status["conditions"][3]["reason"] == "RuntimeNotImplemented"
+
+
+@pytest.mark.parametrize(
+    "resource_name",
+    [
+        "example-mariadb-data",
+        "example-mariadb-config",
+        "example-mariadb-config-secret",
+        "example-mariadb",
+    ],
+)
+def test_mariadb_collision_at_each_position_is_mutation_free(
+    resource_name: str,
+) -> None:
+    core_api = make_core_api()
+    apps_api = make_apps_api()
+    collided = mariadb_bodies()[resource_name]
+    collided["metadata"]["labels"]["app.kubernetes.io/managed-by"] = "other"
+    configure_mariadb_existing(core_api, apps_api, {resource_name: collided})
+
+    status = reconcile_appliance(
+        spec=valid_spec(),
+        meta=sample_meta(),
+        core_api=core_api,
+        apps_api=apps_api,
+    )
+
+    assert status["conditions"][2]["reason"] == "ResourceCollision"
+    assert f"operators/{resource_name}" in status["conditions"][2]["message"]
+    assert api_writes(core_api) == []
+    assert api_writes(apps_api) == []
+
+
+def test_mariadb_reuses_pvc_without_write_and_guarded_applies_managed_resources() -> (
+    None
+):
+    core_api = make_core_api()
+    apps_api = make_apps_api()
+    existing = mariadb_bodies()
+    for resource_name in (
+        "example-mariadb-config",
+        "example-mariadb-config-secret",
+        "example-mariadb",
+    ):
+        existing[resource_name]["metadata"]["resourceVersion"] = "17"
+    configure_mariadb_existing(core_api, apps_api, existing)
+    core_api.api_client.default_headers["Content-Type"] = "application/json"
+    apps_api.api_client.default_headers["Content-Type"] = "application/json"
+
+    reconcile_appliance(
+        spec=valid_spec(),
+        meta=sample_meta(),
+        core_api=core_api,
+        apps_api=apps_api,
+    )
+
+    core_api.create_namespaced_persistent_volume_claim.assert_not_called()
+    core_api.patch_namespaced_persistent_volume_claim.assert_not_called()
+    config_apply = core_api.patch_namespaced_config_map.call_args.kwargs
+    secret_apply = core_api.patch_namespaced_secret.call_args.kwargs
+    stateful_set_apply = apps_api.patch_namespaced_stateful_set.call_args.kwargs
+    assert config_apply["name"] == "example-mariadb-config"
+    assert secret_apply["name"] == "example-mariadb-config-secret"
+    assert stateful_set_apply["name"] == "example-mariadb"
+    for applied in (config_apply, secret_apply, stateful_set_apply):
+        assert applied["body"]["metadata"]["resourceVersion"] == "17"
+        assert applied["field_manager"] == "coriolis-operator"
+        assert applied["force"] is True
+    assert core_api.api_client.default_headers["Content-Type"] == "application/json"
+    assert apps_api.api_client.default_headers["Content-Type"] == "application/json"
+    marker = core_api.create_namespaced_config_map.call_args.kwargs["body"]
+    assert marker["metadata"]["name"] == "example-operator-state"
+
+
+@pytest.mark.parametrize(
+    "resource_name",
+    [
+        "example-mariadb-data",
+        "example-mariadb-config",
+        "example-mariadb-config-secret",
+        "example-mariadb",
+    ],
+)
+def test_non_404_at_each_mariadb_read_position_prevents_writes(
+    resource_name: str,
+) -> None:
+    core_api = make_core_api()
+    apps_api = make_apps_api()
+
+    def fail_target(*, name: str, namespace: str) -> object:
+        assert namespace == "operators"
+        if name == resource_name:
+            raise client.ApiException(status=403, reason="read-value-sentinel")
+        raise _api_exception(404)
+
+    if resource_name == "example-mariadb-data":
+        core_api.read_namespaced_persistent_volume_claim.side_effect = fail_target
+    elif resource_name == "example-mariadb-config":
+        core_api.read_namespaced_config_map.side_effect = fail_target
+    elif resource_name == "example-mariadb-config-secret":
+        core_api.read_namespaced_secret.side_effect = fail_target
+    else:
+        apps_api.read_namespaced_stateful_set.side_effect = fail_target
+
+    with pytest.raises(main.ReconcileRetry) as excinfo:
+        reconcile_appliance(
+            spec=valid_spec(),
+            meta=sample_meta(),
+            core_api=core_api,
+            apps_api=apps_api,
+        )
+
+    assert excinfo.value.status["conditions"][2]["reason"] == "ResourceReadFailed"
+    assert "read-value-sentinel" not in repr(excinfo.value.status)
+    assert api_writes(core_api) == []
+    assert api_writes(apps_api) == []
+
+
+@pytest.mark.parametrize(
+    "resource_name",
+    [
+        "example-mariadb-config",
+        "example-mariadb-config-secret",
+        "example-mariadb",
+    ],
+)
+def test_managed_mariadb_resource_without_version_retries_before_writes(
+    resource_name: str,
+) -> None:
+    core_api = make_core_api()
+    apps_api = make_apps_api()
+    existing = {resource_name: mariadb_bodies()[resource_name]}
+    configure_mariadb_existing(core_api, apps_api, existing)
+
+    with pytest.raises(main.ReconcileRetry) as excinfo:
+        reconcile_appliance(
+            spec=valid_spec(),
+            meta=sample_meta(),
+            core_api=core_api,
+            apps_api=apps_api,
+        )
+
+    assert excinfo.value.status["conditions"][2]["reason"] == "ResourceApplyFailed"
+    assert api_writes(core_api) == []
+    assert api_writes(apps_api) == []
+
+
+@pytest.mark.parametrize(
+    "resource_name",
+    [
+        "example-mariadb-data",
+        "example-mariadb-config",
+        "example-mariadb-config-secret",
+        "example-mariadb",
+    ],
+)
+def test_mariadb_create_failure_stops_later_writes_and_marker(
+    resource_name: str,
+) -> None:
+    core_api = make_core_api()
+    apps_api = make_apps_api()
+
+    def fail_target(*, namespace: str, body: dict) -> None:
+        assert namespace == "operators"
+        if body["metadata"]["name"] == resource_name:
+            raise client.ApiException(status=409, reason="apply-value-sentinel")
+
+    if resource_name == "example-mariadb-data":
+        core_api.create_namespaced_persistent_volume_claim.side_effect = fail_target
+    elif resource_name == "example-mariadb-config":
+        core_api.create_namespaced_config_map.side_effect = fail_target
+    elif resource_name == "example-mariadb-config-secret":
+        core_api.create_namespaced_secret.side_effect = fail_target
+    else:
+        apps_api.create_namespaced_stateful_set.side_effect = fail_target
+
+    with pytest.raises(main.ReconcileRetry) as excinfo:
+        reconcile_appliance(
+            spec=valid_spec(),
+            meta=sample_meta(),
+            core_api=core_api,
+            apps_api=apps_api,
+        )
+
+    assert excinfo.value.status["conditions"][2]["reason"] == "ResourceApplyFailed"
+    assert "apply-value-sentinel" not in repr(excinfo.value.status)
+    created_config_maps = [
+        item.kwargs["body"]["metadata"]["name"]
+        for item in core_api.create_namespaced_config_map.call_args_list
+    ]
+    assert "example-operator-state" not in created_config_maps
+    assert not [item for item in api_writes(core_api) if item[0].startswith("delete")]
+    assert not [item for item in api_writes(apps_api) if item[0].startswith("delete")]
+
+
+@pytest.mark.parametrize(
+    "resource_name",
+    [
+        "example-mariadb-config",
+        "example-mariadb-config-secret",
+        "example-mariadb",
+    ],
+)
+def test_mariadb_patch_failure_preserves_accepted_version_and_skips_marker(
+    resource_name: str,
+) -> None:
+    core_api = make_core_api()
+    apps_api = make_apps_api()
+    existing = mariadb_bodies()
+    for name in (
+        "example-mariadb-config",
+        "example-mariadb-config-secret",
+        "example-mariadb",
+    ):
+        existing[name]["metadata"]["resourceVersion"] = "17"
+    configure_mariadb_existing(core_api, apps_api, existing)
+    failure = client.ApiException(status=409, reason="patch-value-sentinel")
+    if resource_name == "example-mariadb-config":
+        core_api.patch_namespaced_config_map.side_effect = failure
+    elif resource_name == "example-mariadb-config-secret":
+        core_api.patch_namespaced_secret.side_effect = failure
+    else:
+        apps_api.patch_namespaced_stateful_set.side_effect = failure
+
+    with pytest.raises(main.ReconcileRetry) as excinfo:
+        reconcile_appliance(
+            spec=valid_spec(),
+            meta=sample_meta(),
+            status={"acceptedVersion": "2603.4", "conditions": []},
+            core_api=core_api,
+            apps_api=apps_api,
+        )
+
+    assert excinfo.value.status["acceptedVersion"] == "2603.4"
+    assert excinfo.value.status["conditions"][2]["reason"] == "ResourceApplyFailed"
+    assert "patch-value-sentinel" not in repr(excinfo.value.status)
+    created_config_maps = [
+        item.kwargs["body"]["metadata"]["name"]
+        for item in core_api.create_namespaced_config_map.call_args_list
+    ]
+    assert "example-operator-state" not in created_config_maps
+
+
+@pytest.mark.parametrize(
+    "handler",
+    [main.update_appliance_storage, main.update_appliance_resources],
+)
+def test_mariadb_spec_field_handlers_route_through_reconcile(
+    monkeypatch: pytest.MonkeyPatch, handler
+) -> None:
+    handled = MagicMock()
+    monkeypatch.setattr(main, "_handle_reconcile", handled)
+    patch = MagicMock()
+    spec = valid_spec()
+    status = {"acceptedVersion": "2603.4", "conditions": []}
+
+    result = handler(spec=spec, meta=sample_meta(), patch=patch, status=status)
+
+    assert result is None
+    handled.assert_called_once_with(spec, sample_meta(), patch, status)
+
+
+def test_apps_api_construction_failure_patches_sanitized_status_before_retry(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    core_api = make_core_api()
+
+    def fail() -> object:
+        raise RuntimeError("apps-construction-value-sentinel")
+
+    monkeypatch.setattr(main.client, "CoreV1Api", MagicMock(return_value=core_api))
+    monkeypatch.setattr(main.client, "AppsV1Api", fail)
+    patch = MagicMock()
+
+    with pytest.raises(kopf.TemporaryError):
+        main._handle_reconcile(valid_spec(), sample_meta(), patch)
+
+    reconciled = patch.status.update.call_args.args[0]
+    assert reconciled["conditions"][2]["reason"] == "ResourceReadFailed"
+    assert "apps-construction-value-sentinel" not in repr(reconciled)
+    assert core_api.method_calls == []

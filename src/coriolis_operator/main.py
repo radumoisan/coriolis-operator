@@ -14,6 +14,10 @@ from coriolis_operator.configuration import (
     render_coriolis_config,
     render_sensitive_coriolis_config,
 )
+from coriolis_operator.mariadb import (
+    SensitiveMariaDBCredentials,
+    resolve_mariadb_settings,
+)
 from coriolis_operator.reconcile import (
     DEPENDENCY_SERVICES,
     MARKER_COLLISION,
@@ -34,8 +38,10 @@ from coriolis_operator.reconcile import (
     classify_existing_marker,
     classify_owned_resource,
     collision_conditions,
+    invalid_runtime_configuration_conditions,
     kubernetes_coriolis_render_inputs,
     preflight_foundational_resources,
+    preflight_mariadb_resources,
     rejected_conditions,
     retry_conditions,
 )
@@ -141,7 +147,7 @@ def _read_or_absent(
 
 
 def _create_or_apply(
-    api: client.CoreV1Api,
+    api: Any,
     *,
     kind: str,
     body: dict[str, Any],
@@ -188,8 +194,9 @@ def reconcile_appliance(
     meta: Mapping[str, Any],
     status: Mapping[str, Any] | None = None,
     core_api: client.CoreV1Api | None = None,
+    apps_api: client.AppsV1Api | None = None,
 ) -> dict[str, Any]:
-    """Reconcile foundational resources and dependency Services."""
+    """Reconcile foundational resources, dependency Services, and MariaDB."""
     name = str(meta["name"])
     namespace = str(meta["namespace"])
     generation = int(meta["generation"])
@@ -236,6 +243,24 @@ def reconcile_appliance(
         )
 
     try:
+        mariadb_settings = resolve_mariadb_settings(
+            storage=spec.get("storage"), resources=spec.get("resources")
+        )
+    except ValueError:
+        return build_status(
+            generation,
+            accepted_version=accepted_version,
+            conditions=invalid_runtime_configuration_conditions(),
+            prior_conditions=_prior_conditions(status),
+        )
+    except ReconcileRetry:
+        raise
+    except Exception:
+        raise _retry_status(
+            generation, accepted_version, status, "ResourceApplyFailed"
+        ) from None
+
+    try:
         marker_body = build_state_config_map(
             name=name,
             namespace=namespace,
@@ -257,6 +282,12 @@ def reconcile_appliance(
             (component, appliance_resource_name(name, component))
             for component, _ in DEPENDENCY_SERVICES
         )
+        mariadb_data_pvc_name = appliance_resource_name(name, "mariadb-data")
+        mariadb_config_map_name = appliance_resource_name(name, "mariadb-config")
+        mariadb_config_secret_name = appliance_resource_name(
+            name, "mariadb-config-secret"
+        )
+        mariadb_stateful_set_name = appliance_resource_name(name, "mariadb")
     except ReconcileRetry:
         raise
     except Exception:
@@ -265,6 +296,7 @@ def reconcile_appliance(
         ) from None
     try:
         api = core_api if core_api is not None else client.CoreV1Api()
+        workloads_api = apps_api if apps_api is not None else client.AppsV1Api()
     except ReconcileRetry:
         raise
     except Exception:
@@ -325,6 +357,38 @@ def reconcile_appliance(
             ),
         )
         for component, service_name in dependency_service_names
+    )
+    mariadb_data_pvc_existing = _read_or_absent(
+        api.read_namespaced_persistent_volume_claim,
+        name=mariadb_data_pvc_name,
+        namespace=namespace,
+        generation=generation,
+        accepted_version=accepted_version,
+        status=status,
+    )
+    mariadb_config_map_existing = _read_or_absent(
+        api.read_namespaced_config_map,
+        name=mariadb_config_map_name,
+        namespace=namespace,
+        generation=generation,
+        accepted_version=accepted_version,
+        status=status,
+    )
+    mariadb_config_secret_existing = _read_or_absent(
+        api.read_namespaced_secret,
+        name=mariadb_config_secret_name,
+        namespace=namespace,
+        generation=generation,
+        accepted_version=accepted_version,
+        status=status,
+    )
+    mariadb_stateful_set_existing = _read_or_absent(
+        workloads_api.read_namespaced_stateful_set,
+        name=mariadb_stateful_set_name,
+        namespace=namespace,
+        generation=generation,
+        accepted_version=accepted_version,
+        status=status,
     )
     try:
         marker_classification = (
@@ -432,6 +496,78 @@ def reconcile_appliance(
             raise _retry_status(
                 generation, accepted_version, status, "ResourceApplyFailed"
             )
+
+    try:
+        mariadb_preflight = preflight_mariadb_resources(
+            appliance_name=name,
+            namespace=namespace,
+            accepted_version=requested_version,
+            settings=mariadb_settings,
+            credentials=SensitiveMariaDBCredentials(
+                database_password=preflight.credentials[
+                    infrastructure_credentials_name
+                ]["database_password"],
+                coriolis_database_password=preflight.credentials[
+                    coriolis_credentials_name
+                ]["coriolis_database_password"],
+            ),
+            owner=owner,
+            mariadb_data_pvc=mariadb_data_pvc_existing,
+            mariadb_config_map=mariadb_config_map_existing,
+            mariadb_config_secret=mariadb_config_secret_existing,
+            mariadb_stateful_set=mariadb_stateful_set_existing,
+        )
+        mariadb_collision = next(
+            (
+                resource_name
+                for resource_name, classification in (
+                    mariadb_preflight.classifications.items()
+                )
+                if classification.value == "collision"
+            ),
+            None,
+        )
+    except ReconcileRetry:
+        raise
+    except Exception:
+        raise _retry_status(
+            generation, accepted_version, status, "ResourceApplyFailed"
+        ) from None
+    if mariadb_collision is not None:
+        return build_status(
+            generation,
+            accepted_version=accepted_version,
+            conditions=collision_conditions(namespace, mariadb_collision),
+            prior_conditions=_prior_conditions(status),
+        )
+    for existing, classification in (
+        (
+            mariadb_config_map_existing,
+            mariadb_preflight.classifications[mariadb_config_map_name],
+        ),
+        (
+            mariadb_config_secret_existing,
+            mariadb_preflight.classifications[mariadb_config_secret_name],
+        ),
+        (
+            mariadb_stateful_set_existing,
+            mariadb_preflight.classifications[mariadb_stateful_set_name],
+        ),
+    ):
+        if (
+            classification is OwnedClassification.MANAGED
+            and _resource_version(existing) is None
+        ):
+            raise _retry_status(
+                generation, accepted_version, status, "ResourceApplyFailed"
+            )
+
+    (
+        mariadb_data_pvc_body,
+        mariadb_config_map_body,
+        mariadb_config_secret_body,
+        mariadb_stateful_set_body,
+    ) = mariadb_preflight.manifests
 
     try:
         inputs = kubernetes_coriolis_render_inputs(name)
@@ -556,6 +692,50 @@ def reconcile_appliance(
             accepted_version=accepted_version,
             status=status,
         )
+    if (
+        mariadb_preflight.classifications[mariadb_data_pvc_name]
+        is RetainedClassification.ABSENT
+    ):
+        _create_or_apply(
+            api,
+            kind="persistent_volume_claim",
+            body=mariadb_data_pvc_body,
+            existing=None,
+            category="ResourceApplyFailed",
+            generation=generation,
+            accepted_version=accepted_version,
+            status=status,
+        )
+    for resource_api, kind, body, existing in (
+        (
+            api,
+            "config_map",
+            mariadb_config_map_body,
+            mariadb_config_map_existing,
+        ),
+        (
+            api,
+            "secret",
+            mariadb_config_secret_body,
+            mariadb_config_secret_existing,
+        ),
+        (
+            workloads_api,
+            "stateful_set",
+            mariadb_stateful_set_body,
+            mariadb_stateful_set_existing,
+        ),
+    ):
+        _create_or_apply(
+            resource_api,
+            kind=kind,
+            body=body,
+            existing=existing,
+            category="ResourceApplyFailed",
+            generation=generation,
+            accepted_version=accepted_version,
+            status=status,
+        )
     _create_or_apply(
         api,
         kind="config_map",
@@ -636,6 +816,30 @@ def update_appliance_profile(
     **kwargs: Any,
 ) -> None:
     """Reconcile the requested appliance profile change."""
+    _handle_reconcile(spec, meta, patch, status, **kwargs)
+
+
+@kopf.on.field(GROUP, VERSION, PLURAL, field="spec.storage")
+def update_appliance_storage(
+    spec: Mapping[str, Any],
+    meta: Mapping[str, Any],
+    patch: kopf.Patch,
+    status: Mapping[str, Any] | None = None,
+    **kwargs: Any,
+) -> None:
+    """Reconcile requested appliance storage changes."""
+    _handle_reconcile(spec, meta, patch, status, **kwargs)
+
+
+@kopf.on.field(GROUP, VERSION, PLURAL, field="spec.resources")
+def update_appliance_resources(
+    spec: Mapping[str, Any],
+    meta: Mapping[str, Any],
+    patch: kopf.Patch,
+    status: Mapping[str, Any] | None = None,
+    **kwargs: Any,
+) -> None:
+    """Reconcile requested appliance resource changes."""
     _handle_reconcile(spec, meta, patch, status, **kwargs)
 
 

@@ -44,7 +44,7 @@
 
 ## Later Milestones
 
-- MariaDB image, standalone runtime evidence, and the development Kubernetes contract are closed locally: the exact digest, non-Galera direct startup, restricted runtime, value-safe bootstrap, retained PVC/StatefulSet shape, generated configuration, probes, and lifecycle policy are recorded. Next is pure CRD validation/resolver and manifest-builder/preflight implementation, then reconciliation after tests. Target storage must validate RWO, fsGroup, retained reuse, attach-detach/rescheduling, and clean 30-second termination before deployment; production remains blocked on backup/restore, HA, and RPO/RTO acceptance.
+- MariaDB image, standalone runtime evidence, development Kubernetes contract, pure CRD/resolver/builders/preflight, and reconciliation are closed locally. Reconciliation includes stable configuration failure, ordered reads, exact retained-PVC reuse, guarded managed-resource SSA, marker-last ordering, narrow RBAC, and exhaustive tests. Target storage must validate RWO, fsGroup, retained reuse, attach-detach/rescheduling, and clean 30-second termination before deployment; production remains blocked on backup/restore, HA, and RPO/RTO acceptance.
 - Add safe upgrade and production lifecycle capabilities after explicit contracts and operational review.
 
 ## Pending Decisions

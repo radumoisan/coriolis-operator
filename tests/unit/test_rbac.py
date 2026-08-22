@@ -37,3 +37,44 @@ def test_role_grants_only_required_service_verbs() -> None:
     assert resources == ["services"]
     assert verbs == ["get", "create", "patch"]
     assert "resourceNames:" not in service_rule
+
+
+def test_role_grants_only_required_mariadb_storage_and_workload_verbs() -> None:
+    role = (Path(__file__).parents[2] / "helm/templates/role.yaml").read_text()
+
+    pvc_rule = next(
+        block
+        for block in role.split("  - apiGroups:")
+        if "      - persistentvolumeclaims" in block
+    )
+    stateful_set_rule = next(
+        block
+        for block in role.split("  - apiGroups:")
+        if "      - statefulsets" in block
+    )
+
+    assert re.findall(r"^      - (\w+)$", pvc_rule, flags=re.MULTILINE) == [
+        "persistentvolumeclaims",
+        "get",
+        "create",
+    ]
+    assert re.findall(r"^      - (\w+)$", stateful_set_rule, flags=re.MULTILINE) == [
+        "apps",
+        "statefulsets",
+        "get",
+        "create",
+        "patch",
+    ]
+    assert "delete" not in pvc_rule
+    assert "patch" not in pvc_rule
+    assert "resourceNames:" not in pvc_rule
+    assert "resourceNames:" not in stateful_set_rule
+
+
+def test_role_excludes_deferred_mariadb_permissions() -> None:
+    role = (Path(__file__).parents[2] / "helm/templates/role.yaml").read_text()
+
+    assert "      - pods" not in role
+    assert "      - pods/log" not in role
+    assert "      - poddisruptionbudgets" not in role
+    assert "      - delete" not in role
