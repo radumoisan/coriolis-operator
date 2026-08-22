@@ -52,6 +52,7 @@ from coriolis_operator.reconcile import (
     invalid_runtime_configuration_conditions,
     kubernetes_coriolis_render_inputs,
     preflight_foundational_resources,
+    preflight_keystone_resources,
     preflight_mariadb_resources,
     preflight_rabbitmq_resources,
     rejected_conditions,
@@ -290,6 +291,7 @@ def mariadb_bodies() -> dict[str, dict]:
         credentials=SensitiveMariaDBCredentials(
             database_password="database synthetic",
             coriolis_database_password="db synthetic",
+            keystone_database_password="keystone synthetic",
         ),
         owner=OWNER,
         mariadb_data_pvc=None,
@@ -314,6 +316,31 @@ def rabbitmq_bodies() -> dict[str, dict]:
         rabbitmq_data_pvc=None,
         rabbitmq_config_map=None,
         rabbitmq_stateful_set=None,
+    )
+    return {
+        body["metadata"]["name"]: copy.deepcopy(body) for body in preflight.manifests
+    }
+
+
+def keystone_bodies() -> dict[str, dict]:
+    preflight = preflight_keystone_resources(
+        appliance_name="example",
+        namespace="operators",
+        accepted_version="2603.4",
+        owner=OWNER,
+        retention="state-credentials",
+        database_host="example-mariadb",
+        keystone_host="example-keystone",
+        keystone_admin_password="admin synthetic",
+        keystone_database_credentials_secret=None,
+        keystone_fernet_keys_secret=None,
+        keystone_credential_keys_secret=None,
+        keystone_config_map=None,
+        keystone_config_secret=None,
+        keystone_deployment=None,
+        database_token_factory=lambda _: "database synthetic",
+        fernet_byte_factory=lambda _: b"f" * 32,
+        credential_byte_factory=lambda _: b"c" * 32,
     )
     return {
         body["metadata"]["name"]: copy.deepcopy(body) for body in preflight.manifests
@@ -354,6 +381,32 @@ def configure_mariadb_existing(
         read_persistent_volume_claim
     )
     apps_api.read_namespaced_stateful_set.side_effect = read_stateful_set
+
+
+def configure_keystone_existing(
+    core_api: MagicMock, apps_api: MagicMock, existing: dict[str, dict]
+) -> None:
+    def read_config_map(*, name: str, namespace: str) -> object:
+        assert namespace == "operators"
+        if name in existing:
+            return existing[name]
+        raise _api_exception(404)
+
+    def read_secret(*, name: str, namespace: str) -> object:
+        assert namespace == "operators"
+        if name in existing:
+            return existing[name]
+        raise _api_exception(404)
+
+    def read_deployment(*, name: str, namespace: str) -> object:
+        assert namespace == "operators"
+        if name in existing:
+            return existing[name]
+        raise _api_exception(404)
+
+    core_api.read_namespaced_config_map.side_effect = read_config_map
+    core_api.read_namespaced_secret.side_effect = read_secret
+    apps_api.read_namespaced_deployment.side_effect = read_deployment
 
 
 def api_writes(api: MagicMock) -> list:
@@ -1214,8 +1267,9 @@ def test_build_status_reports_accepted_api_only_slice() -> None:
                 "True",
                 "Reconciled",
                 "The foundational appliance resources, dependency Services, MariaDB, "
-                "RabbitMQ, and Memcached resources, and controller state marker were "
-                "reconciled in Kubernetes; runtime readiness is not implemented yet.",
+                "RabbitMQ, Memcached, and Keystone resources, and controller state "
+                "marker were reconciled in Kubernetes; runtime readiness is not "
+                "implemented yet.",
             ),
             condition(
                 "Ready",
@@ -1357,6 +1411,21 @@ def test_reconcile_appliance_server_side_applies_state_and_returns_status() -> N
         call.read_namespaced_config_map(
             name="example-rabbitmq-config", namespace="operators"
         ),
+        call.read_namespaced_secret(
+            name="example-keystone-database-credentials", namespace="operators"
+        ),
+        call.read_namespaced_secret(
+            name="example-keystone-fernet-keys", namespace="operators"
+        ),
+        call.read_namespaced_secret(
+            name="example-keystone-credential-keys", namespace="operators"
+        ),
+        call.read_namespaced_config_map(
+            name="example-keystone-config", namespace="operators"
+        ),
+        call.read_namespaced_secret(
+            name="example-keystone-config-secret", namespace="operators"
+        ),
         call.create_namespaced_secret(namespace="operators", body=ANY),
         call.create_namespaced_secret(namespace="operators", body=ANY),
         call.create_namespaced_config_map(namespace="operators", body=ANY),
@@ -1365,11 +1434,16 @@ def test_reconcile_appliance_server_side_applies_state_and_returns_status() -> N
         call.create_namespaced_service(namespace="operators", body=ANY),
         call.create_namespaced_service(namespace="operators", body=ANY),
         call.create_namespaced_service(namespace="operators", body=ANY),
+        call.create_namespaced_secret(namespace="operators", body=ANY),
+        call.create_namespaced_secret(namespace="operators", body=ANY),
+        call.create_namespaced_secret(namespace="operators", body=ANY),
         call.create_namespaced_persistent_volume_claim(namespace="operators", body=ANY),
         call.create_namespaced_config_map(namespace="operators", body=ANY),
         call.create_namespaced_secret(namespace="operators", body=ANY),
         call.create_namespaced_persistent_volume_claim(namespace="operators", body=ANY),
         call.create_namespaced_config_map(namespace="operators", body=ANY),
+        call.create_namespaced_config_map(namespace="operators", body=ANY),
+        call.create_namespaced_secret(namespace="operators", body=ANY),
         call.create_namespaced_config_map(namespace="operators", body=ANY),
     ]
     assert status["observedGeneration"] == 7
@@ -2526,6 +2600,10 @@ def test_foundational_gate_reuses_retained_secrets_without_writing_them() -> Non
         ),
         _api_exception(404),
         _api_exception(404),
+        _api_exception(404),
+        _api_exception(404),
+        _api_exception(404),
+        _api_exception(404),
     ]
 
     reconcile_appliance(spec=valid_spec(), meta=sample_meta(), core_api=api)
@@ -2539,7 +2617,11 @@ def test_foundational_gate_reuses_retained_secrets_without_writing_them() -> Non
     ]
     assert created_secret_names == [
         "example-coriolis-config-secret",
+        "example-keystone-database-credentials",
+        "example-keystone-fernet-keys",
+        "example-keystone-credential-keys",
         "example-mariadb-config-secret",
+        "example-keystone-config-secret",
     ]
     assert patched_secret_names == []
     config_secret = next(
@@ -2567,11 +2649,19 @@ def test_foundational_gate_collision_has_no_writes_after_complete_reads() -> Non
         _api_exception(404),
         _api_exception(404),
         _api_exception(404),
+        _api_exception(404),
+        _api_exception(404),
+        _api_exception(404),
+        _api_exception(404),
+        _api_exception(404),
+        _api_exception(404),
+        _api_exception(404),
+        _api_exception(404),
     ]
 
     status = reconcile_appliance(spec=valid_spec(), meta=sample_meta(), core_api=api)
 
-    assert api.read_namespaced_secret.call_count == 4
+    assert api.read_namespaced_secret.call_count == 8
     assert api.create_namespaced_secret.call_count == 0
     assert api.create_namespaced_config_map.call_count == 0
     assert {item["reason"] for item in status["conditions"]} >= {"ResourceCollision"}
@@ -2614,8 +2704,9 @@ def test_managed_resources_use_resource_version_and_marker_is_last() -> None:
         managed_config,
         _api_exception(404),
         _api_exception(404),
+        _api_exception(404),
     ]
-    api.read_namespaced_secret.side_effect = [_api_exception(404)] * 4
+    api.read_namespaced_secret.side_effect = [_api_exception(404)] * 8
 
     reconcile_appliance(spec=valid_spec(), meta=sample_meta(), core_api=api)
 
@@ -2630,7 +2721,7 @@ def test_managed_resources_use_resource_version_and_marker_is_last() -> None:
 
 def test_apply_conflict_keeps_prior_writes_and_preserves_accepted_version() -> None:
     api = make_core_api(existing=desired_body())
-    api.read_namespaced_secret.side_effect = [_api_exception(404)] * 4
+    api.read_namespaced_secret.side_effect = [_api_exception(404)] * 8
     api.patch_namespaced_config_map.side_effect = client.ApiException(
         status=409, reason="rendered-secret-must-not-leak"
     )
@@ -2643,7 +2734,7 @@ def test_apply_conflict_keeps_prior_writes_and_preserves_accepted_version() -> N
             core_api=api,
         )
 
-    assert api.create_namespaced_secret.call_count == 4
+    assert api.create_namespaced_secret.call_count == 8
     assert excinfo.value.status["acceptedVersion"] == "2603.4"
     assert excinfo.value.status["conditions"][2]["reason"] == "MarkerApplyFailed"
     assert "rendered-secret-must-not-leak" not in repr(excinfo.value.status)
@@ -2669,11 +2760,12 @@ def test_existing_managed_resource_without_resource_version_retries_before_write
     None
 ):
     api = make_core_api(existing=desired_body())
-    api.read_namespaced_secret.side_effect = [_api_exception(404)] * 4
+    api.read_namespaced_secret.side_effect = [_api_exception(404)] * 8
     marker = desired_body()
     marker["metadata"].pop("resourceVersion")
     api.read_namespaced_config_map.side_effect = [
         marker,
+        _api_exception(404),
         _api_exception(404),
         _api_exception(404),
         _api_exception(404),
@@ -2701,8 +2793,9 @@ def test_apply_header_is_removed_before_later_create() -> None:
         managed_config,
         _api_exception(404),
         _api_exception(404),
+        _api_exception(404),
     ]
-    api.read_namespaced_secret.side_effect = [_api_exception(404)] * 4
+    api.read_namespaced_secret.side_effect = [_api_exception(404)] * 8
 
     def create_secret(*, namespace: str, body: dict) -> None:
         if body["metadata"]["name"] == "example-coriolis-config-secret":
@@ -2717,7 +2810,7 @@ def test_apply_header_is_removed_before_later_create() -> None:
 
 def test_apply_header_is_restored_after_patch_failure() -> None:
     api = make_core_api(existing=desired_body())
-    api.read_namespaced_secret.side_effect = [_api_exception(404)] * 4
+    api.read_namespaced_secret.side_effect = [_api_exception(404)] * 8
     api.patch_namespaced_config_map.side_effect = client.ApiException(status=409)
     api.api_client.default_headers["Content-Type"] = "application/json"
 
@@ -2770,6 +2863,10 @@ def test_foundational_collision_message_is_generic_and_value_safe() -> None:
         _api_exception(404),
         _api_exception(404),
         _api_exception(404),
+        _api_exception(404),
+        _api_exception(404),
+        _api_exception(404),
+        _api_exception(404),
     ]
 
     status = reconcile_appliance(spec=valid_spec(), meta=sample_meta(), core_api=api)
@@ -2792,8 +2889,9 @@ def test_foundational_managed_apply_conflict_stops_later_writes_and_marker() -> 
         managed_config,
         _api_exception(404),
         _api_exception(404),
+        _api_exception(404),
     ]
-    api.read_namespaced_secret.side_effect = [_api_exception(404)] * 4
+    api.read_namespaced_secret.side_effect = [_api_exception(404)] * 8
     api.patch_namespaced_config_map.side_effect = client.ApiException(status=409)
 
     with pytest.raises(main.ReconcileRetry) as excinfo:
@@ -3240,6 +3338,12 @@ def test_mariadb_reads_and_writes_follow_the_frozen_cross_api_order() -> None:
         ("read", "pvc", "example-rabbitmq-data"),
         ("read", "configmap", "example-rabbitmq-config"),
         ("read", "statefulset", "example-rabbitmq"),
+        ("read", "secret", "example-keystone-database-credentials"),
+        ("read", "secret", "example-keystone-fernet-keys"),
+        ("read", "secret", "example-keystone-credential-keys"),
+        ("read", "configmap", "example-keystone-config"),
+        ("read", "secret", "example-keystone-config-secret"),
+        ("read", "deployment", "example-keystone"),
     ]
     assert [event for event in events if event[0] == "write"] == [
         ("write", "secret", "example-coriolis-credentials"),
@@ -3250,6 +3354,9 @@ def test_mariadb_reads_and_writes_follow_the_frozen_cross_api_order() -> None:
         ("write", "service", "example-memcached"),
         ("write", "service", "example-mariadb"),
         ("write", "service", "example-keystone"),
+        ("write", "secret", "example-keystone-database-credentials"),
+        ("write", "secret", "example-keystone-fernet-keys"),
+        ("write", "secret", "example-keystone-credential-keys"),
         ("write", "pvc", "example-mariadb-data"),
         ("write", "configmap", "example-mariadb-config"),
         ("write", "secret", "example-mariadb-config-secret"),
@@ -3258,6 +3365,9 @@ def test_mariadb_reads_and_writes_follow_the_frozen_cross_api_order() -> None:
         ("write", "configmap", "example-rabbitmq-config"),
         ("write", "statefulset", "example-rabbitmq"),
         ("write", "deployment", "example-memcached"),
+        ("write", "configmap", "example-keystone-config"),
+        ("write", "secret", "example-keystone-config-secret"),
+        ("write", "deployment", "example-keystone"),
         ("write", "configmap", "example-operator-state"),
     ]
     assert status["acceptedVersion"] == "2603.4"
@@ -3575,6 +3685,10 @@ def test_rabbitmq_preflight_and_manifests_do_not_receive_or_expose_password(
         infrastructure,
         _api_exception(404),
         _api_exception(404),
+        _api_exception(404),
+        _api_exception(404),
+        _api_exception(404),
+        _api_exception(404),
     ]
     captured: dict[str, object] = {}
     preflight = main.preflight_rabbitmq_resources
@@ -3783,13 +3897,22 @@ def _managed_memcached_deployment(resource_version: str | None = "17") -> dict:
     return deployment
 
 
+def configure_memcached_existing(apps_api: MagicMock, deployment: dict) -> None:
+    def read(*, name: str, namespace: str) -> object:
+        assert namespace == "operators"
+        if name == "example-memcached":
+            return deployment
+        raise _api_exception(404)
+
+    apps_api.read_namespaced_deployment.side_effect = read
+
+
 def test_memcached_collision_is_mutation_free_after_all_reads() -> None:
     core_api = make_core_api()
     apps_api = make_apps_api()
     collided = _managed_memcached_deployment()
     collided["metadata"]["labels"]["coriolis.cloudbase.it/component"] = "other"
-    apps_api.read_namespaced_deployment.return_value = collided
-    apps_api.read_namespaced_deployment.side_effect = None
+    configure_memcached_existing(apps_api, collided)
 
     status = reconcile_appliance(
         spec=valid_spec(), meta=sample_meta(), core_api=core_api, apps_api=apps_api
@@ -3822,10 +3945,7 @@ def test_memcached_non_404_read_failure_prevents_writes() -> None:
 def test_managed_memcached_without_resource_version_retries_before_writes() -> None:
     core_api = make_core_api()
     apps_api = make_apps_api()
-    apps_api.read_namespaced_deployment.return_value = _managed_memcached_deployment(
-        None
-    )
-    apps_api.read_namespaced_deployment.side_effect = None
+    configure_memcached_existing(apps_api, _managed_memcached_deployment(None))
 
     with pytest.raises(main.ReconcileRetry) as excinfo:
         reconcile_appliance(
@@ -3840,8 +3960,7 @@ def test_managed_memcached_without_resource_version_retries_before_writes() -> N
 def test_managed_memcached_uses_guarded_ssa_and_restores_headers() -> None:
     core_api = make_core_api()
     apps_api = make_apps_api()
-    apps_api.read_namespaced_deployment.return_value = _managed_memcached_deployment()
-    apps_api.read_namespaced_deployment.side_effect = None
+    configure_memcached_existing(apps_api, _managed_memcached_deployment())
     apps_api.api_client.default_headers["Content-Type"] = "application/json"
 
     def patch_deployment(**_: object) -> None:
@@ -3868,10 +3987,7 @@ def test_memcached_apply_failure_is_sanitized_and_skips_marker(operation: str) -
     core_api = make_core_api()
     apps_api = make_apps_api()
     if operation == "patch":
-        apps_api.read_namespaced_deployment.return_value = (
-            _managed_memcached_deployment()
-        )
-        apps_api.read_namespaced_deployment.side_effect = None
+        configure_memcached_existing(apps_api, _managed_memcached_deployment())
     getattr(
         apps_api, f"{operation}_namespaced_deployment"
     ).side_effect = client.ApiException(status=409, reason="memcached-apply-sentinel")
@@ -3939,3 +4055,391 @@ def test_apps_api_construction_failure_patches_sanitized_status_before_retry(
     assert reconciled["conditions"][2]["reason"] == "ResourceReadFailed"
     assert "apps-construction-value-sentinel" not in repr(reconciled)
     assert core_api.method_calls == []
+
+
+def test_keystone_reads_all_resources_before_the_first_write() -> None:
+    core_api = make_core_api()
+    apps_api = make_apps_api()
+    reads: list[str] = []
+
+    def absent(*, name: str, namespace: str) -> object:
+        assert namespace == "operators"
+        reads.append(name)
+        raise _api_exception(404)
+
+    core_api.read_namespaced_config_map.side_effect = absent
+    core_api.read_namespaced_secret.side_effect = absent
+    core_api.read_namespaced_service.side_effect = absent
+    core_api.read_namespaced_persistent_volume_claim.side_effect = absent
+    apps_api.read_namespaced_stateful_set.side_effect = absent
+    apps_api.read_namespaced_deployment.side_effect = absent
+
+    reconcile_appliance(
+        spec=valid_spec(), meta=sample_meta(), core_api=core_api, apps_api=apps_api
+    )
+
+    assert reads == [
+        "example-operator-state",
+        "example-coriolis-credentials",
+        "example-infrastructure-credentials",
+        "example-coriolis-config",
+        "example-coriolis-config-secret",
+        "example-rabbitmq",
+        "example-memcached",
+        "example-mariadb",
+        "example-keystone",
+        "example-mariadb-data",
+        "example-mariadb-config",
+        "example-mariadb-config-secret",
+        "example-mariadb",
+        "example-memcached",
+        "example-rabbitmq-data",
+        "example-rabbitmq-config",
+        "example-rabbitmq",
+        "example-keystone-database-credentials",
+        "example-keystone-fernet-keys",
+        "example-keystone-credential-keys",
+        "example-keystone-config",
+        "example-keystone-config-secret",
+        "example-keystone",
+    ]
+    assert reads.index("example-keystone-database-credentials") > reads.index(
+        "example-rabbitmq"
+    )
+
+
+@pytest.mark.parametrize(
+    "resource_name",
+    [
+        "example-keystone-database-credentials",
+        "example-keystone-fernet-keys",
+        "example-keystone-credential-keys",
+        "example-keystone-config",
+        "example-keystone-config-secret",
+        "example-keystone",
+    ],
+)
+def test_keystone_collision_at_each_position_is_mutation_free(
+    resource_name: str,
+) -> None:
+    core_api = make_core_api()
+    apps_api = make_apps_api()
+    existing = keystone_bodies()
+    existing[resource_name]["metadata"]["labels"]["app.kubernetes.io/managed-by"] = (
+        "other"
+    )
+    configure_keystone_existing(
+        core_api, apps_api, {resource_name: existing[resource_name]}
+    )
+
+    status = reconcile_appliance(
+        spec=valid_spec(), meta=sample_meta(), core_api=core_api, apps_api=apps_api
+    )
+
+    assert status["conditions"][2]["reason"] == "ResourceCollision"
+    assert f"operators/{resource_name}" in status["conditions"][2]["message"]
+    assert api_writes(core_api) == []
+    assert api_writes(apps_api) == []
+
+
+@pytest.mark.parametrize(
+    "resource_name",
+    [
+        "example-keystone-database-credentials",
+        "example-keystone-fernet-keys",
+        "example-keystone-credential-keys",
+        "example-keystone-config",
+        "example-keystone-config-secret",
+        "example-keystone",
+    ],
+)
+def test_non_404_at_each_keystone_read_position_prevents_writes(
+    resource_name: str,
+) -> None:
+    core_api = make_core_api()
+    apps_api = make_apps_api()
+
+    def fail_target(*, name: str, namespace: str) -> object:
+        assert namespace == "operators"
+        if name == resource_name:
+            raise client.ApiException(status=403, reason="keystone-read-sentinel")
+        raise _api_exception(404)
+
+    if resource_name == "example-keystone":
+        apps_api.read_namespaced_deployment.side_effect = fail_target
+    elif resource_name == "example-keystone-config":
+        core_api.read_namespaced_config_map.side_effect = fail_target
+    else:
+        core_api.read_namespaced_secret.side_effect = fail_target
+
+    with pytest.raises(main.ReconcileRetry) as excinfo:
+        reconcile_appliance(
+            spec=valid_spec(), meta=sample_meta(), core_api=core_api, apps_api=apps_api
+        )
+
+    assert excinfo.value.status["conditions"][2]["reason"] == "ResourceReadFailed"
+    assert "keystone-read-sentinel" not in repr(excinfo.value.status)
+    assert api_writes(core_api) == []
+    assert api_writes(apps_api) == []
+
+
+def test_keystone_retained_creation_precedes_mariadb_and_marker_is_last() -> None:
+    core_api = make_core_api()
+    apps_api = make_apps_api()
+    writes: list[str] = []
+
+    def record(*, body: dict, **_: object) -> None:
+        writes.append(body["metadata"]["name"])
+
+    for api, methods in (
+        (
+            core_api,
+            (
+                "create_namespaced_secret",
+                "create_namespaced_config_map",
+                "create_namespaced_service",
+                "create_namespaced_persistent_volume_claim",
+            ),
+        ),
+        (
+            apps_api,
+            ("create_namespaced_stateful_set", "create_namespaced_deployment"),
+        ),
+    ):
+        for method in methods:
+            getattr(api, method).side_effect = record
+
+    reconcile_appliance(
+        spec=valid_spec(), meta=sample_meta(), core_api=core_api, apps_api=apps_api
+    )
+
+    assert writes == [
+        "example-coriolis-credentials",
+        "example-infrastructure-credentials",
+        "example-coriolis-config",
+        "example-coriolis-config-secret",
+        "example-rabbitmq",
+        "example-memcached",
+        "example-mariadb",
+        "example-keystone",
+        "example-keystone-database-credentials",
+        "example-keystone-fernet-keys",
+        "example-keystone-credential-keys",
+        "example-mariadb-data",
+        "example-mariadb-config",
+        "example-mariadb-config-secret",
+        "example-mariadb",
+        "example-rabbitmq-data",
+        "example-rabbitmq-config",
+        "example-rabbitmq",
+        "example-memcached",
+        "example-keystone-config",
+        "example-keystone-config-secret",
+        "example-keystone",
+        "example-operator-state",
+    ]
+
+
+def test_keystone_retained_reuse_performs_no_retained_secret_writes() -> None:
+    core_api = make_core_api()
+    apps_api = make_apps_api()
+    existing = keystone_bodies()
+    configure_keystone_existing(
+        core_api,
+        apps_api,
+        {
+            name: existing[name]
+            for name in (
+                "example-keystone-database-credentials",
+                "example-keystone-fernet-keys",
+                "example-keystone-credential-keys",
+            )
+        },
+    )
+
+    reconcile_appliance(
+        spec=valid_spec(), meta=sample_meta(), core_api=core_api, apps_api=apps_api
+    )
+
+    retained_names = {
+        "example-keystone-database-credentials",
+        "example-keystone-fernet-keys",
+        "example-keystone-credential-keys",
+    }
+    assert not {
+        call.kwargs["body"]["metadata"]["name"]
+        for call in core_api.create_namespaced_secret.call_args_list
+        if call.kwargs["body"]["metadata"]["name"] in retained_names
+    }
+
+
+@pytest.mark.parametrize(
+    ("api_name", "method_name", "resource_kind", "resource_name"),
+    [
+        (
+            "core",
+            "create_namespaced_secret",
+            "Secret",
+            "example-keystone-database-credentials",
+        ),
+        (
+            "core",
+            "create_namespaced_secret",
+            "Secret",
+            "example-keystone-fernet-keys",
+        ),
+        (
+            "core",
+            "create_namespaced_secret",
+            "Secret",
+            "example-keystone-credential-keys",
+        ),
+        (
+            "core",
+            "create_namespaced_config_map",
+            "ConfigMap",
+            "example-keystone-config",
+        ),
+        (
+            "core",
+            "create_namespaced_secret",
+            "Secret",
+            "example-keystone-config-secret",
+        ),
+        (
+            "apps",
+            "create_namespaced_deployment",
+            "Deployment",
+            "example-keystone",
+        ),
+    ],
+)
+def test_keystone_create_failure_is_sanitized_and_stops_at_failed_write(
+    api_name: str, method_name: str, resource_kind: str, resource_name: str
+) -> None:
+    core_api = make_core_api()
+    apps_api = make_apps_api()
+    writes: list[tuple[str, str]] = []
+
+    def record(*, body: dict, **_: object) -> None:
+        writes.append((body["kind"], body["metadata"]["name"]))
+
+    def fail_target(*, body: dict, **_: object) -> None:
+        record(body=body)
+        if (body["kind"], body["metadata"]["name"]) == (
+            resource_kind,
+            resource_name,
+        ):
+            raise client.ApiException(status=409, reason="keystone-apply-sentinel")
+
+    for api, methods in (
+        (
+            core_api,
+            (
+                "create_namespaced_secret",
+                "create_namespaced_config_map",
+                "create_namespaced_service",
+                "create_namespaced_persistent_volume_claim",
+            ),
+        ),
+        (
+            apps_api,
+            ("create_namespaced_stateful_set", "create_namespaced_deployment"),
+        ),
+    ):
+        for method in methods:
+            getattr(api, method).side_effect = record
+    target_api = core_api if api_name == "core" else apps_api
+    getattr(target_api, method_name).side_effect = fail_target
+
+    with pytest.raises(main.ReconcileRetry) as excinfo:
+        reconcile_appliance(
+            spec=valid_spec(), meta=sample_meta(), core_api=core_api, apps_api=apps_api
+        )
+
+    assert excinfo.value.status["conditions"][2]["reason"] == "ResourceApplyFailed"
+    assert "keystone-apply-sentinel" not in repr(excinfo.value.status)
+    assert writes[-1] == (resource_kind, resource_name)
+    assert ("ConfigMap", "example-operator-state") not in writes
+
+
+@pytest.mark.parametrize(
+    ("api_name", "method_name", "resource_kind", "resource_name"),
+    [
+        (
+            "core",
+            "patch_namespaced_config_map",
+            "ConfigMap",
+            "example-keystone-config",
+        ),
+        (
+            "core",
+            "patch_namespaced_secret",
+            "Secret",
+            "example-keystone-config-secret",
+        ),
+        (
+            "apps",
+            "patch_namespaced_deployment",
+            "Deployment",
+            "example-keystone",
+        ),
+    ],
+)
+def test_keystone_patch_failure_is_sanitized_and_stops_at_failed_write(
+    api_name: str, method_name: str, resource_kind: str, resource_name: str
+) -> None:
+    core_api = make_core_api()
+    apps_api = make_apps_api()
+    existing = keystone_bodies()
+    for name in (
+        "example-keystone-config",
+        "example-keystone-config-secret",
+        "example-keystone",
+    ):
+        existing[name]["metadata"]["resourceVersion"] = "23"
+    configure_keystone_existing(core_api, apps_api, existing)
+    writes: list[tuple[str, str]] = []
+
+    def record(*, body: dict, **_: object) -> None:
+        writes.append((body["kind"], body["metadata"]["name"]))
+
+    def fail_target(*, body: dict, **_: object) -> None:
+        record(body=body)
+        raise client.ApiException(status=409, reason="keystone-patch-sentinel")
+
+    for api, methods in (
+        (
+            core_api,
+            (
+                "create_namespaced_secret",
+                "create_namespaced_config_map",
+                "create_namespaced_service",
+                "create_namespaced_persistent_volume_claim",
+                "patch_namespaced_config_map",
+                "patch_namespaced_secret",
+            ),
+        ),
+        (
+            apps_api,
+            (
+                "create_namespaced_stateful_set",
+                "create_namespaced_deployment",
+                "patch_namespaced_deployment",
+            ),
+        ),
+    ):
+        for method in methods:
+            getattr(api, method).side_effect = record
+    target_api = core_api if api_name == "core" else apps_api
+    getattr(target_api, method_name).side_effect = fail_target
+
+    with pytest.raises(main.ReconcileRetry) as excinfo:
+        reconcile_appliance(
+            spec=valid_spec(), meta=sample_meta(), core_api=core_api, apps_api=apps_api
+        )
+
+    assert excinfo.value.status["conditions"][2]["reason"] == "ResourceApplyFailed"
+    assert "keystone-patch-sentinel" not in repr(excinfo.value.status)
+    assert writes[-1] == (resource_kind, resource_name)
+    assert ("ConfigMap", "example-operator-state") not in writes

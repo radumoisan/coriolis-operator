@@ -17,8 +17,31 @@ from coriolis_operator.configuration import (
     KubernetesCoriolisRenderInputs,
     SensitiveCoriolisEndpoints,
 )
+from coriolis_operator.keystone import (
+    KEYSTONE_AUTH_REQUEST_PATH,
+    KEYSTONE_BOOTSTRAP_PATH,
+    KEYSTONE_CONFIG_KEYS,
+    KEYSTONE_CONFIG_PATH,
+    KEYSTONE_CREDENTIAL_KEYS_DIR,
+    KEYSTONE_FERNET_KEYS_DIR,
+    KEYSTONE_IMAGE,
+    KEYSTONE_IMAGE_PULL_SECRET_NAME,
+    KEYSTONE_KEY_KEYS,
+    KEYSTONE_PORT,
+    KEYSTONE_REPLICAS,
+    KEYSTONE_RUN_AS_ID,
+    KEYSTONE_SECRET_CONFIG_KEYS,
+    KEYSTONE_SUPPLEMENTAL_GROUP,
+    KEYSTONE_TERMINATION_GRACE_PERIOD_SECONDS,
+    SensitiveKeystoneCredentials,
+    generate_keystone_keys,
+    render_keystone_config,
+    render_sensitive_keystone_config,
+)
 from coriolis_operator.mariadb import (
     MARIADB_BOOTSTRAP_COMPLETE_MARKER,
+    MARIADB_BOOTSTRAP_SCHEMA_ANNOTATION,
+    MARIADB_BOOTSTRAP_SCHEMA_VALUE,
     MARIADB_CONFIG_DIR,
     MARIADB_CONFIG_KEYS,
     MARIADB_DATA_DIR,
@@ -91,7 +114,7 @@ NOT_DEGRADED_MESSAGE = "The appliance is not degraded."
 NOT_RECONCILED_MESSAGE = "No resources were applied to Kubernetes."
 RECONCILED_MESSAGE = (
     "The foundational appliance resources, dependency Services, MariaDB, RabbitMQ, "
-    "and Memcached resources, and controller state marker were reconciled in "
+    "Memcached, and Keystone resources, and controller state marker were reconciled in "
     "Kubernetes; runtime readiness is not implemented yet."
 )
 UPGRADE_NOT_SUPPORTED_MESSAGE = "The core profile has no supported upgrade path."
@@ -226,6 +249,15 @@ class MemcachedResourcePreflight:
     """Pure preflight outcome and desired Memcached Deployment body."""
 
     classification: OwnedClassification
+    manifests: tuple[dict[str, Any], ...] = field(repr=False)
+
+
+@dataclass(frozen=True)
+class KeystoneResourcePreflight:
+    """Pure Keystone preflight outcome with credentials and manifests redacted."""
+
+    classifications: Mapping[str, RetainedClassification | OwnedClassification]
+    credentials: Mapping[str, Mapping[str, str]] = field(repr=False)
     manifests: tuple[dict[str, Any], ...] = field(repr=False)
 
 
@@ -1255,7 +1287,14 @@ def build_mariadb_stateful_set(
             "replicas": MARIADB_REPLICAS,
             "selector": {"matchLabels": selector},
             "template": {
-                "metadata": {"labels": dict(metadata["labels"])},
+                "metadata": {
+                    "labels": dict(metadata["labels"]),
+                    "annotations": {
+                        MARIADB_BOOTSTRAP_SCHEMA_ANNOTATION: (
+                            MARIADB_BOOTSTRAP_SCHEMA_VALUE
+                        )
+                    },
+                },
                 "spec": {
                     "imagePullSecrets": [{"name": MARIADB_IMAGE_PULL_SECRET_NAME}],
                     "securityContext": {
@@ -1794,6 +1833,550 @@ def preflight_rabbitmq_resources(
                 accepted_version=accepted_version,
                 owner=owner,
                 settings=settings,
+            ),
+        ),
+    )
+
+
+KEYSTONE_DATABASE_CREDENTIALS_KEYS = frozenset({"keystone_database_password"})
+
+
+def generate_keystone_database_credentials(
+    token_factory: Callable[[int], str] = secrets.token_urlsafe,
+) -> dict[str, str]:
+    """Generate the dedicated retained Keystone database password."""
+    return _generate_credentials(KEYSTONE_DATABASE_CREDENTIALS_KEYS, token_factory)
+
+
+def build_keystone_database_credentials_secret(
+    *,
+    appliance_name: str,
+    namespace: str,
+    accepted_version: str,
+    retention: str,
+    values: Mapping[str, str],
+) -> dict[str, Any]:
+    """Build the retained Keystone database credentials Secret."""
+    return _build_retained_secret(
+        appliance_name=appliance_name,
+        namespace=namespace,
+        accepted_version=accepted_version,
+        component="keystone-database-credentials",
+        retention=retention,
+        values=values,
+        expected_keys=KEYSTONE_DATABASE_CREDENTIALS_KEYS,
+    )
+
+
+def build_keystone_fernet_keys_secret(
+    *,
+    appliance_name: str,
+    namespace: str,
+    accepted_version: str,
+    retention: str,
+    values: Mapping[str, str],
+) -> dict[str, Any]:
+    """Build the retained Keystone Fernet key repository Secret."""
+    return _build_retained_secret(
+        appliance_name=appliance_name,
+        namespace=namespace,
+        accepted_version=accepted_version,
+        component="keystone-fernet-keys",
+        retention=retention,
+        values=values,
+        expected_keys=KEYSTONE_KEY_KEYS,
+    )
+
+
+def build_keystone_credential_keys_secret(
+    *,
+    appliance_name: str,
+    namespace: str,
+    accepted_version: str,
+    retention: str,
+    values: Mapping[str, str],
+) -> dict[str, Any]:
+    """Build the retained Keystone credential key repository Secret."""
+    return _build_retained_secret(
+        appliance_name=appliance_name,
+        namespace=namespace,
+        accepted_version=accepted_version,
+        component="keystone-credential-keys",
+        retention=retention,
+        values=values,
+        expected_keys=KEYSTONE_KEY_KEYS,
+    )
+
+
+def _build_keystone_owned(
+    *,
+    appliance_name: str,
+    namespace: str,
+    accepted_version: str,
+    owner: Mapping[str, Any],
+    component: str,
+    kind: str,
+    values: Mapping[str, str],
+    expected_keys: frozenset[str],
+) -> dict[str, Any]:
+    resource_name = appliance_resource_name(appliance_name, component)
+    body: dict[str, Any] = {
+        "apiVersion": "v1",
+        "kind": kind,
+        "metadata": build_resource_metadata(
+            resource_name=resource_name,
+            namespace=namespace,
+            appliance_name=appliance_name,
+            component=component,
+            accepted_version=accepted_version,
+            owner=owner,
+        ),
+    }
+    checked = _validated_opaque_values(values, expected_keys, resource_name)
+    if kind == "Secret":
+        body.update({"type": "Opaque", "data": _encoded_secret_data(checked)})
+    else:
+        body["data"] = checked
+    return body
+
+
+def build_keystone_config_map(
+    *,
+    appliance_name: str,
+    namespace: str,
+    accepted_version: str,
+    owner: Mapping[str, Any],
+    values: Mapping[str, str],
+) -> dict[str, Any]:
+    """Build the owner-referenced non-sensitive Keystone ConfigMap."""
+    return _build_keystone_owned(
+        appliance_name=appliance_name,
+        namespace=namespace,
+        accepted_version=accepted_version,
+        owner=owner,
+        component="keystone-config",
+        kind="ConfigMap",
+        values=values,
+        expected_keys=KEYSTONE_CONFIG_KEYS,
+    )
+
+
+def build_keystone_config_secret(
+    *,
+    appliance_name: str,
+    namespace: str,
+    accepted_version: str,
+    owner: Mapping[str, Any],
+    values: Mapping[str, str],
+) -> dict[str, Any]:
+    """Build the owner-referenced sensitive Keystone configuration Secret."""
+    return _build_keystone_owned(
+        appliance_name=appliance_name,
+        namespace=namespace,
+        accepted_version=accepted_version,
+        owner=owner,
+        component="keystone-config-secret",
+        kind="Secret",
+        values=values,
+        expected_keys=KEYSTONE_SECRET_CONFIG_KEYS,
+    )
+
+
+def _keystone_security_context() -> dict[str, Any]:
+    return {
+        "runAsNonRoot": True,
+        "readOnlyRootFilesystem": True,
+        "allowPrivilegeEscalation": False,
+        "capabilities": {"drop": ["ALL"]},
+        "seccompProfile": {"type": "RuntimeDefault"},
+    }
+
+
+def build_keystone_deployment(
+    *,
+    appliance_name: str,
+    namespace: str,
+    accepted_version: str,
+    owner: Mapping[str, Any],
+) -> dict[str, Any]:
+    """Build Keystone's restricted single-replica direct-WSGI Deployment."""
+    component = "keystone"
+    resource_name = appliance_resource_name(appliance_name, component)
+    metadata = build_resource_metadata(
+        resource_name=resource_name,
+        namespace=namespace,
+        appliance_name=appliance_name,
+        component=component,
+        accepted_version=accepted_version,
+        owner=owner,
+    )
+    selector = {
+        "coriolis.cloudbase.it/appliance": appliance_identity(appliance_name),
+        "coriolis.cloudbase.it/component": component,
+    }
+    config_name = appliance_resource_name(appliance_name, "keystone-config")
+    secret_name = appliance_resource_name(appliance_name, "keystone-config-secret")
+    fernet_name = appliance_resource_name(appliance_name, "keystone-fernet-keys")
+    credential_name = appliance_resource_name(
+        appliance_name, "keystone-credential-keys"
+    )
+    source_mounts = [
+        {"name": "config-source", "mountPath": "/source/config", "readOnly": True},
+        {"name": "secret-source", "mountPath": "/source/secret", "readOnly": True},
+        {"name": "database-source", "mountPath": "/source/database", "readOnly": True},
+        {"name": "fernet-source", "mountPath": "/source/fernet", "readOnly": True},
+        {
+            "name": "credential-source",
+            "mountPath": "/source/credential",
+            "readOnly": True,
+        },
+    ]
+    runtime_mounts = [
+        {"name": "config", "mountPath": "/etc/keystone/runtime"},
+        {"name": "fernet", "mountPath": KEYSTONE_FERNET_KEYS_DIR},
+        {"name": "credential", "mountPath": KEYSTONE_CREDENTIAL_KEYS_DIR},
+        {"name": "tmp", "mountPath": "/tmp"},
+        {"name": "run", "mountPath": "/run"},
+        {"name": "data", "mountPath": "/var/lib/keystone"},
+        {"name": "logs", "mountPath": "/var/log/kolla"},
+    ]
+    prepare = {
+        "name": "prepare",
+        "image": KEYSTONE_IMAGE,
+        "command": ["/bin/sh", "-ec"],
+        "args": [
+            "set -eu; install -d -m 0700 /etc/keystone/runtime "
+            f"{KEYSTONE_FERNET_KEYS_DIR} {KEYSTONE_CREDENTIAL_KEYS_DIR}; "
+            "install -m 0600 /source/config/bootstrap.py "
+            "/etc/keystone/runtime/bootstrap.py; "
+            "install -m 0600 /source/secret/keystone.conf "
+            "/etc/keystone/runtime/keystone.conf; "
+            "install -m 0600 /source/secret/auth-request.json "
+            "/etc/keystone/runtime/auth-request.json; "
+            "install -m 0600 /source/database/keystone_admin_password "
+            "/etc/keystone/runtime/admin-password; "
+            f"install -m 0600 /source/fernet/0 {KEYSTONE_FERNET_KEYS_DIR}/0; "
+            f"install -m 0600 /source/fernet/1 {KEYSTONE_FERNET_KEYS_DIR}/1; "
+            f"install -m 0600 /source/credential/0 {KEYSTONE_CREDENTIAL_KEYS_DIR}/0; "
+            f"install -m 0600 /source/credential/1 {KEYSTONE_CREDENTIAL_KEYS_DIR}/1"
+        ],
+        "securityContext": _keystone_security_context(),
+        "volumeMounts": source_mounts + runtime_mounts,
+    }
+    sync = {
+        "name": "db-sync",
+        "image": KEYSTONE_IMAGE,
+        "command": ["/bin/sh", "-ec"],
+        "args": [
+            f"/var/lib/kolla/venv/bin/keystone-manage --config-file "
+            f"{KEYSTONE_CONFIG_PATH} db_sync && "
+            f"/var/lib/kolla/venv/bin/keystone-manage --config-file "
+            f"{KEYSTONE_CONFIG_PATH} db_sync --check"
+        ],
+        "securityContext": _keystone_security_context(),
+        "volumeMounts": runtime_mounts,
+    }
+    bootstrap = {
+        "name": "bootstrap",
+        "image": KEYSTONE_IMAGE,
+        "command": ["/var/lib/kolla/venv/bin/python", KEYSTONE_BOOTSTRAP_PATH],
+        "securityContext": _keystone_security_context(),
+        "volumeMounts": runtime_mounts,
+    }
+    auth = (
+        "status=$(curl --silent --show-error --output /tmp/body "
+        "--dump-header /tmp/headers "
+        "--write-out '%{http_code}' --header 'Content-Type: application/json' "
+        f"--data-binary @{KEYSTONE_AUTH_REQUEST_PATH} "
+        f"http://127.0.0.1:{KEYSTONE_PORT}/v3/auth/tokens); "
+        "[ \"$status\" = 201 ] && grep -qi '^X-Subject-Token: .\\+' /tmp/headers"
+    )
+    main = {
+        "name": component,
+        "image": KEYSTONE_IMAGE,
+        "command": [
+            "/var/lib/kolla/venv/bin/keystone-wsgi-public",
+            "--host",
+            "0.0.0.0",
+            "--port",
+            "5000",
+            "--",
+            "--config-file",
+            KEYSTONE_CONFIG_PATH,
+        ],
+        "ports": [
+            {"name": "keystone", "containerPort": KEYSTONE_PORT, "protocol": "TCP"}
+        ],
+        "securityContext": _keystone_security_context(),
+        "volumeMounts": runtime_mounts,
+        "startupProbe": {
+            "exec": {"command": ["/bin/sh", "-ec", auth]},
+            "periodSeconds": 10,
+            "timeoutSeconds": 10,
+            "failureThreshold": 30,
+        },
+        "readinessProbe": {
+            "exec": {"command": ["/bin/sh", "-ec", auth]},
+            "periodSeconds": 10,
+            "timeoutSeconds": 10,
+            "failureThreshold": 3,
+        },
+        "livenessProbe": {
+            "httpGet": {"path": "/v3", "port": KEYSTONE_PORT, "scheme": "HTTP"},
+            "periodSeconds": 10,
+            "timeoutSeconds": 5,
+            "failureThreshold": 6,
+        },
+    }
+    return {
+        "apiVersion": "apps/v1",
+        "kind": "Deployment",
+        "metadata": metadata,
+        "spec": {
+            "replicas": KEYSTONE_REPLICAS,
+            "strategy": {"type": "Recreate"},
+            "selector": {"matchLabels": selector},
+            "template": {
+                "metadata": {"labels": dict(metadata["labels"])},
+                "spec": {
+                    "imagePullSecrets": [{"name": KEYSTONE_IMAGE_PULL_SECRET_NAME}],
+                    "securityContext": {
+                        "runAsUser": KEYSTONE_RUN_AS_ID,
+                        "runAsGroup": KEYSTONE_RUN_AS_ID,
+                        "fsGroup": KEYSTONE_RUN_AS_ID,
+                        "fsGroupChangePolicy": "OnRootMismatch",
+                        "supplementalGroups": [KEYSTONE_SUPPLEMENTAL_GROUP],
+                    },
+                    "automountServiceAccountToken": False,
+                    "enableServiceLinks": False,
+                    "terminationGracePeriodSeconds": (
+                        KEYSTONE_TERMINATION_GRACE_PERIOD_SECONDS
+                    ),
+                    "initContainers": [prepare, sync, bootstrap],
+                    "containers": [main],
+                    "volumes": [
+                        {
+                            "name": "config-source",
+                            "configMap": {
+                                "name": config_name,
+                                "items": [
+                                    {
+                                        "key": "bootstrap.py",
+                                        "path": "bootstrap.py",
+                                        "mode": 0o444,
+                                    }
+                                ],
+                            },
+                        },
+                        {
+                            "name": "secret-source",
+                            "secret": {
+                                "secretName": secret_name,
+                                "items": [
+                                    {"key": key, "path": key, "mode": 0o440}
+                                    for key in sorted(KEYSTONE_SECRET_CONFIG_KEYS)
+                                ],
+                            },
+                        },
+                        {
+                            "name": "database-source",
+                            "secret": {
+                                "secretName": appliance_resource_name(
+                                    appliance_name, "infrastructure-credentials"
+                                ),
+                                "items": [
+                                    {
+                                        "key": "keystone_admin_password",
+                                        "path": "keystone_admin_password",
+                                        "mode": 0o440,
+                                    }
+                                ],
+                            },
+                        },
+                        {
+                            "name": "fernet-source",
+                            "secret": {
+                                "secretName": fernet_name,
+                                "items": [
+                                    {"key": key, "path": key, "mode": 0o440}
+                                    for key in sorted(KEYSTONE_KEY_KEYS)
+                                ],
+                            },
+                        },
+                        {
+                            "name": "credential-source",
+                            "secret": {
+                                "secretName": credential_name,
+                                "items": [
+                                    {"key": key, "path": key, "mode": 0o440}
+                                    for key in sorted(KEYSTONE_KEY_KEYS)
+                                ],
+                            },
+                        },
+                        {"name": "config", "emptyDir": {}},
+                        {"name": "fernet", "emptyDir": {}},
+                        {"name": "credential", "emptyDir": {}},
+                        {"name": "tmp", "emptyDir": {}},
+                        {"name": "run", "emptyDir": {}},
+                        {"name": "data", "emptyDir": {}},
+                        {"name": "logs", "emptyDir": {}},
+                    ],
+                },
+            },
+        },
+    }
+
+
+def preflight_keystone_resources(
+    *,
+    appliance_name: str,
+    namespace: str,
+    accepted_version: str,
+    owner: Mapping[str, Any],
+    retention: str,
+    database_host: object,
+    keystone_host: object,
+    keystone_admin_password: str,
+    keystone_database_credentials_secret: Any | None,
+    keystone_fernet_keys_secret: Any | None,
+    keystone_credential_keys_secret: Any | None,
+    keystone_config_map: Any | None,
+    keystone_config_secret: Any | None,
+    keystone_deployment: Any | None,
+    database_token_factory: Callable[[int], str] = secrets.token_urlsafe,
+    fernet_byte_factory: Callable[[int], bytes] = secrets.token_bytes,
+    credential_byte_factory: Callable[[int], bytes] = secrets.token_bytes,
+) -> KeystoneResourcePreflight:
+    """Classify all Keystone resources before validating, generating, or rendering."""
+    retained = (
+        (
+            "keystone-database-credentials",
+            keystone_database_credentials_secret,
+            KEYSTONE_DATABASE_CREDENTIALS_KEYS,
+        ),
+        (
+            "keystone-fernet-keys",
+            keystone_fernet_keys_secret,
+            KEYSTONE_KEY_KEYS,
+        ),
+        (
+            "keystone-credential-keys",
+            keystone_credential_keys_secret,
+            KEYSTONE_KEY_KEYS,
+        ),
+    )
+    owned = (
+        ("keystone-config", keystone_config_map),
+        ("keystone-config-secret", keystone_config_secret),
+        ("keystone", keystone_deployment),
+    )
+    names = {
+        component: appliance_resource_name(appliance_name, component)
+        for component, *_ in (*retained, *owned)
+    }
+    classifications: dict[str, RetainedClassification | OwnedClassification] = {}
+    for component, existing, _ in retained:
+        name = names[component]
+        classifications[name] = classify_retained_resource(
+            existing=existing,
+            resource_name=name,
+            namespace=namespace,
+            appliance_name=appliance_name,
+            component=component,
+            accepted_version=accepted_version,
+            retention=retention,
+        )
+    for component, existing in owned:
+        name = names[component]
+        classifications[name] = classify_owned_resource(
+            existing=existing,
+            resource_name=name,
+            namespace=namespace,
+            appliance_name=appliance_name,
+            component=component,
+            accepted_version=accepted_version,
+            owner=owner,
+        )
+    if any(value.value == "collision" for value in classifications.values()):
+        return KeystoneResourcePreflight(classifications, {}, ())
+    credentials: dict[str, Mapping[str, str]] = {}
+    for component, existing, expected in retained:
+        name = names[component]
+        if classifications[name] is RetainedClassification.REUSE:
+            try:
+                credentials[name] = validated_retained_secret_values(
+                    existing=existing, expected_keys=expected
+                )
+            except ValueError:
+                classifications[name] = RetainedClassification.COLLISION
+    if any(value.value == "collision" for value in classifications.values()):
+        return KeystoneResourcePreflight(classifications, {}, ())
+    for component, _, _ in retained:
+        name = names[component]
+        if classifications[name] is RetainedClassification.ABSENT:
+            if component == "keystone-database-credentials":
+                credentials[name] = generate_keystone_database_credentials(
+                    database_token_factory
+                )
+            elif component == "keystone-fernet-keys":
+                credentials[name] = generate_keystone_keys(fernet_byte_factory)
+            else:
+                credentials[name] = generate_keystone_keys(credential_byte_factory)
+    config = render_keystone_config(keystone_host=keystone_host)
+    secret = render_sensitive_keystone_config(
+        database_host=database_host,
+        keystone_host=keystone_host,
+        credentials=SensitiveKeystoneCredentials(
+            database_password=credentials[names["keystone-database-credentials"]][
+                "keystone_database_password"
+            ],
+            admin_password=keystone_admin_password,
+        ),
+    )
+    return KeystoneResourcePreflight(
+        classifications,
+        credentials,
+        (
+            build_keystone_database_credentials_secret(
+                appliance_name=appliance_name,
+                namespace=namespace,
+                accepted_version=accepted_version,
+                retention=retention,
+                values=credentials[names["keystone-database-credentials"]],
+            ),
+            build_keystone_fernet_keys_secret(
+                appliance_name=appliance_name,
+                namespace=namespace,
+                accepted_version=accepted_version,
+                retention=retention,
+                values=credentials[names["keystone-fernet-keys"]],
+            ),
+            build_keystone_credential_keys_secret(
+                appliance_name=appliance_name,
+                namespace=namespace,
+                accepted_version=accepted_version,
+                retention=retention,
+                values=credentials[names["keystone-credential-keys"]],
+            ),
+            build_keystone_config_map(
+                appliance_name=appliance_name,
+                namespace=namespace,
+                accepted_version=accepted_version,
+                owner=owner,
+                values=config,
+            ),
+            build_keystone_config_secret(
+                appliance_name=appliance_name,
+                namespace=namespace,
+                accepted_version=accepted_version,
+                owner=owner,
+                values=secret,
+            ),
+            build_keystone_deployment(
+                appliance_name=appliance_name,
+                namespace=namespace,
+                accepted_version=accepted_version,
+                owner=owner,
             ),
         ),
     )

@@ -44,7 +44,7 @@
 
 ## Later Milestones
 
-- MariaDB image, reconciliation, and anonymous-account prevention are released as `0.5.6`; its accepted single-node POC validated clean first boot, RWO, fsGroup, retained reuse, persistence, probes, and termination. Memcached reconciliation is released as `0.5.8`. RabbitMQ `0.5.11` passed its accepted released-artifact single-node POC after the unaccepted `0.5.10` readiness-timeout result was corrected from `5s`/`5s` to `10s`/`15s`. MariaDB/RabbitMQ CSI cross-node and production backup/restore, HA, RPO/RTO, credential rotation, and production storage acceptance remain later gates; Keystone runtime evidence follows.
+- MariaDB image, reconciliation, and anonymous-account prevention are released as `0.5.6`; its accepted single-node POC validated clean first boot, RWO, fsGroup, retained reuse, persistence, probes, and termination. Memcached reconciliation is released as `0.5.8`. RabbitMQ `0.5.11` passed its accepted released-artifact single-node POC after the unaccepted `0.5.10` readiness-timeout result was corrected from `5s`/`5s` to `10s`/`15s`. Keystone exact-image standalone evidence and its no-PVC/no-Job reconciliation implementation are complete and validated by 397 tests plus the repository quality gates; a CI-owned release and released-artifact POC follow. MariaDB/RabbitMQ CSI cross-node and production backup/restore, HA, RPO/RTO, credential/key rotation, and production storage acceptance remain later gates.
 - Add safe upgrade and production lifecycle capabilities after explicit contracts and operational review.
 
 ## Pending Decisions

@@ -59,6 +59,7 @@ def credentials() -> SensitiveMariaDBCredentials:
     return SensitiveMariaDBCredentials(
         database_password="ADMIN_SENTINEL",
         coriolis_database_password="CORIOLIS_SENTINEL",
+        keystone_database_password="KEYSTONE_SENTINEL",
     )
 
 

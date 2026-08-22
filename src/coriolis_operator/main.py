@@ -42,6 +42,7 @@ from coriolis_operator.reconcile import (
     invalid_runtime_configuration_conditions,
     kubernetes_coriolis_render_inputs,
     preflight_foundational_resources,
+    preflight_keystone_resources,
     preflight_mariadb_resources,
     preflight_memcached_resource,
     preflight_rabbitmq_resources,
@@ -298,6 +299,20 @@ def reconcile_appliance(
         rabbitmq_data_pvc_name = appliance_resource_name(name, "rabbitmq-data")
         rabbitmq_config_map_name = appliance_resource_name(name, "rabbitmq-config")
         rabbitmq_stateful_set_name = appliance_resource_name(name, "rabbitmq")
+        keystone_database_credentials_name = appliance_resource_name(
+            name, "keystone-database-credentials"
+        )
+        keystone_fernet_keys_name = appliance_resource_name(
+            name, "keystone-fernet-keys"
+        )
+        keystone_credential_keys_name = appliance_resource_name(
+            name, "keystone-credential-keys"
+        )
+        keystone_config_map_name = appliance_resource_name(name, "keystone-config")
+        keystone_config_secret_name = appliance_resource_name(
+            name, "keystone-config-secret"
+        )
+        keystone_deployment_name = appliance_resource_name(name, "keystone")
     except ReconcileRetry:
         raise
     except Exception:
@@ -432,6 +447,54 @@ def reconcile_appliance(
         accepted_version=accepted_version,
         status=status,
     )
+    keystone_database_credentials_existing = _read_or_absent(
+        api.read_namespaced_secret,
+        name=keystone_database_credentials_name,
+        namespace=namespace,
+        generation=generation,
+        accepted_version=accepted_version,
+        status=status,
+    )
+    keystone_fernet_keys_existing = _read_or_absent(
+        api.read_namespaced_secret,
+        name=keystone_fernet_keys_name,
+        namespace=namespace,
+        generation=generation,
+        accepted_version=accepted_version,
+        status=status,
+    )
+    keystone_credential_keys_existing = _read_or_absent(
+        api.read_namespaced_secret,
+        name=keystone_credential_keys_name,
+        namespace=namespace,
+        generation=generation,
+        accepted_version=accepted_version,
+        status=status,
+    )
+    keystone_config_map_existing = _read_or_absent(
+        api.read_namespaced_config_map,
+        name=keystone_config_map_name,
+        namespace=namespace,
+        generation=generation,
+        accepted_version=accepted_version,
+        status=status,
+    )
+    keystone_config_secret_existing = _read_or_absent(
+        api.read_namespaced_secret,
+        name=keystone_config_secret_name,
+        namespace=namespace,
+        generation=generation,
+        accepted_version=accepted_version,
+        status=status,
+    )
+    keystone_deployment_existing = _read_or_absent(
+        workloads_api.read_namespaced_deployment,
+        name=keystone_deployment_name,
+        namespace=namespace,
+        generation=generation,
+        accepted_version=accepted_version,
+        status=status,
+    )
     try:
         marker_classification = (
             classify_existing_marker(existing=marker_existing, desired=marker_body)
@@ -540,6 +603,73 @@ def reconcile_appliance(
             )
 
     try:
+        inputs = kubernetes_coriolis_render_inputs(name)
+        keystone_preflight = preflight_keystone_resources(
+            appliance_name=name,
+            namespace=namespace,
+            accepted_version=requested_version,
+            owner=owner,
+            retention=STATE_CREDENTIALS_RETENTION,
+            database_host=inputs.endpoints.database_host,
+            keystone_host=inputs.endpoints.keystone_host,
+            keystone_admin_password=preflight.credentials[
+                infrastructure_credentials_name
+            ]["keystone_admin_password"],
+            keystone_database_credentials_secret=(
+                keystone_database_credentials_existing
+            ),
+            keystone_fernet_keys_secret=keystone_fernet_keys_existing,
+            keystone_credential_keys_secret=keystone_credential_keys_existing,
+            keystone_config_map=keystone_config_map_existing,
+            keystone_config_secret=keystone_config_secret_existing,
+            keystone_deployment=keystone_deployment_existing,
+        )
+        keystone_collision = next(
+            (
+                resource_name
+                for resource_name, classification in (
+                    keystone_preflight.classifications.items()
+                )
+                if classification.value == "collision"
+            ),
+            None,
+        )
+    except ReconcileRetry:
+        raise
+    except Exception:
+        raise _retry_status(
+            generation, accepted_version, status, "ResourceApplyFailed"
+        ) from None
+    if keystone_collision is not None:
+        return build_status(
+            generation,
+            accepted_version=accepted_version,
+            conditions=collision_conditions(namespace, keystone_collision),
+            prior_conditions=_prior_conditions(status),
+        )
+    for existing, classification in (
+        (
+            keystone_config_map_existing,
+            keystone_preflight.classifications[keystone_config_map_name],
+        ),
+        (
+            keystone_config_secret_existing,
+            keystone_preflight.classifications[keystone_config_secret_name],
+        ),
+        (
+            keystone_deployment_existing,
+            keystone_preflight.classifications[keystone_deployment_name],
+        ),
+    ):
+        if (
+            classification is OwnedClassification.MANAGED
+            and _resource_version(existing) is None
+        ):
+            raise _retry_status(
+                generation, accepted_version, status, "ResourceApplyFailed"
+            )
+
+    try:
         mariadb_preflight = preflight_mariadb_resources(
             appliance_name=name,
             namespace=namespace,
@@ -552,6 +682,9 @@ def reconcile_appliance(
                 coriolis_database_password=preflight.credentials[
                     coriolis_credentials_name
                 ]["coriolis_database_password"],
+                keystone_database_password=keystone_preflight.credentials[
+                    keystone_database_credentials_name
+                ]["keystone_database_password"],
             ),
             owner=owner,
             mariadb_data_pvc=mariadb_data_pvc_existing,
@@ -694,9 +827,16 @@ def reconcile_appliance(
         rabbitmq_config_map_body,
         rabbitmq_stateful_set_body,
     ) = rabbitmq_preflight.manifests
+    (
+        keystone_database_credentials_body,
+        keystone_fernet_keys_body,
+        keystone_credential_keys_body,
+        keystone_config_map_body,
+        keystone_config_secret_body,
+        keystone_deployment_body,
+    ) = keystone_preflight.manifests
 
     try:
-        inputs = kubernetes_coriolis_render_inputs(name)
         config_map_body = build_coriolis_config_map(
             appliance_name=name,
             namespace=namespace,
@@ -818,6 +958,35 @@ def reconcile_appliance(
             accepted_version=accepted_version,
             status=status,
         )
+    for body, existing, classification in (
+        (
+            keystone_database_credentials_body,
+            keystone_database_credentials_existing,
+            keystone_preflight.classifications[keystone_database_credentials_name],
+        ),
+        (
+            keystone_fernet_keys_body,
+            keystone_fernet_keys_existing,
+            keystone_preflight.classifications[keystone_fernet_keys_name],
+        ),
+        (
+            keystone_credential_keys_body,
+            keystone_credential_keys_existing,
+            keystone_preflight.classifications[keystone_credential_keys_name],
+        ),
+    ):
+        if classification is RetainedClassification.REUSE:
+            continue
+        _create_or_apply(
+            api,
+            kind="secret",
+            body=body,
+            existing=existing,
+            category="ResourceApplyFailed",
+            generation=generation,
+            accepted_version=accepted_version,
+            status=status,
+        )
     if (
         mariadb_preflight.classifications[mariadb_data_pvc_name]
         is RetainedClassification.ABSENT
@@ -910,6 +1079,26 @@ def reconcile_appliance(
         accepted_version=accepted_version,
         status=status,
     )
+    for resource_api, kind, body, existing in (
+        (api, "config_map", keystone_config_map_body, keystone_config_map_existing),
+        (api, "secret", keystone_config_secret_body, keystone_config_secret_existing),
+        (
+            workloads_api,
+            "deployment",
+            keystone_deployment_body,
+            keystone_deployment_existing,
+        ),
+    ):
+        _create_or_apply(
+            resource_api,
+            kind=kind,
+            body=body,
+            existing=existing,
+            category="ResourceApplyFailed",
+            generation=generation,
+            accepted_version=accepted_version,
+            status=status,
+        )
     _create_or_apply(
         api,
         kind="config_map",

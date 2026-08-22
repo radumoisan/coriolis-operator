@@ -95,6 +95,7 @@ def test_rendered_mariadb_values_are_exactly_partitioned_and_follow_contract() -
     credentials = SensitiveMariaDBCredentials(
         database_password="ADMIN_SENTINEL",
         coriolis_database_password="CORIOLIS_SENTINEL",
+        keystone_database_password="KEYSTONE_SENTINEL",
     )
     sensitive = render_sensitive_mariadb_config(credentials=credentials)
 
@@ -314,6 +315,7 @@ def test_sensitive_rendering_escapes_credentials_and_redacts_errors() -> None:
     credentials = SensitiveMariaDBCredentials(
         database_password="admin\\\"'",
         coriolis_database_password="coriolis\\'",
+        keystone_database_password="keystone\\'",
     )
     values = render_sensitive_mariadb_config(credentials=credentials)
 
@@ -328,7 +330,9 @@ def test_sensitive_rendering_escapes_credentials_and_redacts_errors() -> None:
     ):
         render_sensitive_mariadb_config(
             credentials=SensitiveMariaDBCredentials(
-                database_password="", coriolis_database_password="secret"
+                database_password="",
+                coriolis_database_password="secret",
+                keystone_database_password="secret",
             )
         )
     assert "admin" not in repr(SensitiveMariaDBConfig({"x": "secret"}))
@@ -343,7 +347,9 @@ def test_sensitive_rendering_rejects_control_characters_without_value_leaks(
     with pytest.raises(ValueError) as error:
         render_sensitive_mariadb_config(
             credentials=SensitiveMariaDBCredentials(
-                database_password=sentinel, coriolis_database_password="safe-password"
+                database_password=sentinel,
+                coriolis_database_password="safe-password",
+                keystone_database_password="safe-password",
             )
         )
 
