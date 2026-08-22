@@ -1,7 +1,7 @@
 # CIXpress owns future synchronized release updates.
 image:
   repository: cr.virtomat.io/virtomat/coriolis/operator
-  tag: "0.5.9"
+  tag: "0.5.10"
   pullPolicy: IfNotPresent
 imagePullSecrets:
   - name: regcred
