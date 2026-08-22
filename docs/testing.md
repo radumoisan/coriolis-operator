@@ -4,11 +4,11 @@ Validate the work relevant to each change.
 
 ## :material-book-open-page-variant-outline: Current MariaDB Reconciliation Validation
 
-- The foundational gate is committed locally at `862777d`, with status commit `f219977`; both are unpushed and undeployed.
-- Validation passed: `uv run pytest tests/unit` (316 passed); Ruff lint/format; mypy; Helm lint/template; and `git diff --check`.
+- The development stack through MariaDB reconciliation is published on `origin/dev` at `55212b0`, including the foundational gate, four-Service slice, MariaDB evidence/contract, and pure preparation commit `5a2dfce`; it is undeployed.
+- Validation passed before publication: `uv run pytest tests/unit` (316 passed); Ruff lint/format; mypy; Helm lint/template; and `git diff --check`.
 - Coverage includes the marker-plus-four foundational gate and Service slice, followed by MariaDB desired-state preparation and local reconciliation integration: ordered reads; only `404` absent; all validation, classification, preflight, rendering, and manifest construction before writes; stable mutation-free `InvalidRuntimeConfiguration`; exact PVC create/no-write reuse; guarded ConfigMap, Secret, Service, and StatefulSet SSA; foundational writes, Services in frozen order, MariaDB resources, then marker last; PVC `get`/`create`; StatefulSet `get`/`create`/`patch`; no rollback; sanitized retry failures; stable `ResourceCollision`; and `Ready=False/RuntimeNotImplemented`.
 
-The four-Service slice is committed locally at `797235b` on `dev`, unpushed and undeployed. MariaDB pure desired-state preparation is committed locally at `5a2dfce`, unpushed and undeployed; its reconciliation integration is local, unpushed, and undeployed. Target-storage validation is next. Production backup/restore, HA, and RPO/RTO remain open; deployed `0.5.3` remains marker-only.
+The four-Service slice, MariaDB pure desired-state preparation, and reconciliation are part of the published `55212b0` development stack on `origin/dev`; that stack remains undeployed. Target-storage validation is next. Production backup/restore, HA, and RPO/RTO remain open; `Ready=False/RuntimeNotImplemented` and deployed `0.5.3` marker-only behavior remain truthful.
 
 Barbican and all other Services remain deferred; no Ingress route is emitted before its backend Service exists.
 

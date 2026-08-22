@@ -22,7 +22,7 @@ Ingress is the only external exposure. Backend and dependency Services are Clust
 
 ## :material-book-open-page-variant-outline: Current Implementation Boundary
 
-The marker-plus-four foundational integration is committed locally at `862777d`, with status commit `f219977`; both are unpushed and undeployed. The four-Service slice is committed locally at `797235b` on `dev`, unpushed and undeployed, retains its read prefix, and implements exactly four Services in frozen order: RabbitMQ `5672`, Memcached `11211`, MariaDB `3306`, and Keystone `5000`. MariaDB pure desired-state preparation is committed locally at `5a2dfce`, unpushed and undeployed; its reconciliation integration is local, unpushed, and undeployed. It uses ordered reads, completes preparation before writes, returns mutation-free `InvalidRuntimeConfiguration` for invalid storage/resources configuration, creates an absent PVC or exactly reuses it without writes, uses guarded SSA for managed ConfigMap, Secret, and StatefulSet resources, and writes MariaDB resources before the marker. PVC RBAC is `get`/`create`; StatefulSet RBAC is `get`/`create`/`patch`.
+The development stack through MariaDB reconciliation is published on `origin/dev` at `55212b0`, including the marker-plus-four foundational integration, four-Service slice, MariaDB evidence/contract, and pure preparation commit `5a2dfce`; it is undeployed. It retains the read prefix and implements exactly four Services in frozen order: RabbitMQ `5672`, Memcached `11211`, MariaDB `3306`, and Keystone `5000`. It uses ordered reads, completes preparation before writes, returns mutation-free `InvalidRuntimeConfiguration` for invalid storage/resources configuration, creates an absent PVC or exactly reuses it without writes, uses guarded SSA for managed ConfigMap, Secret, and StatefulSet resources, and writes MariaDB resources before the marker. PVC RBAC is `get`/`create`; StatefulSet RBAC is `get`/`create`/`patch`.
 
 Target-storage validation is next. MariaDB bootstrap and probe manifests are implemented locally but unvalidated on target storage; remaining dependency bootstrap, probe, and readiness work, Barbican and other Services, and route emission remain later milestones. No endpoints, Ingresses, or Jobs are implemented. No route may be emitted before its backend Service exists.
 
@@ -36,7 +36,7 @@ The condition types are `Accepted`, `Progressing`, `Reconciled`, `Ready`, `Degra
 
 The privileged worker may mount `/dev` and `/lib/modules`; single-node `local-path` storage is acceptable and not production HA. Console-editor behavior must be declarative rather than host mutation. Logger Unix-socket compatibility may use a shared retained volume as a transitional design.
 
-Milestone history remains: image/runtime inventory is complete; the foundational gate is committed locally but unpushed and undeployed; the four-Service slice is committed locally at `797235b` on `dev`, unpushed and undeployed; MariaDB pure desired-state preparation is committed locally at `5a2dfce`; its reconciliation integration is local, unpushed, and undeployed; and deployed `0.5.3` remains marker-only. Target-storage validation is next. Remaining Services and Ingress routes follow only after their backends are defined. The first runtime acceptance is complete bootstrap with internally healthy UI/API, not a migration test.
+Milestone history remains: image/runtime inventory is complete; the development stack through MariaDB reconciliation is published on `origin/dev` at `55212b0` and undeployed; and deployed `0.5.3` remains marker-only. Target-storage validation is next. Remaining Services and Ingress routes follow only after their backends are defined. The first runtime acceptance is complete bootstrap with internally healthy UI/API, not a migration test.
 
 Deferred work includes the licensing server and UI, Metal Hub, console editor and VM-host administration, external provider configuration, migration validation, automatic upgrades, and production HA.
 
@@ -44,9 +44,9 @@ Deferred work includes the licensing server and UI, Metal Hub, console editor an
 
 1. Image and runtime inventory is complete.
 2. CRD and runtime API are locally implemented and undeployed; this migration adds ingress schema/sample/pure validation only.
-3. Foundational resources are committed locally at `862777d` with status commit `f219977`; the four-Service slice is committed locally at `797235b` on `dev`, unpushed and undeployed, and adds only four dependency Services with matching guarded reconciliation and Service `get`/`create`/`patch` RBAC.
+3. Foundational resources, the four-Service slice, and MariaDB reconciliation are published on `origin/dev` through `55212b0` and undeployed; the four-Service slice adds only four dependency Services with matching guarded reconciliation and Service `get`/`create`/`patch` RBAC.
 4. Generated configuration retains immutable upstream provenance, provider order/maps, exact mount boundaries, and value-safe Secret handling.
-5. Dependency workloads, bootstrap Jobs, storage, and readiness remain later work.
+5. Remaining dependency workloads, bootstrap Jobs, storage, and readiness remain later work.
 6. Barbican and other backend Services, then logical-origin Ingress routing, remain later work; no route precedes its Service.
 7. Controller watches, status/readiness, broader tests, and development acceptance follow runtime construction.
 
