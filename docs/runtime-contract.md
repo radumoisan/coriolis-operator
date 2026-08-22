@@ -1,6 +1,6 @@
 # Runtime Contract
 
-Existing upstream Coriolis component repositories and images are immutable inputs. The operator does not rebuild or patch them. Argo currently runs healthy docs-only operator `0.5.9` with no appliance CR; `Ready=False/RuntimeNotImplemented` remains correct because the complete runtime is not implemented.
+Existing upstream Coriolis component repositories and images are immutable inputs. The operator does not rebuild or patch them. Argo currently runs healthy operator `0.5.11`, `1/1` with zero restarts and no appliance CR; `Ready=False/RuntimeNotImplemented` remains correct because the complete runtime is not implemented.
 
 ## :material-book-open-page-variant-outline: Completed Marker-Only Contract
 
@@ -22,13 +22,13 @@ Ingress is the only external exposure. Backend and dependency Services are Clust
 
 ## :material-book-open-page-variant-outline: Current Implementation Boundary
 
-The development stack through MariaDB reconciliation is included in released `0.5.6`. Memcached reconciliation source `063e438ef416599e9816a2400afcc5a5a7af9aa0` is released as `0.5.8`: one owner-referenced `Recreate` Deployment uses the approved digest, direct restricted startup, protocol probes, and Deployment `get`/`create`/`patch` only. The isolated single-node POC passed its Deployment, Service/EndpointSlice, protocol, replacement, and cleanup contracts. RabbitMQ now has local, uncommitted reconciliation for a separate retained PVC, owner ConfigMap, and restricted one-replica StatefulSet; it is not released or cluster-tested. No runtime workload remains deployed after validation cleanup.
+The development stack through MariaDB reconciliation is included in released `0.5.6`. Memcached reconciliation source `063e438ef416599e9816a2400afcc5a5a7af9aa0` is released as `0.5.8`. RabbitMQ reconciliation is released as `0.5.11` with its retained PVC, owner ConfigMap, and restricted one-replica StatefulSet. Its `0.5.10` bootstrap/authenticated-AMQP POC was not accepted after 37 readiness timeouts and Endpoint flapping at `5s`/`5s`; the `10s`/`15s` probe fix passed the accepted `0.5.11` single-node POC. No runtime workload remains deployed after validation cleanup.
 
-Clean first boot of `0.5.5` exposed anonymous initialization accounts shadowing `coriolis@%`; commit `3ee5d2d` adds `--skip-test-db` and CIXpress released it as `0.5.6`. Released `0.5.6` passed clean single-node `local-path` validation without repair: RWO Filesystem provisioning, fsGroup writes, exact retained reuse, persisted state, authenticated probes, same-node remount, and normal 12-second termination. CSI and cross-node attach/detach remain unvalidated. RabbitMQ publication and released-artifact POC, remaining dependency bootstrap/readiness, Barbican and other Services, and route emission remain later milestones. No Ingresses or Jobs are implemented.
+Clean first boot of `0.5.5` exposed anonymous initialization accounts shadowing `coriolis@%`; commit `3ee5d2d` adds `--skip-test-db` and CIXpress released it as `0.5.6`. Released `0.5.6` passed clean single-node `local-path` validation without repair: RWO Filesystem provisioning, fsGroup writes, exact retained reuse, persisted state, authenticated probes, same-node remount, and normal 12-second termination. RabbitMQ `0.5.11` has accepted released-artifact single-node POC evidence; Keystone runtime evidence is next. CSI and cross-node attach/detach remain unvalidated, and backup/restore, HA, RPO/RTO, credential rotation, and production storage remain open. Remaining dependency bootstrap/readiness, Barbican and other Services, and route emission remain later milestones. No Ingresses or Jobs are implemented.
 
 ## :material-book-open-page-variant-outline: API And Lifecycle Policy
 
-The `v1alpha1` API retains optional/defaulted `spec.profile` (`core`), required non-empty `spec.version`, and optional `status.acceptedVersion`; version changes are controller-blocked through status rather than admission. Ingress plus optional MariaDB and RabbitMQ storage/resources CRD fields remain schema-compatible; complete runtime settings are required before mutation. Current local reconciliation adds RabbitMQ retained storage, configuration, and StatefulSet after released MariaDB and Memcached work, but no Ingress, Job, release/chart/image version, or deployment behavior.
+The `v1alpha1` API retains optional/defaulted `spec.profile` (`core`), required non-empty `spec.version`, and optional `status.acceptedVersion`; version changes are controller-blocked through status rather than admission. Ingress plus optional MariaDB and RabbitMQ storage/resources CRD fields remain schema-compatible; complete runtime settings are required before mutation. Released `0.5.11` reconciliation adds RabbitMQ retained storage, configuration, and StatefulSet after released MariaDB and Memcached work, but no Ingress or Job behavior.
 
 The condition types are `Accepted`, `Progressing`, `Reconciled`, `Ready`, `Degraded`, and `Upgradeable`. `Ready=False/RuntimeNotImplemented` remains truthful until required dependencies, workloads, and internal checks exist. Deletion garbage-collects operator-owned workloads, Services, Jobs, and generated ConfigMaps; retained state credentials and PVCs survive, and external referenced Secrets are never deleted.
 
@@ -36,7 +36,7 @@ The condition types are `Accepted`, `Progressing`, `Reconciled`, `Ready`, `Degra
 
 The privileged worker may mount `/dev` and `/lib/modules`; single-node `local-path` storage is acceptable and not production HA. Console-editor behavior must be declarative rather than host mutation. Logger Unix-socket compatibility may use a shared retained volume as a transitional design.
 
-Milestone history remains: image/runtime inventory, the MariaDB single-node POC, and the Memcached `0.5.8` single-node POC are complete. RabbitMQ local image/runtime evidence and reconciliation are complete; publication and a released-artifact POC follow next. No appliance or runtime workload remains after cleanup. MariaDB/RabbitMQ CSI cross-node evidence and production storage acceptance remain later gates. Remaining Services and Ingress routes follow only after their backends are defined. The first runtime acceptance is complete bootstrap with internally healthy UI/API, not a migration test.
+Milestone history remains: image/runtime inventory, the MariaDB single-node POC, the Memcached `0.5.8` POC, and the RabbitMQ `0.5.11` accepted POC are complete. RabbitMQ acceptance covered manifest/security, clean bootstrap, fsGroup/RWO, Service/EndpointSlice, authenticated durable AMQP, stable readiness, Pod replacement, retained no-write CR recreation, and cleanup. No appliance or runtime workload remains after cleanup. MariaDB/RabbitMQ CSI cross-node evidence, backup/restore, HA, RPO/RTO, credential rotation, and production storage remain later gates. Keystone runtime evidence is next.
 
 Deferred work includes the licensing server and UI, Metal Hub, console editor and VM-host administration, external provider configuration, migration validation, automatic upgrades, and production HA.
 
@@ -46,7 +46,7 @@ Deferred work includes the licensing server and UI, Metal Hub, console editor an
 2. CRD and runtime API are locally implemented and undeployed; optional explicit MariaDB and RabbitMQ storage/resource inputs are present without changing the API version.
 3. Foundational resources, the four-Service slice, and MariaDB reconciliation are published on `origin/dev` through `55212b0` and undeployed; the four-Service slice adds only four dependency Services with matching guarded reconciliation and Service `get`/`create`/`patch` RBAC.
 4. Generated configuration retains immutable upstream provenance, provider order/maps, exact mount boundaries, and value-safe Secret handling.
-5. Publish the locally implemented RabbitMQ reconciliation and complete its isolated released-artifact POC. Memcached is published and its POC is complete. Remaining dependency workloads, bootstrap Jobs, storage, and readiness remain later work.
+5. RabbitMQ is published and its isolated released-artifact POC is accepted. Gather Keystone runtime evidence before implementation; remaining dependency workloads, bootstrap Jobs, storage, and readiness remain later work.
 6. Barbican and other backend Services, then logical-origin Ingress routing, remain later work; no route precedes its Service.
 7. Controller watches, status/readiness, broader tests, and development acceptance follow runtime construction.
 

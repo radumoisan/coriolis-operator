@@ -16,7 +16,7 @@
 - Validated registry metadata before pulls; recorded immutable digests, platforms, runtime configuration, health capabilities, and compatibility.
 - Configured the destination-registry pull Secret `coriolis-appliance-registry` (type `kubernetes.io/dockerconfigjson`) in `virt-infra-dev-buc-hq` namespace `coriolis`, without storing credential values in the repository.
 - Pull validation passed for all 21 historically selected image references (10 application images at `2603.4`, 10 support images at `2023.1-ubuntu-jammy`, and Step CA at `2603.4`); each pulled successfully serially with `imagePullPolicy: Always`, each successful Pod was removed, and no pull-validation Pods remain. Independent main-agent validation of Step CA repeated successfully. Step CA and web-proxy are deferred from the current initial runtime.
-- The inventory and pull gates are complete. The development stack through MariaDB reconciliation is included in `0.5.6`; Memcached reconciliation source `063e438ef416599e9816a2400afcc5a5a7af9aa0` is included in released `0.5.8` and passed its isolated single-node POC. No core runtime workload remains after cleanup.
+- The inventory and pull gates are complete. The development stack through MariaDB reconciliation is included in `0.5.6`; Memcached reconciliation is released in `0.5.8`; RabbitMQ is released in `0.5.11` and passed its accepted isolated single-node POC. No core runtime workload remains after cleanup.
 
 ## Milestone 3: Core Runtime API Slice (Implemented Locally)
 
@@ -44,7 +44,7 @@
 
 ## Later Milestones
 
-- MariaDB image, reconciliation, and anonymous-account prevention are released as `0.5.6`; its accepted single-node POC validated clean first boot, RWO, fsGroup, retained reuse, persistence, probes, and termination. Memcached reconciliation is released as `0.5.8` and its isolated single-node POC validated the ephemeral Deployment, Service endpoint, protocol, replacement, and cleanup contract. RabbitMQ has local runtime evidence and reconciliation; publication and its released-artifact POC follow next. MariaDB/RabbitMQ CSI cross-node and production backup/restore, HA, and RPO/RTO acceptance remain later gates.
+- MariaDB image, reconciliation, and anonymous-account prevention are released as `0.5.6`; its accepted single-node POC validated clean first boot, RWO, fsGroup, retained reuse, persistence, probes, and termination. Memcached reconciliation is released as `0.5.8`. RabbitMQ `0.5.11` passed its accepted released-artifact single-node POC after the unaccepted `0.5.10` readiness-timeout result was corrected from `5s`/`5s` to `10s`/`15s`. MariaDB/RabbitMQ CSI cross-node and production backup/restore, HA, RPO/RTO, credential rotation, and production storage acceptance remain later gates; Keystone runtime evidence follows.
 - Add safe upgrade and production lifecycle capabilities after explicit contracts and operational review.
 
 ## Pending Decisions

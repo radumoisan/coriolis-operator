@@ -1,6 +1,6 @@
 # Foundational Resource Contract
 
-This page freezes the foundational Kubernetes resource contract for the `core` profile. It records policy, authoritative evidence, implemented pure/API-local slices, and local runtime slices. The current Argo deployment is docs-only operator `0.5.9`; it has zero appliance CRs and does not establish runtime behavior.
+This page freezes the foundational Kubernetes resource contract for the `core` profile. It records policy, authoritative evidence, implemented pure/API-local slices, and runtime slices. Argo currently runs operator `0.5.11`, `1/1` with zero restarts and zero appliance CRs; that deployed controller does not establish overall appliance readiness.
 
 !!! note
     Earlier commits documented three retained Secrets, Step CA bootstrap, and a marker-plus-five-resource sequence. Those are historical design and validation facts only. They are superseded by the marker-plus-four-resource contract below; no past commit, mirror result, or source input is rewritten.
@@ -101,7 +101,7 @@ The runtime integration validates profile/version, collision-safely reads the ma
 
 Create absent resources collision-safely; apply managed owner-referenced resources with resourceVersion-guarded SSA; never write retained reuse. Write the four foundational resources, then the four Services in frozen order, MariaDB resources, RabbitMQ resources, the Memcached Deployment, and the marker last. `AlreadyExists` and resource-version conflicts retry from fresh reads. A failure writes a sanitized status before framework retry, with no rollback or compensation. `ResourceCollision` is non-transient and mutation-free. The historical marker-plus-five sequence, including Step CA credentials, is superseded and retained only as validation history.
 
-The development stack through MariaDB reconciliation and anonymous-account prevention is released as `0.5.6`. Source `063e438ef416599e9816a2400afcc5a5a7af9aa0` adds the Memcached Deployment and is released as `0.5.8`. Its isolated single-node POC passed the exact restricted Deployment, Service/EndpointSlice, protocol, replacement, ephemerality, and cleanup contracts. That POC observed healthy operator `0.5.8`; Argo currently runs healthy docs-only `0.5.9` with no appliance CR. `Ready=False/RuntimeNotImplemented` remains truthful until runtime readiness is implemented.
+The development stack through MariaDB reconciliation and anonymous-account prevention is released as `0.5.6`. Source `063e438ef416599e9816a2400afcc5a5a7af9aa0` adds the Memcached Deployment and is released as `0.5.8`. Its isolated single-node POC passed the exact restricted Deployment, Service/EndpointSlice, protocol, replacement, ephemerality, and cleanup contracts. That POC observed healthy operator `0.5.8`; Argo now runs healthy `0.5.11` with no appliance CR. `Ready=False/RuntimeNotImplemented` remains truthful until runtime readiness is implemented.
 
 ## :material-book-open-page-variant-outline: Ingress And Service Contract
 
@@ -147,7 +147,7 @@ The public contract is one origin, `https://<host>`. It may use multiple ingress
 | `/licensing` | licensing server `/v2` |
 | `/metal-hub` | Metal Hub `/api/v1` |
 
-No future route may be emitted until its backend Service exists. RabbitMQ, Memcached, MariaDB, and Keystone Services are implemented. MariaDB and Memcached workloads are released and POC-tested, but no workload is currently deployed after cleanup; RabbitMQ, Keystone, and application workloads, endpoints, Ingress, and other Services are not implemented. Before adding the web workload, prove offline that the web image starts without `CA_FINGERPRINT` and without a Step CA mount.
+No future route may be emitted until its backend Service exists. RabbitMQ, Memcached, MariaDB, and Keystone Services are implemented. MariaDB, Memcached, and RabbitMQ workloads are released and POC-tested, but no workload is currently deployed after cleanup; Keystone and application workloads, endpoints, Ingress, and other Services are not implemented. Before adding the web workload, prove offline that the web image starts without `CA_FINGERPRINT` and without a Step CA mount.
 
 ## :material-book-open-page-variant-outline: Current Status And Accuracy
 
@@ -231,7 +231,7 @@ These slice records establish pure/API behavior only. The subsequent marker-plus
 
 ## :material-book-open-page-variant-outline: Dependency And Resource Plan
 
-This section began as the documentation-only dependency evidence gate. MariaDB and Memcached now have released implementations and accepted single-node POCs; RabbitMQ has local runtime evidence and an uncommitted implementation. Keystone and later dependencies remain fail-closed on missing evidence. The contracts below distinguish implementation, release, POC, and production readiness.
+This section began as the documentation-only dependency evidence gate. MariaDB and Memcached have released implementations and accepted single-node POCs; RabbitMQ is released in `0.5.11` with accepted single-node POC evidence. Keystone and later dependencies remain fail-closed on missing evidence. The contracts below distinguish implementation, release, POC, and production readiness.
 
 ### :material-application-edit-outline: Approved Mirror Identities
 
@@ -242,14 +242,14 @@ The approved support-image identities are frozen from `scripts/mirror-images.py`
 - MariaDB: `cr.virtomat.io/virtomat/coriolis/mariadb-server:2023.1-ubuntu-jammy@sha256:22cb109d23d1aa6a6acb17e54657b5b9cd753837b01345b52fc3c35cbbd9981e`
 - Keystone: `cr.virtomat.io/virtomat/coriolis/keystone:2023.1-ubuntu-jammy@sha256:7c57962762f5e6fdb1a109097e8f3e2e5f6218ad9c09f10a585adb67ed245cf0`
 
-The mirrored tags were pull-validated. The tag-plus-digest strings themselves were not cluster-tested. Future workload manifests must pin the approved mirror digest and use the read-only external `coriolis-appliance-registry` pull Secret.
+The mirrored tags were pull-validated. MariaDB, Memcached, and RabbitMQ workloads additionally validated their exact tag-plus-digest identities in accepted single-node POCs; Keystone remains unvalidated. Future workload manifests must pin the approved mirror digest and use the read-only external `coriolis-appliance-registry` pull Secret.
 
 ### :material-application-edit-outline: Dependency Evidence Matrix
 
 | Dependency | Fixed Service and source-backed consumption | Exact eligibility blockers |
 | --- | --- | --- |
-| RabbitMQ | Plaintext Kubernetes Service `5672`; source Kolla TLS is historical and must not be copied. Coriolis uses user `openstack` and `rabbitmq_password`. Local evidence and a local reconciliation contract now cover image/runtime identity, direct startup, retained storage, file-only bootstrap, user/vhost/permission provisioning, probes, and lifecycle design. | Released-artifact single-node POC; target storage fsGroup/RWO; authenticated AMQP through Service DNS; EndpointSlice; normal replacement/same-node remount/persistence; CR recreation retained reuse/no-write; and cleanup. CSI cross-node, backup/restore, HA, RPO/RTO, and credential rotation remain later gates. |
-| Memcached | Service `11211`; no credentials, provisioning, or configuration found. OCI and standalone evidence support the released Deployment implementation described below. | Released `0.5.8` single-node POC is complete; persistence, HA, credentials, configuration, resource API, and production readiness are not claimed. RabbitMQ publication and POC are next. |
+| RabbitMQ | Plaintext Kubernetes Service `5672`; source Kolla TLS is historical and must not be copied. Coriolis uses user `openstack` and `rabbitmq_password`. Released `0.5.11` reconciliation and accepted single-node POC evidence cover image/runtime identity, direct startup, retained storage, file-only bootstrap, user/vhost/permission provisioning, probes, and lifecycle. | Released `0.5.11` single-node POC is complete: target storage fsGroup/RWO, authenticated AMQP through Service DNS, EndpointSlice, normal replacement/same-node persistence, CR recreation retained reuse/no-write, and cleanup. CSI cross-node, backup/restore, HA, RPO/RTO, credential rotation, and production storage remain later gates. |
+| Memcached | Service `11211`; no credentials, provisioning, or configuration found. OCI and standalone evidence support the released Deployment implementation described below. | Released `0.5.8` single-node POC is complete; persistence, HA, credentials, configuration, resource API, and production readiness are not claimed. Keystone runtime evidence is next. |
 | MariaDB | Service `3306`; `/etc/kolla/mariadb/galera.cnf` adjusts `max_allowed_packet=64M` and `innodb_log_file_size=256M`. Admin uses `database_password`. Coriolis common idempotently creates database/user `coriolis` with `coriolis_database_password` and grants `coriolis.*:ALL` from `%`. OCI, standalone runtime, and the development Kubernetes contract are recorded below. | Released `0.5.6` passed the accepted single-node `local-path` POC. CSI attach-detach/rescheduling and production backup/restore, HA, and RPO/RTO remain deferred. |
 | Keystone | HTTP Service `5000`; `/etc/kolla/keystone/wsgi-keystone.conf`; admin uses `keystone_admin_password`. Coriolis common idempotently creates user `coriolis`, admin role on `service`, `migration` service, and RegionOne admin/internal/public endpoints. | OCI metadata; WSGI config and command; MariaDB schema/sync; fernet/bootstrap state; writable paths; probe. |
 
@@ -335,16 +335,16 @@ This is a frozen development contract. MariaDB pure desired-state preparation an
 
 ## :material-book-open-page-variant-outline: RabbitMQ Kubernetes Contract
 
-This is a local, uncommitted, unpushed, undeployed single-node development contract, not a POC or readiness claim.
+This contract was local evidence before publication. It is now implemented and released in `0.5.11`; the accepted single-node POC evidence below is the current acceptance record, not overall appliance readiness.
 
 - Optional explicit `spec.storage.rabbitmq` and `spec.resources.rabbitmq` require complete valid settings before RabbitMQ manifest preparation. Invalid settings are stable and mutation-free.
 - Create one separate ownerless retained RWO Filesystem PVC with exact-match no-write reuse, one owner ConfigMap, and one restricted owner-referenced StatefulSet with `replicas: 1`. Use the existing RabbitMQ Service and infrastructure Secret reference, direct file-only scripts, and the approved digest. No new RBAC verbs are added.
 - Read and classify before mutation; prepare all RabbitMQ manifests before writes; use guarded SSA for managed rebuildable resources; preserve retained PVC reuse without writes. After MariaDB writes, write RabbitMQ before Memcached, with the marker last. Collisions are mutation-free and failures remain value-safe.
-- Required Kubernetes acceptance remains unresolved: released-artifact single-node POC, target storage fsGroup/RWO, authenticated AMQP through Service DNS, EndpointSlice, normal replacement/same-node remount/persistence, CR recreation retained reuse/no-write, and cleanup. CSI cross-node, backup/restore, HA, RPO/RTO, and credential rotation are later gates. Keystone is not eligible until RabbitMQ POC acceptance. `Ready=False/RuntimeNotImplemented` remains truthful.
+- Released `0.5.11` accepted the single-node `local-path` gates: fsGroup/RWO, Service/EndpointSlice, authenticated AMQP through Service DNS, stable readiness, normal replacement/same-node persistence, exact retained no-write CR recreation, and cleanup. CSI cross-node, backup/restore, HA, RPO/RTO, credential rotation, and production storage remain later gates. Keystone runtime evidence is next. `Ready=False/RuntimeNotImplemented` remains truthful.
 
 ### :material-application-edit-outline: Eligibility Sequence
 
-Complete all four dependency interfaces first. MariaDB's accepted clean single-node POC is complete; CSI/cross-node evidence remains later. Memcached is released and its isolated POC is complete. RabbitMQ has local runtime evidence and implementation but remains blocked on its released-artifact POC gates. Keystone follows only after RabbitMQ POC acceptance; Coriolis common bootstrap follows healthy dependencies. Historical Ansible order is evidence, not Kubernetes readiness proof.
+Complete all four dependency interfaces first. MariaDB's accepted clean single-node POC is complete; CSI/cross-node evidence remains later. Memcached is released and its isolated POC is complete. RabbitMQ `0.5.11` has accepted released-artifact POC evidence. Keystone runtime evidence follows; Coriolis common bootstrap follows healthy dependencies. Historical Ansible order is evidence, not Kubernetes readiness proof.
 
 Before code for any dependency, require evidence for:
 
@@ -360,7 +360,7 @@ If evidence is absent, stop rather than infer.
 
 The development stack through MariaDB reconciliation is included in released `0.5.6`. Memcached source `063e438ef416599e9816a2400afcc5a5a7af9aa0` is included in released `0.5.8`; pipeline `4dcpfk` and each expected step succeeded. The completed POC removed its CR, Helm release, namespace, copied registry Secret, retained PVC, and Delete-policy PV; the node remained Ready/schedulable and zero appliances remained cluster-wide. No workload remains deployed after cleanup.
 
-For MariaDB, the development contract fixes workload, retained storage, generated manifests, bootstrap, probes, resource rules, lifecycle, and console logging; preparation, reconciliation, and anonymous-account prevention are published on `origin/dev`, with the fix released as `0.5.6`. Released clean-first-boot single-node `local-path` validation passed for RWO, fsGroup, zero anonymous/test accounts, retained reuse, same-node remount, authenticated probes, persistence, and clean termination without repair. CSI/cross-node evidence remains open. RabbitMQ local implementation remains uncommitted, unpushed, undeployed, and runtime-incomplete pending its released-artifact POC gates. Keystone schema/fernet/bootstrap evidence and a selected, proven `coriolis-dbsync` Job contract remain unresolved until RabbitMQ is accepted. Credential rotation, provider private material, optional component credentials, Barbican and other backend Services, and Ingress routes after backend workloads remain deferred.
+For MariaDB, the development contract fixes workload, retained storage, generated manifests, bootstrap, probes, resource rules, lifecycle, and console logging; preparation, reconciliation, and anonymous-account prevention are published on `origin/dev`, with the fix released as `0.5.6`. Released clean-first-boot single-node `local-path` validation passed for RWO, fsGroup, zero anonymous/test accounts, retained reuse, same-node remount, authenticated probes, persistence, and clean termination without repair. RabbitMQ `0.5.11` accepted POC evidence covers its single-node local-path contract, including clean-storage smoke and normal cleanup. CSI/cross-node, backup/restore, HA, RPO/RTO, credential rotation, and production storage remain open. Keystone runtime evidence is next; provider private material, optional component credentials, Barbican and other backend Services, and Ingress routes remain deferred.
 
 ### :material-application-edit-outline: Milestone History
 
