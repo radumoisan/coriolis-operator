@@ -10,11 +10,14 @@ Validate the work relevant to each change.
 
 The four-Service slice, MariaDB pure desired-state preparation, and reconciliation are part of the published `55212b0` development stack on `origin/dev` and released operator `0.5.6`. Production backup/restore, HA, and RPO/RTO remain open; `Ready=False/RuntimeNotImplemented` remains truthful.
 
-## :material-book-open-page-variant-outline: Current Local Memcached Validation
+## :material-book-open-page-variant-outline: Released Memcached Validation And POC
 
-- The Memcached Deployment implementation is local, uncommitted, unpushed, and undeployed; it is absent from released `0.5.7`. `uv run --offline pytest tests/unit` passed with 326 tests, and Ruff lint/format, mypy, Helm lint/template, and `git diff --check` passed.
-- Coverage includes the exact approved digest, direct `/usr/bin/memcached -p 11211 -U 0` command, UID/GID `42457`, restricted read-only security context, no configuration/credentials/writable mounts/volumes/PVC/resources API/init containers, protocol-level startup/readiness/liveness probes, one replica with `Recreate` and 30-second termination, ordered Deployment read after MariaDB, complete preflight before writes, absent create/managed guarded SSA/collision mutation-free behavior, write before marker, and Deployment-only `get`/`create`/`patch` RBAC.
-- No deployed Kubernetes Memcached POC or runtime resource, release, chart version, or Helm change is claimed. Review, publication, and a released-artifact isolated POC are next; RabbitMQ evidence follows after Memcached acceptance.
+- Source `063e438ef416599e9816a2400afcc5a5a7af9aa0` ("Implement Memcached reconciliation") was published by CIXpress pipeline `4dcpfk` using `Default`, started `2026-08-22T12:29:20+00:00`, completed `12:30:25+00:00`, and reported top-level plus `git-clone`, `kaniko-build`, `helm-update`, and `cleanup` as `SUCCEEDED`. CI-owned commit `cb6b055eaf5e74c99e26c1c3d662b2d749331627` released chart/app/image `0.5.8`.
+- In disposable single-node namespace `coriolis-memcached-validation-20260822`, CR `memcached-validation` created the Memcached Deployment in 44s; the original Deployment reached Ready 3s later, and MariaDB and Memcached both reached `1/1`. The released operator image was `cr.virtomat.io/virtomat/coriolis/operator:0.5.8` with imageID `sha256:9af4b018c2a7c0a23635d115d5335477b17bb81a731979bd0c93083c88461af4`; the Memcached Pod imageID matched approved digest `sha256:746b93082a4f6d07f464e93d4b14f5e30510abf17a9ae0a4af20e111408c8f1e`.
+- The live Deployment passed its CR owner, one-replica `Recreate`, exact approved Memcached digest, direct command/args, port/pull Secret, UID/GID `42457`, disabled automount/service links, 30-second grace, restricted context, exact protocol probes, and absence of init containers, volumes/mounts, environment, configuration, credentials, PVC, and resource API. The Service selector and EndpointSlice targeted the Ready Pod on TCP `11211`.
+- Service-DNS `version` and fixed set/get passed. Normal Pod deletion produced a distinct-UID replacement Ready in 3.603s with zero restarts, the same digest, and a ready endpoint; the original key returned only `END`, then fresh version/set/get passed. This proves ephemerality only, not persistence, HA, credentials, configuration, resource API, production readiness, or overall appliance readiness.
+- The CR correctly remained `Ready=False/RuntimeNotImplemented` while reconciled dependencies were healthy. Normal cleanup removed the CR, Helm release, namespace, retained PVC, Delete-policy PV `pvc-b2856ccb-88ed-4d60-9878-89ef06331be8`, and copied registry Secret; the namespace/PV/release are absent, the node is Ready and schedulable, and zero appliances remain cluster-wide. Argo runs only healthy `coriolis-operator:0.5.8`, `1/1`, with no legacy selector overlap or appliance CR.
+- Local validation remains `uv run --offline pytest tests/unit` (326 passed), Ruff lint/format, mypy, Helm lint/template, and `git diff --check`. RabbitMQ evidence is next; MariaDB CSI/cross-node and production gates remain open.
 
 ## :material-book-open-page-variant-outline: Live MariaDB POC
 
@@ -150,7 +153,7 @@ The pure renderer is **committed locally at `9bb20f3` on `dev`, but not pushed o
 
 This migration is **committed locally at `e2ddb30` on `dev`, but not pushed or deployed**. It adds no `main.py`, runtime Kubernetes I/O, SSA/RBAC, actual Service/Ingress/workload resources, or release/chart/image/deployment behavior; deployed `0.5.3` remains marker-only.
 
-Live-cluster controller lifecycle validation passed for release `0.5.2` in the approved `coriolis` namespace and was not repeated in full for later releases. Argo currently runs healthy `0.5.7` with no appliance CR; that release predates and does not contain the local Memcached implementation.
+Live-cluster controller lifecycle validation passed for release `0.5.2` in the approved `coriolis` namespace and was not repeated in full for later releases. Argo currently runs healthy `0.5.8` with no appliance CR; the released Memcached implementation passed its separate isolated POC.
 
 The approved dev cluster is `infra-dev-buc-hq` (`virt-infra-dev-buc-hq`); CIXpress remains approved for read-only pipeline troubleshooting and monitoring only. The dedicated operator namespace is `coriolis`. See [Development Environment](dev-environment.md).
 
