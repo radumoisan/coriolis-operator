@@ -3,5 +3,5 @@ name: coriolis-operator
 description: Controller skeleton for CoriolisAppliance resources
 type: application
 # CIXpress owns future synchronized release updates.
-version: 0.5.10
-appVersion: "0.5.10"
+version: 0.5.11
+appVersion: "0.5.11"
