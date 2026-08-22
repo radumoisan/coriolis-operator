@@ -42,6 +42,54 @@ spec:
                 version:
                   type: string
                   minLength: 1
+                storage:
+                  type: object
+                  properties:
+                    mariadb:
+                      type: object
+                      required:
+                        - storageClassName
+                        - size
+                      properties:
+                        storageClassName:
+                          type: string
+                          minLength: 1
+                        size:
+                          type: string
+                          minLength: 1
+                resources:
+                  type: object
+                  properties:
+                    mariadb:
+                      type: object
+                      required:
+                        - requests
+                        - limits
+                      properties:
+                        requests:
+                          type: object
+                          required:
+                            - cpu
+                            - memory
+                          properties:
+                            cpu:
+                              type: string
+                              minLength: 1
+                            memory:
+                              type: string
+                              minLength: 1
+                        limits:
+                          type: object
+                          required:
+                            - cpu
+                            - memory
+                          properties:
+                            cpu:
+                              type: string
+                              minLength: 1
+                            memory:
+                              type: string
+                              minLength: 1
                 ingress:
                   type: object
                   default:

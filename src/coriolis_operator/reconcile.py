@@ -7,12 +7,38 @@ import secrets
 from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
+from decimal import Decimal
 from enum import Enum
 from typing import Any
+
+from kubernetes.utils.quantity import parse_quantity  # type: ignore[import-untyped]
 
 from coriolis_operator.configuration import (
     KubernetesCoriolisRenderInputs,
     SensitiveCoriolisEndpoints,
+)
+from coriolis_operator.mariadb import (
+    MARIADB_BOOTSTRAP_COMPLETE_MARKER,
+    MARIADB_CONFIG_DIR,
+    MARIADB_CONFIG_KEYS,
+    MARIADB_DATA_DIR,
+    MARIADB_IMAGE,
+    MARIADB_IMAGE_PULL_SECRET_NAME,
+    MARIADB_PVC_ACCESS_MODE,
+    MARIADB_PVC_RETENTION_VALUE,
+    MARIADB_PVC_VOLUME_MODE,
+    MARIADB_REPLICAS,
+    MARIADB_RUN_AS_ID,
+    MARIADB_RUNTIME_DIR,
+    MARIADB_SECRET_CONFIG_KEYS,
+    MARIADB_SECRET_DIR,
+    MARIADB_SOCKET_PATH,
+    MARIADB_SUPPLEMENTAL_GROUP,
+    MARIADB_TERMINATION_GRACE_PERIOD_SECONDS,
+    MariaDBSettings,
+    SensitiveMariaDBCredentials,
+    render_mariadb_config,
+    render_sensitive_mariadb_config,
 )
 
 STATE_CONFIG_MAP_SUFFIX = "-operator-state"
@@ -141,6 +167,14 @@ class FoundationalResourcePreflight:
 
     classifications: Mapping[str, RetainedClassification | OwnedClassification]
     credentials: Mapping[str, Mapping[str, str]] = field(repr=False)
+
+
+@dataclass(frozen=True)
+class MariaDBResourcePreflight:
+    """Pure preflight outcome and apply-ordered MariaDB resource bodies."""
+
+    classifications: Mapping[str, RetainedClassification | OwnedClassification]
+    manifests: tuple[Mapping[str, Any], ...] = field(repr=False)
 
 
 def state_config_map_name(resource_name: str) -> str:
@@ -801,6 +835,426 @@ def classify_owned_resource(
     ):
         return OwnedClassification.COLLISION
     return OwnedClassification.MANAGED
+
+
+def build_mariadb_data_pvc(
+    *,
+    appliance_name: str,
+    namespace: str,
+    accepted_version: str,
+    settings: MariaDBSettings,
+) -> dict[str, Any]:
+    """Build the ownerless retained MariaDB data claim."""
+    component = "mariadb-data"
+    return {
+        "apiVersion": "v1",
+        "kind": "PersistentVolumeClaim",
+        "metadata": build_resource_metadata(
+            resource_name=appliance_resource_name(appliance_name, component),
+            namespace=namespace,
+            appliance_name=appliance_name,
+            component=component,
+            accepted_version=accepted_version,
+            retention=MARIADB_PVC_RETENTION_VALUE,
+        ),
+        "spec": {
+            "storageClassName": settings.storage.storage_class_name,
+            "accessModes": [MARIADB_PVC_ACCESS_MODE],
+            "volumeMode": MARIADB_PVC_VOLUME_MODE,
+            "resources": {"requests": {"storage": settings.storage.size}},
+        },
+    }
+
+
+def build_mariadb_config_map(
+    *,
+    appliance_name: str,
+    namespace: str,
+    accepted_version: str,
+    owner: Mapping[str, Any],
+    values: Mapping[str, str],
+) -> dict[str, Any]:
+    """Build the owner-referenced MariaDB configuration ConfigMap."""
+    component = "mariadb-config"
+    resource_name = appliance_resource_name(appliance_name, component)
+    return {
+        "apiVersion": "v1",
+        "kind": "ConfigMap",
+        "metadata": build_resource_metadata(
+            resource_name=resource_name,
+            namespace=namespace,
+            appliance_name=appliance_name,
+            component=component,
+            accepted_version=accepted_version,
+            owner=owner,
+        ),
+        "data": _validated_opaque_values(values, MARIADB_CONFIG_KEYS, resource_name),
+    }
+
+
+def build_mariadb_config_secret(
+    *,
+    appliance_name: str,
+    namespace: str,
+    accepted_version: str,
+    owner: Mapping[str, Any],
+    values: Mapping[str, str],
+) -> dict[str, Any]:
+    """Build the owner-referenced MariaDB configuration Secret."""
+    component = "mariadb-config-secret"
+    resource_name = appliance_resource_name(appliance_name, component)
+    return {
+        "apiVersion": "v1",
+        "kind": "Secret",
+        "metadata": build_resource_metadata(
+            resource_name=resource_name,
+            namespace=namespace,
+            appliance_name=appliance_name,
+            component=component,
+            accepted_version=accepted_version,
+            owner=owner,
+        ),
+        "type": "Opaque",
+        "data": _encoded_secret_data(
+            _validated_opaque_values(values, MARIADB_SECRET_CONFIG_KEYS, resource_name)
+        ),
+    }
+
+
+def _mariadb_container_security_context() -> dict[str, Any]:
+    return {
+        "runAsNonRoot": True,
+        "readOnlyRootFilesystem": True,
+        "allowPrivilegeEscalation": False,
+        "capabilities": {"drop": ["ALL"]},
+        "seccompProfile": {"type": "RuntimeDefault"},
+    }
+
+
+def build_mariadb_stateful_set(
+    *,
+    appliance_name: str,
+    namespace: str,
+    accepted_version: str,
+    owner: Mapping[str, Any],
+    settings: MariaDBSettings,
+) -> dict[str, Any]:
+    """Build the MariaDB StatefulSet using the retained data claim."""
+    component = "mariadb"
+    resource_name = appliance_resource_name(appliance_name, component)
+    data_claim_name = appliance_resource_name(appliance_name, "mariadb-data")
+    config_map_name = appliance_resource_name(appliance_name, "mariadb-config")
+    secret_name = appliance_resource_name(appliance_name, "mariadb-config-secret")
+    metadata = build_resource_metadata(
+        resource_name=resource_name,
+        namespace=namespace,
+        appliance_name=appliance_name,
+        component=component,
+        accepted_version=accepted_version,
+        owner=owner,
+    )
+    selector = {
+        "coriolis.cloudbase.it/appliance": appliance_identity(appliance_name),
+        "coriolis.cloudbase.it/component": component,
+    }
+    config_items = [
+        {"key": "my.cnf", "path": "my.cnf", "mode": 0o444},
+        {"key": "prepare-mariadb.sh", "path": "prepare-mariadb.sh", "mode": 0o555},
+        {"key": "start-mariadb.sh", "path": "start-mariadb.sh", "mode": 0o555},
+    ]
+    secret_items = [
+        {"key": key, "path": key, "mode": 0o440}
+        for key in sorted(MARIADB_SECRET_CONFIG_KEYS)
+    ]
+    volumes = [
+        {"name": "data", "persistentVolumeClaim": {"claimName": data_claim_name}},
+        {"name": "runtime", "emptyDir": {}},
+        {"name": "tmp", "emptyDir": {}},
+        {
+            "name": "config",
+            "configMap": {"name": config_map_name, "items": config_items},
+        },
+        {
+            "name": "secret",
+            "secret": {"secretName": secret_name, "items": secret_items},
+        },
+    ]
+    init_container = {
+        "name": "prepare-mariadb",
+        "image": MARIADB_IMAGE,
+        "args": [f"{MARIADB_CONFIG_DIR}/prepare-mariadb.sh"],
+        "securityContext": _mariadb_container_security_context(),
+        "volumeMounts": [
+            {"name": "data", "mountPath": MARIADB_DATA_DIR},
+            {"name": "runtime", "mountPath": MARIADB_RUNTIME_DIR},
+            {"name": "tmp", "mountPath": "/tmp"},
+            {"name": "config", "mountPath": MARIADB_CONFIG_DIR, "readOnly": True},
+            {"name": "secret", "mountPath": MARIADB_SECRET_DIR, "readOnly": True},
+        ],
+    }
+    main_container = {
+        "name": "mariadb",
+        "image": MARIADB_IMAGE,
+        "args": [f"{MARIADB_CONFIG_DIR}/start-mariadb.sh"],
+        "ports": [{"name": "mariadb", "containerPort": 3306, "protocol": "TCP"}],
+        "resources": {
+            "requests": {
+                "cpu": settings.resources.requests_cpu,
+                "memory": settings.resources.requests_memory,
+            },
+            "limits": {
+                "cpu": settings.resources.limits_cpu,
+                "memory": settings.resources.limits_memory,
+            },
+        },
+        "securityContext": _mariadb_container_security_context(),
+        "volumeMounts": [
+            {"name": "data", "mountPath": MARIADB_DATA_DIR},
+            {"name": "runtime", "mountPath": MARIADB_RUNTIME_DIR},
+            {"name": "tmp", "mountPath": "/tmp"},
+            {"name": "config", "mountPath": MARIADB_CONFIG_DIR, "readOnly": True},
+        ],
+        "startupProbe": {
+            "exec": {
+                "command": [
+                    "sh",
+                    "-ec",
+                    f"test -f {MARIADB_BOOTSTRAP_COMPLETE_MARKER} && "
+                    f"mariadb-admin --defaults-file={MARIADB_RUNTIME_DIR}/admin.cnf "
+                    f"--socket={MARIADB_SOCKET_PATH} ping --silent && "
+                    f"mariadb --defaults-file={MARIADB_RUNTIME_DIR}/admin.cnf "
+                    "--execute=SELECT\\ 1",
+                ]
+            },
+            "periodSeconds": 10,
+            "timeoutSeconds": 5,
+            "failureThreshold": 30,
+        },
+        "readinessProbe": {
+            "exec": {
+                "command": [
+                    "sh",
+                    "-ec",
+                    f"test -f {MARIADB_RUNTIME_DIR}/coriolis.cnf && "
+                    f"mariadb --defaults-file={MARIADB_RUNTIME_DIR}/coriolis.cnf "
+                    "--execute=SELECT\\ 1",
+                ]
+            },
+            "periodSeconds": 10,
+            "timeoutSeconds": 5,
+            "failureThreshold": 3,
+            "successThreshold": 1,
+        },
+        "livenessProbe": {
+            "exec": {
+                "command": [
+                    "sh",
+                    "-ec",
+                    f"mariadb-admin --defaults-file={MARIADB_RUNTIME_DIR}/admin.cnf "
+                    "ping --silent && "
+                    f"mariadb --defaults-file={MARIADB_RUNTIME_DIR}/admin.cnf "
+                    "--execute=SELECT\\ 1",
+                ]
+            },
+            "periodSeconds": 10,
+            "timeoutSeconds": 5,
+            "failureThreshold": 6,
+        },
+    }
+    return {
+        "apiVersion": "apps/v1",
+        "kind": "StatefulSet",
+        "metadata": metadata,
+        "spec": {
+            "serviceName": resource_name,
+            "replicas": MARIADB_REPLICAS,
+            "selector": {"matchLabels": selector},
+            "template": {
+                "metadata": {"labels": dict(metadata["labels"])},
+                "spec": {
+                    "imagePullSecrets": [{"name": MARIADB_IMAGE_PULL_SECRET_NAME}],
+                    "securityContext": {
+                        "runAsUser": MARIADB_RUN_AS_ID,
+                        "runAsGroup": MARIADB_RUN_AS_ID,
+                        "fsGroup": MARIADB_RUN_AS_ID,
+                        "fsGroupChangePolicy": "OnRootMismatch",
+                        "supplementalGroups": [MARIADB_SUPPLEMENTAL_GROUP],
+                    },
+                    "terminationGracePeriodSeconds": (
+                        MARIADB_TERMINATION_GRACE_PERIOD_SECONDS
+                    ),
+                    "initContainers": [init_container],
+                    "containers": [main_container],
+                    "volumes": volumes,
+                },
+            },
+        },
+    }
+
+
+def _positive_quantity(value: Any) -> Decimal | None:
+    if type(value) is not str or not value or value.strip() != value:
+        return None
+    try:
+        parsed = parse_quantity(value)
+    except (ArithmeticError, TypeError, ValueError):
+        return None
+    if not isinstance(parsed, Decimal) or not parsed.is_finite() or parsed <= 0:
+        return None
+    return parsed
+
+
+def classify_mariadb_data_pvc(
+    *,
+    existing: Any,
+    appliance_name: str,
+    namespace: str,
+    accepted_version: str,
+    settings: MariaDBSettings,
+) -> RetainedClassification:
+    """Classify a retained MariaDB claim, including immutable desired spec fields."""
+    resource_name = appliance_resource_name(appliance_name, "mariadb-data")
+    classification = classify_retained_resource(
+        existing=existing,
+        resource_name=resource_name,
+        namespace=namespace,
+        appliance_name=appliance_name,
+        component="mariadb-data",
+        accepted_version=accepted_version,
+        retention=MARIADB_PVC_RETENTION_VALUE,
+    )
+    if classification is not RetainedClassification.REUSE:
+        return classification
+    if (_field(existing, "apiVersion") not in (None, "v1")) or (
+        _field(existing, "kind") not in (None, "PersistentVolumeClaim")
+    ):
+        return RetainedClassification.COLLISION
+    spec = _field(existing, "spec")
+    if spec is None:
+        return RetainedClassification.COLLISION
+    if isinstance(spec, Mapping):
+        allowed = {
+            "storageClassName",
+            "accessModes",
+            "volumeMode",
+            "resources",
+            "volumeName",
+        }
+        if set(spec) - allowed:
+            return RetainedClassification.COLLISION
+    if _field(spec, "storageClassName") != settings.storage.storage_class_name:
+        return RetainedClassification.COLLISION
+    access_modes = _field(spec, "accessModes")
+    if not isinstance(access_modes, Sequence) or isinstance(access_modes, str):
+        return RetainedClassification.COLLISION
+    if list(access_modes) != [MARIADB_PVC_ACCESS_MODE]:
+        return RetainedClassification.COLLISION
+    if _field(spec, "volumeMode") != MARIADB_PVC_VOLUME_MODE:
+        return RetainedClassification.COLLISION
+    if _field(spec, "selector") is not None:
+        return RetainedClassification.COLLISION
+    if (
+        _field(spec, "dataSource") is not None
+        or _field(spec, "dataSourceRef") is not None
+        or _field(spec, "volumeAttributesClassName") is not None
+    ):
+        return RetainedClassification.COLLISION
+    resources = _field(spec, "resources")
+    if isinstance(resources, Mapping) and set(resources) - {"requests", "limits"}:
+        return RetainedClassification.COLLISION
+    requests = _field(resources, "requests")
+    if not isinstance(requests, Mapping) or set(requests) != {"storage"}:
+        return RetainedClassification.COLLISION
+    if _positive_quantity(requests.get("storage")) != _positive_quantity(
+        settings.storage.size
+    ):
+        return RetainedClassification.COLLISION
+    limits = _field(resources, "limits")
+    if limits not in (None, {}) and (not isinstance(limits, Mapping) or bool(limits)):
+        return RetainedClassification.COLLISION
+    return RetainedClassification.REUSE
+
+
+def preflight_mariadb_resources(
+    *,
+    appliance_name: str,
+    namespace: str,
+    accepted_version: str,
+    settings: MariaDBSettings,
+    credentials: SensitiveMariaDBCredentials,
+    owner: Mapping[str, Any],
+    mariadb_data_pvc: Any | None,
+    mariadb_config_map: Any | None,
+    mariadb_config_secret: Any | None,
+    mariadb_stateful_set: Any | None,
+) -> MariaDBResourcePreflight:
+    """Classify MariaDB resources before rendering any sensitive configuration."""
+    resources = (
+        ("mariadb-data", mariadb_data_pvc),
+        ("mariadb-config", mariadb_config_map),
+        ("mariadb-config-secret", mariadb_config_secret),
+        ("mariadb", mariadb_stateful_set),
+    )
+    classifications: dict[str, RetainedClassification | OwnedClassification] = {}
+    for component, existing in resources:
+        resource_name = appliance_resource_name(appliance_name, component)
+        classification: RetainedClassification | OwnedClassification
+        if component == "mariadb-data":
+            classification = classify_mariadb_data_pvc(
+                existing=existing,
+                appliance_name=appliance_name,
+                namespace=namespace,
+                accepted_version=accepted_version,
+                settings=settings,
+            )
+        else:
+            classification = classify_owned_resource(
+                existing=existing,
+                resource_name=resource_name,
+                namespace=namespace,
+                appliance_name=appliance_name,
+                component=component,
+                accepted_version=accepted_version,
+                owner=owner,
+            )
+        classifications[resource_name] = classification
+        if classification.value == "collision":
+            return MariaDBResourcePreflight(classifications, ())
+
+    config_values = render_mariadb_config()
+    secret_values = render_sensitive_mariadb_config(credentials=credentials)
+    return MariaDBResourcePreflight(
+        classifications,
+        (
+            build_mariadb_data_pvc(
+                appliance_name=appliance_name,
+                namespace=namespace,
+                accepted_version=accepted_version,
+                settings=settings,
+            ),
+            build_mariadb_config_map(
+                appliance_name=appliance_name,
+                namespace=namespace,
+                accepted_version=accepted_version,
+                owner=owner,
+                values=config_values,
+            ),
+            build_mariadb_config_secret(
+                appliance_name=appliance_name,
+                namespace=namespace,
+                accepted_version=accepted_version,
+                owner=owner,
+                values=secret_values,
+            ),
+            build_mariadb_stateful_set(
+                appliance_name=appliance_name,
+                namespace=namespace,
+                accepted_version=accepted_version,
+                owner=owner,
+                settings=settings,
+            ),
+        ),
+    )
 
 
 def preflight_foundational_resources(

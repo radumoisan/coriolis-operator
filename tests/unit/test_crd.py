@@ -99,6 +99,46 @@ def test_crd_defines_structural_ingress_defaults_and_tls_mode_shape() -> None:
     }
 
 
+def test_crd_adds_optional_mariadb_storage_and_resources_without_defaults() -> None:
+    schema = _load_schema()
+    spec = schema["properties"]["spec"]
+
+    assert spec["required"] == ["version"]
+    assert spec["properties"]["storage"] == {
+        "type": "object",
+        "properties": {
+            "mariadb": {
+                "type": "object",
+                "required": ["storageClassName", "size"],
+                "properties": {
+                    "storageClassName": {"type": "string", "minLength": 1},
+                    "size": {"type": "string", "minLength": 1},
+                },
+            }
+        },
+    }
+    assert spec["properties"]["resources"] == {
+        "type": "object",
+        "properties": {
+            "mariadb": {
+                "type": "object",
+                "required": ["requests", "limits"],
+                "properties": {
+                    resource_type: {
+                        "type": "object",
+                        "required": ["cpu", "memory"],
+                        "properties": {
+                            "cpu": {"type": "string", "minLength": 1},
+                            "memory": {"type": "string", "minLength": 1},
+                        },
+                    }
+                    for resource_type in ("requests", "limits")
+                },
+            }
+        },
+    }
+
+
 def test_sample_uses_explicit_dev_cert_manager_ingress_settings() -> None:
     with SAMPLE_PATH.open() as sample_file:
         sample = yaml.safe_load(sample_file)
