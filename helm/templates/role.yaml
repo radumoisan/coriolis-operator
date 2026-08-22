@@ -61,6 +61,14 @@ rules:
       - create
       - patch
   - apiGroups:
+      - apps
+    resources:
+      - deployments
+    verbs:
+      - get
+      - create
+      - patch
+  - apiGroups:
       - ""
     resources:
       - events

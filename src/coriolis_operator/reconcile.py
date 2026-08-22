@@ -40,6 +40,17 @@ from coriolis_operator.mariadb import (
     render_mariadb_config,
     render_sensitive_mariadb_config,
 )
+from coriolis_operator.memcached import (
+    MEMCACHED_ARGS,
+    MEMCACHED_COMMAND,
+    MEMCACHED_IMAGE,
+    MEMCACHED_IMAGE_PULL_SECRET_NAME,
+    MEMCACHED_PORT,
+    MEMCACHED_PROTOCOL_PROBE_COMMAND,
+    MEMCACHED_REPLICAS,
+    MEMCACHED_RUN_AS_ID,
+    MEMCACHED_TERMINATION_GRACE_PERIOD_SECONDS,
+)
 
 STATE_CONFIG_MAP_SUFFIX = "-operator-state"
 CONFIG_MAP_NAME_MAX_LENGTH = 253
@@ -178,6 +189,14 @@ class MariaDBResourcePreflight:
     """Pure preflight outcome and apply-ordered MariaDB resource bodies."""
 
     classifications: Mapping[str, RetainedClassification | OwnedClassification]
+    manifests: tuple[dict[str, Any], ...] = field(repr=False)
+
+
+@dataclass(frozen=True)
+class MemcachedResourcePreflight:
+    """Pure preflight outcome and desired Memcached Deployment body."""
+
+    classification: OwnedClassification
     manifests: tuple[dict[str, Any], ...] = field(repr=False)
 
 
@@ -839,6 +858,139 @@ def classify_owned_resource(
     ):
         return OwnedClassification.COLLISION
     return OwnedClassification.MANAGED
+
+
+def build_memcached_deployment(
+    *,
+    appliance_name: str,
+    namespace: str,
+    accepted_version: str,
+    owner: Mapping[str, Any],
+) -> dict[str, Any]:
+    """Build the one-replica, ephemeral Memcached Deployment."""
+    component = "memcached"
+    resource_name = appliance_resource_name(appliance_name, component)
+    metadata = build_resource_metadata(
+        resource_name=resource_name,
+        namespace=namespace,
+        appliance_name=appliance_name,
+        component=component,
+        accepted_version=accepted_version,
+        owner=owner,
+    )
+    selector = {
+        "coriolis.cloudbase.it/appliance": appliance_identity(appliance_name),
+        "coriolis.cloudbase.it/component": component,
+    }
+    protocol_probe = {
+        "exec": {
+            "command": [
+                "/usr/bin/bash",
+                "-ec",
+                MEMCACHED_PROTOCOL_PROBE_COMMAND,
+            ]
+        }
+    }
+    container = {
+        "name": component,
+        "image": MEMCACHED_IMAGE,
+        "command": [MEMCACHED_COMMAND],
+        "args": list(MEMCACHED_ARGS),
+        "ports": [
+            {
+                "name": component,
+                "containerPort": MEMCACHED_PORT,
+                "protocol": "TCP",
+            }
+        ],
+        "securityContext": {
+            "runAsNonRoot": True,
+            "readOnlyRootFilesystem": True,
+            "allowPrivilegeEscalation": False,
+            "capabilities": {"drop": ["ALL"]},
+            "seccompProfile": {"type": "RuntimeDefault"},
+        },
+        "startupProbe": dict(
+            protocol_probe,
+            periodSeconds=2,
+            timeoutSeconds=2,
+            failureThreshold=30,
+        ),
+        "readinessProbe": dict(
+            protocol_probe,
+            periodSeconds=5,
+            timeoutSeconds=2,
+            failureThreshold=3,
+            successThreshold=1,
+        ),
+        "livenessProbe": dict(
+            protocol_probe,
+            periodSeconds=10,
+            timeoutSeconds=2,
+            failureThreshold=3,
+        ),
+    }
+    return {
+        "apiVersion": "apps/v1",
+        "kind": "Deployment",
+        "metadata": metadata,
+        "spec": {
+            "replicas": MEMCACHED_REPLICAS,
+            "strategy": {"type": "Recreate"},
+            "selector": {"matchLabels": selector},
+            "template": {
+                "metadata": {"labels": dict(metadata["labels"])},
+                "spec": {
+                    "imagePullSecrets": [{"name": MEMCACHED_IMAGE_PULL_SECRET_NAME}],
+                    "securityContext": {
+                        "runAsUser": MEMCACHED_RUN_AS_ID,
+                        "runAsGroup": MEMCACHED_RUN_AS_ID,
+                    },
+                    "automountServiceAccountToken": False,
+                    "enableServiceLinks": False,
+                    "terminationGracePeriodSeconds": (
+                        MEMCACHED_TERMINATION_GRACE_PERIOD_SECONDS
+                    ),
+                    "containers": [container],
+                },
+            },
+        },
+    }
+
+
+def preflight_memcached_resource(
+    *,
+    appliance_name: str,
+    namespace: str,
+    accepted_version: str,
+    owner: Mapping[str, Any],
+    memcached_deployment: Any | None,
+) -> MemcachedResourcePreflight:
+    """Classify Memcached before building its desired Deployment."""
+    component = "memcached"
+    resource_name = appliance_resource_name(appliance_name, component)
+    classification = classify_owned_resource(
+        existing=memcached_deployment,
+        resource_name=resource_name,
+        namespace=namespace,
+        appliance_name=appliance_name,
+        component=component,
+        accepted_version=accepted_version,
+        owner=owner,
+    )
+    if classification is OwnedClassification.COLLISION:
+        return MemcachedResourcePreflight(classification, ())
+    return MemcachedResourcePreflight(
+        classification,
+        (
+            build_memcached_deployment(
+                appliance_name=appliance_name,
+                namespace=namespace,
+                accepted_version=accepted_version,
+                owner=owner,
+            ),
+        ),
+    )
 
 
 def build_mariadb_data_pvc(

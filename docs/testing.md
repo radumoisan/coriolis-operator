@@ -10,6 +10,12 @@ Validate the work relevant to each change.
 
 The four-Service slice, MariaDB pure desired-state preparation, and reconciliation are part of the published `55212b0` development stack on `origin/dev` and released operator `0.5.6`. Production backup/restore, HA, and RPO/RTO remain open; `Ready=False/RuntimeNotImplemented` remains truthful.
 
+## :material-book-open-page-variant-outline: Current Local Memcached Validation
+
+- The Memcached Deployment implementation is local, uncommitted, unpushed, and undeployed; it is absent from released `0.5.7`. `uv run --offline pytest tests/unit` passed with 326 tests, and Ruff lint/format, mypy, Helm lint/template, and `git diff --check` passed.
+- Coverage includes the exact approved digest, direct `/usr/bin/memcached -p 11211 -U 0` command, UID/GID `42457`, restricted read-only security context, no configuration/credentials/writable mounts/volumes/PVC/resources API/init containers, protocol-level startup/readiness/liveness probes, one replica with `Recreate` and 30-second termination, ordered Deployment read after MariaDB, complete preflight before writes, absent create/managed guarded SSA/collision mutation-free behavior, write before marker, and Deployment-only `get`/`create`/`patch` RBAC.
+- No deployed Kubernetes Memcached POC or runtime resource, release, chart version, or Helm change is claimed. Review, publication, and a released-artifact isolated POC are next; RabbitMQ evidence follows after Memcached acceptance.
+
 ## :material-book-open-page-variant-outline: Live MariaDB POC
 
 - CIXpress pipeline `8nownk` succeeded for source `6ba9c7e`; the isolated operator pulled `0.5.5` at `sha256:14e991746aaf42334f2e48b2982493c8a6544909e13bf9d55f80eccb50fa062e`.
@@ -144,7 +150,7 @@ The pure renderer is **committed locally at `9bb20f3` on `dev`, but not pushed o
 
 This migration is **committed locally at `e2ddb30` on `dev`, but not pushed or deployed**. It adds no `main.py`, runtime Kubernetes I/O, SSA/RBAC, actual Service/Ingress/workload resources, or release/chart/image/deployment behavior; deployed `0.5.3` remains marker-only.
 
-Live-cluster controller lifecycle validation passed for release `0.5.2` in the approved `coriolis` namespace. The currently deployed `0.5.3` retains the marker-only controller behavior and predates this local API slice; full lifecycle validation was not repeated for `0.5.3`.
+Live-cluster controller lifecycle validation passed for release `0.5.2` in the approved `coriolis` namespace and was not repeated in full for later releases. Argo currently runs healthy `0.5.7` with no appliance CR; that release predates and does not contain the local Memcached implementation.
 
 The approved dev cluster is `infra-dev-buc-hq` (`virt-infra-dev-buc-hq`); CIXpress remains approved for read-only pipeline troubleshooting and monitoring only. The dedicated operator namespace is `coriolis`. See [Development Environment](dev-environment.md).
 

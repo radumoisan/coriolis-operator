@@ -38,6 +38,7 @@ from coriolis_operator.reconcile import (
     build_coriolis_credentials_secret,
     build_dependency_service,
     build_infrastructure_credentials_secret,
+    build_memcached_deployment,
     build_resource_metadata,
     build_state_config_map,
     build_status,
@@ -262,6 +263,7 @@ def make_apps_api(existing=None) -> MagicMock:
         api.read_namespaced_stateful_set.side_effect = _api_exception(404)
     else:
         api.read_namespaced_stateful_set.return_value = existing
+    api.read_namespaced_deployment.side_effect = _api_exception(404)
     return api
 
 
@@ -3148,6 +3150,7 @@ def test_mariadb_reads_and_writes_follow_the_frozen_cross_api_order() -> None:
     core_api.read_namespaced_service.side_effect = absent_read("service")
     core_api.read_namespaced_persistent_volume_claim.side_effect = absent_read("pvc")
     apps_api.read_namespaced_stateful_set.side_effect = absent_read("statefulset")
+    apps_api.read_namespaced_deployment.side_effect = absent_read("deployment")
     core_api.create_namespaced_config_map.side_effect = successful_create("configmap")
     core_api.create_namespaced_secret.side_effect = successful_create("secret")
     core_api.create_namespaced_service.side_effect = successful_create("service")
@@ -3157,6 +3160,7 @@ def test_mariadb_reads_and_writes_follow_the_frozen_cross_api_order() -> None:
     apps_api.create_namespaced_stateful_set.side_effect = successful_create(
         "statefulset"
     )
+    apps_api.create_namespaced_deployment.side_effect = successful_create("deployment")
 
     status = reconcile_appliance(
         spec=valid_spec(),
@@ -3179,6 +3183,7 @@ def test_mariadb_reads_and_writes_follow_the_frozen_cross_api_order() -> None:
         ("read", "configmap", "example-mariadb-config"),
         ("read", "secret", "example-mariadb-config-secret"),
         ("read", "statefulset", "example-mariadb"),
+        ("read", "deployment", "example-memcached"),
     ]
     assert [event for event in events if event[0] == "write"] == [
         ("write", "secret", "example-coriolis-credentials"),
@@ -3193,6 +3198,7 @@ def test_mariadb_reads_and_writes_follow_the_frozen_cross_api_order() -> None:
         ("write", "configmap", "example-mariadb-config"),
         ("write", "secret", "example-mariadb-config-secret"),
         ("write", "statefulset", "example-mariadb"),
+        ("write", "deployment", "example-memcached"),
         ("write", "configmap", "example-operator-state"),
     ]
     assert status["acceptedVersion"] == "2603.4"
@@ -3439,6 +3445,136 @@ def test_mariadb_patch_failure_preserves_accepted_version_and_skips_marker(
         for item in core_api.create_namespaced_config_map.call_args_list
     ]
     assert "example-operator-state" not in created_config_maps
+
+
+def _managed_memcached_deployment(resource_version: str | None = "17") -> dict:
+    deployment = build_memcached_deployment(
+        appliance_name="example",
+        namespace="operators",
+        accepted_version="2603.4",
+        owner=OWNER,
+    )
+    if resource_version is not None:
+        deployment["metadata"]["resourceVersion"] = resource_version
+    return deployment
+
+
+def test_memcached_collision_is_mutation_free_after_all_reads() -> None:
+    core_api = make_core_api()
+    apps_api = make_apps_api()
+    collided = _managed_memcached_deployment()
+    collided["metadata"]["labels"]["coriolis.cloudbase.it/component"] = "other"
+    apps_api.read_namespaced_deployment.return_value = collided
+    apps_api.read_namespaced_deployment.side_effect = None
+
+    status = reconcile_appliance(
+        spec=valid_spec(), meta=sample_meta(), core_api=core_api, apps_api=apps_api
+    )
+
+    assert status["conditions"][2]["reason"] == "ResourceCollision"
+    assert "operators/example-memcached" in status["conditions"][2]["message"]
+    assert api_writes(core_api) == []
+    assert api_writes(apps_api) == []
+
+
+def test_memcached_non_404_read_failure_prevents_writes() -> None:
+    core_api = make_core_api()
+    apps_api = make_apps_api()
+    apps_api.read_namespaced_deployment.side_effect = client.ApiException(
+        status=403, reason="memcached-read-sentinel"
+    )
+
+    with pytest.raises(main.ReconcileRetry) as excinfo:
+        reconcile_appliance(
+            spec=valid_spec(), meta=sample_meta(), core_api=core_api, apps_api=apps_api
+        )
+
+    assert excinfo.value.status["conditions"][2]["reason"] == "ResourceReadFailed"
+    assert "memcached-read-sentinel" not in repr(excinfo.value.status)
+    assert api_writes(core_api) == []
+    assert api_writes(apps_api) == []
+
+
+def test_managed_memcached_without_resource_version_retries_before_writes() -> None:
+    core_api = make_core_api()
+    apps_api = make_apps_api()
+    apps_api.read_namespaced_deployment.return_value = _managed_memcached_deployment(
+        None
+    )
+    apps_api.read_namespaced_deployment.side_effect = None
+
+    with pytest.raises(main.ReconcileRetry) as excinfo:
+        reconcile_appliance(
+            spec=valid_spec(), meta=sample_meta(), core_api=core_api, apps_api=apps_api
+        )
+
+    assert excinfo.value.status["conditions"][2]["reason"] == "ResourceApplyFailed"
+    assert api_writes(core_api) == []
+    assert api_writes(apps_api) == []
+
+
+def test_managed_memcached_uses_guarded_ssa_and_restores_headers() -> None:
+    core_api = make_core_api()
+    apps_api = make_apps_api()
+    apps_api.read_namespaced_deployment.return_value = _managed_memcached_deployment()
+    apps_api.read_namespaced_deployment.side_effect = None
+    apps_api.api_client.default_headers["Content-Type"] = "application/json"
+
+    def patch_deployment(**_: object) -> None:
+        assert (
+            apps_api.api_client.default_headers["Content-Type"]
+            == "application/apply-patch+yaml"
+        )
+
+    apps_api.patch_namespaced_deployment.side_effect = patch_deployment
+    reconcile_appliance(
+        spec=valid_spec(), meta=sample_meta(), core_api=core_api, apps_api=apps_api
+    )
+
+    applied = apps_api.patch_namespaced_deployment.call_args.kwargs
+    assert applied["name"] == "example-memcached"
+    assert applied["body"]["metadata"]["resourceVersion"] == "17"
+    assert applied["field_manager"] == "coriolis-operator"
+    assert applied["force"] is True
+    assert apps_api.api_client.default_headers["Content-Type"] == "application/json"
+
+
+@pytest.mark.parametrize("operation", ["create", "patch"])
+def test_memcached_apply_failure_is_sanitized_and_skips_marker(operation: str) -> None:
+    core_api = make_core_api()
+    apps_api = make_apps_api()
+    if operation == "patch":
+        apps_api.read_namespaced_deployment.return_value = (
+            _managed_memcached_deployment()
+        )
+        apps_api.read_namespaced_deployment.side_effect = None
+    getattr(
+        apps_api, f"{operation}_namespaced_deployment"
+    ).side_effect = client.ApiException(status=409, reason="memcached-apply-sentinel")
+
+    with pytest.raises(main.ReconcileRetry) as excinfo:
+        reconcile_appliance(
+            spec=valid_spec(),
+            meta=sample_meta(),
+            status={"acceptedVersion": "2603.4", "conditions": []},
+            core_api=core_api,
+            apps_api=apps_api,
+        )
+
+    assert excinfo.value.status["acceptedVersion"] == "2603.4"
+    assert excinfo.value.status["conditions"][2]["reason"] == "ResourceApplyFailed"
+    assert "memcached-apply-sentinel" not in repr(excinfo.value.status)
+    marker_names = [
+        call.kwargs["body"]["metadata"]["name"]
+        for call in core_api.create_namespaced_config_map.call_args_list
+    ]
+    assert "example-operator-state" not in marker_names
+    assert not [
+        method for method in api_writes(core_api) if method[0].startswith("delete")
+    ]
+    assert not [
+        method for method in api_writes(apps_api) if method[0].startswith("delete")
+    ]
 
 
 @pytest.mark.parametrize(

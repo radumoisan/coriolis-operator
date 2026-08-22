@@ -42,6 +42,7 @@ from coriolis_operator.reconcile import (
     kubernetes_coriolis_render_inputs,
     preflight_foundational_resources,
     preflight_mariadb_resources,
+    preflight_memcached_resource,
     rejected_conditions,
     retry_conditions,
 )
@@ -196,7 +197,7 @@ def reconcile_appliance(
     core_api: client.CoreV1Api | None = None,
     apps_api: client.AppsV1Api | None = None,
 ) -> dict[str, Any]:
-    """Reconcile foundational resources, dependency Services, and MariaDB."""
+    """Reconcile foundational resources, dependency Services, and workloads."""
     name = str(meta["name"])
     namespace = str(meta["namespace"])
     generation = int(meta["generation"])
@@ -288,6 +289,7 @@ def reconcile_appliance(
             name, "mariadb-config-secret"
         )
         mariadb_stateful_set_name = appliance_resource_name(name, "mariadb")
+        memcached_deployment_name = appliance_resource_name(name, "memcached")
     except ReconcileRetry:
         raise
     except Exception:
@@ -385,6 +387,14 @@ def reconcile_appliance(
     mariadb_stateful_set_existing = _read_or_absent(
         workloads_api.read_namespaced_stateful_set,
         name=mariadb_stateful_set_name,
+        namespace=namespace,
+        generation=generation,
+        accepted_version=accepted_version,
+        status=status,
+    )
+    memcached_deployment_existing = _read_or_absent(
+        workloads_api.read_namespaced_deployment,
+        name=memcached_deployment_name,
         namespace=namespace,
         generation=generation,
         accepted_version=accepted_version,
@@ -562,6 +572,33 @@ def reconcile_appliance(
                 generation, accepted_version, status, "ResourceApplyFailed"
             )
 
+    try:
+        memcached_preflight = preflight_memcached_resource(
+            appliance_name=name,
+            namespace=namespace,
+            accepted_version=requested_version,
+            owner=owner,
+            memcached_deployment=memcached_deployment_existing,
+        )
+    except ReconcileRetry:
+        raise
+    except Exception:
+        raise _retry_status(
+            generation, accepted_version, status, "ResourceApplyFailed"
+        ) from None
+    if memcached_preflight.classification is OwnedClassification.COLLISION:
+        return build_status(
+            generation,
+            accepted_version=accepted_version,
+            conditions=collision_conditions(namespace, memcached_deployment_name),
+            prior_conditions=_prior_conditions(status),
+        )
+    if (
+        memcached_preflight.classification is OwnedClassification.MANAGED
+        and _resource_version(memcached_deployment_existing) is None
+    ):
+        raise _retry_status(generation, accepted_version, status, "ResourceApplyFailed")
+
     (
         mariadb_data_pvc_body,
         mariadb_config_map_body,
@@ -736,6 +773,16 @@ def reconcile_appliance(
             accepted_version=accepted_version,
             status=status,
         )
+    _create_or_apply(
+        workloads_api,
+        kind="deployment",
+        body=memcached_preflight.manifests[0],
+        existing=memcached_deployment_existing,
+        category="ResourceApplyFailed",
+        generation=generation,
+        accepted_version=accepted_version,
+        status=status,
+    )
     _create_or_apply(
         api,
         kind="config_map",

@@ -16,7 +16,7 @@
 - Validated registry metadata before pulls; recorded immutable digests, platforms, runtime configuration, health capabilities, and compatibility.
 - Configured the destination-registry pull Secret `coriolis-appliance-registry` (type `kubernetes.io/dockerconfigjson`) in `virt-infra-dev-buc-hq` namespace `coriolis`, without storing credential values in the repository.
 - Pull validation passed for all 21 historically selected image references (10 application images at `2603.4`, 10 support images at `2023.1-ubuntu-jammy`, and Step CA at `2603.4`); each pulled successfully serially with `imagePullPolicy: Always`, each successful Pod was removed, and no pull-validation Pods remain. Independent main-agent validation of Step CA repeated successfully. Step CA and web-proxy are deferred from the current initial runtime.
-- The inventory and pull gates are complete. The development stack through MariaDB reconciliation is published on `origin/dev` at `55212b0` and included in released operator `0.5.6`. No core runtime workload remains after isolated POC cleanup; remaining Services, Ingress, workloads, and runtime design are deferred.
+- The inventory and pull gates are complete. The development stack through MariaDB reconciliation is published on `origin/dev` at `55212b0` and included in released operator `0.5.6`. A Memcached Deployment implementation is local, uncommitted, unpushed, and undeployed; no core runtime workload remains after isolated POC cleanup.
 
 ## Milestone 3: Core Runtime API Slice (Implemented Locally)
 
@@ -44,7 +44,7 @@
 
 ## Later Milestones
 
-- MariaDB image, standalone runtime evidence, development Kubernetes contract, pure CRD/resolver/builders/preflight, reconciliation, and anonymous-account prevention are published on `origin/dev`; CIXpress released the fix as `0.5.6`. The released single-node `local-path` POC validated clean first boot, RWO, fsGroup, exact retained reuse, persisted same-node remount, authenticated probes, and termination within 30 seconds without repair. RabbitMQ and Memcached workload evidence follows; CSI attach/detach/rescheduling and production backup/restore, HA, and RPO/RTO acceptance remain later gates.
+- MariaDB image, standalone runtime evidence, development Kubernetes contract, pure CRD/resolver/builders/preflight, reconciliation, and anonymous-account prevention are published on `origin/dev`; CIXpress released the fix as `0.5.6`. The released single-node `local-path` POC validated clean first boot, RWO, fsGroup, exact retained reuse, persisted same-node remount, authenticated probes, and termination within 30 seconds without repair. Memcached implementation is complete locally and awaits review, publication, and a released-artifact isolated POC; RabbitMQ evidence follows after acceptance. CSI attach/detach/rescheduling and production backup/restore, HA, and RPO/RTO acceptance remain later gates.
 - Add safe upgrade and production lifecycle capabilities after explicit contracts and operational review.
 
 ## Pending Decisions

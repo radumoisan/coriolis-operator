@@ -39,7 +39,7 @@ def test_role_grants_only_required_service_verbs() -> None:
     assert "resourceNames:" not in service_rule
 
 
-def test_role_grants_only_required_mariadb_storage_and_workload_verbs() -> None:
+def test_role_grants_only_required_mariadb_and_memcached_workload_verbs() -> None:
     role = (Path(__file__).parents[2] / "helm/templates/role.yaml").read_text()
 
     pvc_rule = next(
@@ -51,6 +51,11 @@ def test_role_grants_only_required_mariadb_storage_and_workload_verbs() -> None:
         block
         for block in role.split("  - apiGroups:")
         if "      - statefulsets" in block
+    )
+    deployment_rule = next(
+        block
+        for block in role.split("  - apiGroups:")
+        if "      - deployments" in block
     )
 
     assert re.findall(r"^      - (\w+)$", pvc_rule, flags=re.MULTILINE) == [
@@ -65,10 +70,18 @@ def test_role_grants_only_required_mariadb_storage_and_workload_verbs() -> None:
         "create",
         "patch",
     ]
+    assert re.findall(r"^      - (\w+)$", deployment_rule, flags=re.MULTILINE) == [
+        "apps",
+        "deployments",
+        "get",
+        "create",
+        "patch",
+    ]
     assert "delete" not in pvc_rule
     assert "patch" not in pvc_rule
     assert "resourceNames:" not in pvc_rule
     assert "resourceNames:" not in stateful_set_rule
+    assert "resourceNames:" not in deployment_rule
 
 
 def test_role_excludes_deferred_mariadb_permissions() -> None:
