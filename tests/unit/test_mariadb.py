@@ -113,6 +113,7 @@ def test_rendered_mariadb_values_are_exactly_partitioned_and_follow_contract() -
     )
     assert (
         "mariadb-install-db --datadir=/var/lib/mysql "
+        "--skip-test-db "
         "--auth-root-authentication-method=normal"
         in non_sensitive["prepare-mariadb.sh"]
     )

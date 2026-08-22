@@ -34,6 +34,7 @@ MARIADB_FIRST_INITIALIZATION_MARKER = f"{MARIADB_RUNTIME_DIR}/first-initializati
 MARIADB_BOOTSTRAP_COMPLETE_MARKER = f"{MARIADB_RUNTIME_DIR}/bootstrap-complete"
 MARIADB_INSTALL_DB_COMMAND = (
     f"mariadb-install-db --datadir={MARIADB_DATA_DIR} "
+    "--skip-test-db "
     "--auth-root-authentication-method=normal"
 )
 MARIADB_PASSWORDLESS_BOOTSTRAP_COMMAND = (
