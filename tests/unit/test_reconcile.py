@@ -347,6 +347,40 @@ def keystone_bodies() -> dict[str, dict]:
     }
 
 
+def test_keystone_prepare_init_does_not_chmod_mount_roots_and_keeps_0600_files() -> (
+    None
+):
+    deployment = keystone_bodies()["example-keystone"]
+    prepare = next(
+        container
+        for container in deployment["spec"]["template"]["spec"]["initContainers"]
+        if container["name"] == "prepare"
+    )
+    script = "".join(prepare["args"])
+
+    assert "install -d" not in script
+
+    expected = [
+        "/etc/keystone/runtime/bootstrap.py",
+        "/etc/keystone/runtime/keystone.conf",
+        "/etc/keystone/runtime/auth-request.json",
+        "/etc/keystone/runtime/admin-password",
+        "/etc/keystone/fernet-keys/0",
+        "/etc/keystone/fernet-keys/1",
+        "/etc/keystone/credential-keys/0",
+        "/etc/keystone/credential-keys/1",
+    ]
+    assert script.count("install -m 0600") == 8
+    for path in expected:
+        assert path in script
+
+    security_context = prepare["securityContext"]
+    assert security_context["runAsNonRoot"] is True
+    assert security_context["readOnlyRootFilesystem"] is True
+    assert security_context["allowPrivilegeEscalation"] is False
+    assert security_context["capabilities"] == {"drop": ["ALL"]}
+
+
 def configure_mariadb_existing(
     core_api: MagicMock, apps_api: MagicMock, existing: dict[str, dict]
 ) -> None:

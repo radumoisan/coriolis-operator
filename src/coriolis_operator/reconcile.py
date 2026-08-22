@@ -2045,8 +2045,8 @@ def build_keystone_deployment(
         "image": KEYSTONE_IMAGE,
         "command": ["/bin/sh", "-ec"],
         "args": [
-            "set -eu; install -d -m 0700 /etc/keystone/runtime "
-            f"{KEYSTONE_FERNET_KEYS_DIR} {KEYSTONE_CREDENTIAL_KEYS_DIR}; "
+            # emptyDir mount roots are root-owned; fsGroup supplies write access.
+            "set -eu; "
             "install -m 0600 /source/config/bootstrap.py "
             "/etc/keystone/runtime/bootstrap.py; "
             "install -m 0600 /source/secret/keystone.conf "
