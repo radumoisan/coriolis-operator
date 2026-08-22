@@ -119,6 +119,8 @@ def test_rabbitmq_manifests_are_retained_secure_and_service_compatible() -> None
         "/usr/sbin/rabbitmq-diagnostics -q check_port_listener 5672 && "
         "/usr/sbin/rabbitmq-diagnostics -q check_local_alarms",
     ]
+    assert container["readinessProbe"]["periodSeconds"] == 10
+    assert container["readinessProbe"]["timeoutSeconds"] == 15
     assert container["readinessProbe"]["successThreshold"] == 1
     assert container["livenessProbe"]["exec"]["command"] == [
         "/bin/sh",

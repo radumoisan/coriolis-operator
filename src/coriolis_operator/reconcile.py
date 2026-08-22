@@ -1578,8 +1578,8 @@ def build_rabbitmq_stateful_set(
                     f"{running_and_listener} && {diagnostics} -q check_local_alarms",
                 ]
             },
-            "periodSeconds": 5,
-            "timeoutSeconds": 5,
+            "periodSeconds": 10,
+            "timeoutSeconds": 15,
             "failureThreshold": 3,
             "successThreshold": 1,
         },
