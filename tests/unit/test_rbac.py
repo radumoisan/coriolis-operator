@@ -84,6 +84,24 @@ def test_role_grants_only_required_mariadb_and_memcached_workload_verbs() -> Non
     assert "resourceNames:" not in deployment_rule
 
 
+def test_role_grants_only_required_bootstrap_job_verbs() -> None:
+    role = (Path(__file__).parents[2] / "helm/templates/role.yaml").read_text()
+
+    job_rule = next(
+        block for block in role.split("  - apiGroups:") if "      - jobs" in block
+    )
+    assert re.findall(r"^      - (\w+)$", job_rule, flags=re.MULTILINE) == [
+        "batch",
+        "jobs",
+        "get",
+        "create",
+    ]
+    assert "patch" not in job_rule
+    assert "delete" not in job_rule
+    assert "list" not in job_rule
+    assert "watch" not in job_rule
+
+
 def test_role_excludes_deferred_mariadb_permissions() -> None:
     role = (Path(__file__).parents[2] / "helm/templates/role.yaml").read_text()
 

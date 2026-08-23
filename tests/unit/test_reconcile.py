@@ -10,7 +10,14 @@ import pytest
 from kubernetes import client
 
 from coriolis_operator import main
-from coriolis_operator.main import reconcile_appliance
+from coriolis_operator.common import (
+    BOOTSTRAP_COMPONENT,
+    BOOTSTRAP_SCRIPT_ANNOTATION,
+    BOOTSTRAP_TEMPLATE_ANNOTATION,
+    CONDUCTOR_IMAGE,
+    render_bootstrap_script,
+)
+from coriolis_operator.main import _bootstrap_job_state, reconcile_appliance
 from coriolis_operator.mariadb import (
     SensitiveMariaDBCredentials,
     resolve_mariadb_settings,
@@ -34,6 +41,9 @@ from coriolis_operator.reconcile import (
     appliance_identity,
     appliance_resource_name,
     blocked_conditions,
+    bootstrap_running_conditions,
+    build_common_bootstrap_config_map,
+    build_common_bootstrap_job,
     build_coriolis_config_map,
     build_coriolis_config_secret,
     build_coriolis_credentials_secret,
@@ -280,6 +290,212 @@ def make_apps_api(existing=None) -> MagicMock:
     return api
 
 
+def _bootstrap_script(appliance_name: str = "example") -> str:
+    return render_bootstrap_script(
+        coriolis_api_host=appliance_resource_name(appliance_name, "coriolis-api"),
+        rabbitmq_host=appliance_resource_name(appliance_name, "rabbitmq"),
+        memcached_host=appliance_resource_name(appliance_name, "memcached"),
+        database_host=appliance_resource_name(appliance_name, "mariadb"),
+        keystone_host=appliance_resource_name(appliance_name, "keystone"),
+    )
+
+
+def bootstrap_job_body() -> dict:
+    return build_common_bootstrap_job(
+        appliance_name="example",
+        namespace="operators",
+        accepted_version="2603.4",
+        owner=OWNER,
+        script=_bootstrap_script(),
+    )
+
+
+_DEFAULT_JOB = object()
+
+
+def succeeded_bootstrap_job(appliance_name: str = "example") -> dict:
+    body = build_common_bootstrap_job(
+        appliance_name=appliance_name,
+        namespace="operators",
+        accepted_version="2603.4",
+        owner=dict(OWNER, name=appliance_name, uid="abc-123"),
+        script=_bootstrap_script(appliance_name),
+    )
+    body["metadata"]["resourceVersion"] = "1"
+    body["status"] = {"succeeded": 1}
+    return body
+
+
+def _to_v1_volume(volume: dict) -> client.V1Volume:
+    name = volume["name"]
+    if "emptyDir" in volume:
+        return client.V1Volume(name=name, empty_dir=client.V1EmptyDirVolumeSource())
+    if "configMap" in volume:
+        cm = volume["configMap"]
+        items = [
+            client.V1KeyToPath(
+                key=item["key"], path=item["path"], mode=item.get("mode")
+            )
+            for item in cm.get("items", [])
+        ]
+        return client.V1Volume(
+            name=name,
+            config_map=client.V1ConfigMapVolumeSource(
+                name=cm["name"], items=items or None
+            ),
+        )
+    if "secret" in volume:
+        secret = volume["secret"]
+        items = [
+            client.V1KeyToPath(
+                key=item["key"], path=item["path"], mode=item.get("mode")
+            )
+            for item in secret.get("items", [])
+        ]
+        return client.V1Volume(
+            name=name,
+            secret=client.V1SecretVolumeSource(
+                secret_name=secret["secretName"], items=items or None
+            ),
+        )
+    raise AssertionError(f"unsupported bootstrap volume source: {volume}")
+
+
+def to_v1_bootstrap_job(body: dict, status: dict | None = None) -> client.V1Job:
+    meta = body["metadata"]
+    owner_refs = [
+        client.V1OwnerReference(
+            api_version=ref["apiVersion"],
+            kind=ref["kind"],
+            name=ref["name"],
+            uid=ref["uid"],
+            controller=ref.get("controller"),
+        )
+        for ref in meta.get("ownerReferences", [])
+    ]
+    object_meta = client.V1ObjectMeta(
+        name=meta["name"],
+        namespace=meta["namespace"],
+        labels=meta.get("labels"),
+        annotations=meta.get("annotations"),
+        owner_references=owner_refs or None,
+        resource_version=meta.get("resourceVersion"),
+    )
+    spec = body["spec"]
+    template_meta = spec["template"]["metadata"]
+    template_object_meta = client.V1ObjectMeta(
+        labels=template_meta.get("labels"),
+        annotations=template_meta.get("annotations"),
+    )
+    pod_dict = spec["template"]["spec"]
+    containers = []
+    for container in pod_dict["containers"]:
+        env = [
+            client.V1EnvVar(name=entry["name"], value=entry.get("value"))
+            for entry in container.get("env", [])
+        ]
+        mounts = [
+            client.V1VolumeMount(
+                name=mount["name"],
+                mount_path=mount["mountPath"],
+                read_only=mount.get("readOnly"),
+            )
+            for mount in container.get("volumeMounts", [])
+        ]
+        container_sc = None
+        sc = container.get("securityContext")
+        if sc is not None:
+            container_sc = client.V1SecurityContext(
+                run_as_non_root=sc.get("runAsNonRoot"),
+                read_only_root_filesystem=sc.get("readOnlyRootFilesystem"),
+                allow_privilege_escalation=sc.get("allowPrivilegeEscalation"),
+                capabilities=client.V1Capabilities(
+                    drop=sc.get("capabilities", {}).get("drop")
+                ),
+                seccomp_profile=client.V1SeccompProfile(
+                    type=sc.get("seccompProfile", {}).get("type")
+                ),
+            )
+        containers.append(
+            client.V1Container(
+                name=container["name"],
+                image=container["image"],
+                command=container.get("command"),
+                env=env or None,
+                security_context=container_sc,
+                volume_mounts=mounts or None,
+            )
+        )
+    pod_security = None
+    pod_sc = pod_dict.get("securityContext")
+    if pod_sc is not None:
+        pod_security = client.V1PodSecurityContext(
+            run_as_user=pod_sc.get("runAsUser"),
+            run_as_group=pod_sc.get("runAsGroup"),
+            fs_group=pod_sc.get("fsGroup"),
+            fs_group_change_policy=pod_sc.get("fsGroupChangePolicy"),
+        )
+    volumes = [_to_v1_volume(volume) for volume in pod_dict.get("volumes", [])]
+    image_pull_secrets = [
+        client.V1LocalObjectReference(name=entry["name"])
+        for entry in pod_dict.get("imagePullSecrets", [])
+    ]
+    pod_spec = client.V1PodSpec(
+        restart_policy=pod_dict.get("restartPolicy"),
+        automount_service_account_token=pod_dict.get("automountServiceAccountToken"),
+        enable_service_links=pod_dict.get("enableServiceLinks"),
+        termination_grace_period_seconds=pod_dict.get("terminationGracePeriodSeconds"),
+        security_context=pod_security,
+        containers=containers,
+        volumes=volumes or None,
+        image_pull_secrets=image_pull_secrets or None,
+    )
+    template = client.V1PodTemplateSpec(metadata=template_object_meta, spec=pod_spec)
+    job_spec = client.V1JobSpec(
+        backoff_limit=spec["backoffLimit"],
+        active_deadline_seconds=spec["activeDeadlineSeconds"],
+        completions=spec["completions"],
+        parallelism=spec["parallelism"],
+        template=template,
+    )
+    job_status = None
+    if status is not None:
+        conditions = [
+            client.V1JobCondition(type=item.get("type"), status=item.get("status"))
+            for item in status.get("conditions", [])
+        ]
+        job_status = client.V1JobStatus(
+            succeeded=status.get("succeeded"),
+            failed=status.get("failed"),
+            conditions=conditions or None,
+        )
+    return client.V1Job(
+        api_version="batch/v1",
+        kind="Job",
+        metadata=object_meta,
+        spec=job_spec,
+        status=job_status,
+    )
+
+
+def make_batch_api(
+    job: object = _DEFAULT_JOB, appliance_name: str = "example"
+) -> MagicMock:
+    api = MagicMock()
+    api.api_client.default_headers = {}
+
+    def read_job(*, name: str, namespace: str) -> object:
+        assert namespace == "operators"
+        if name == appliance_resource_name(appliance_name, BOOTSTRAP_COMPONENT):
+            if job is _DEFAULT_JOB:
+                return succeeded_bootstrap_job(appliance_name=appliance_name)
+            return job
+        raise _api_exception(404)
+
+    api.read_namespaced_job.side_effect = read_job
+    return api
+
+
 def mariadb_bodies() -> dict[str, dict]:
     preflight = preflight_mariadb_resources(
         appliance_name="example",
@@ -454,6 +670,7 @@ def api_writes(api: MagicMock) -> list:
 @pytest.fixture(autouse=True)
 def stub_apps_api(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(main.client, "AppsV1Api", make_apps_api)
+    monkeypatch.setattr(main.client, "BatchV1Api", make_batch_api)
 
 
 def desired_body(meta=None) -> dict:
@@ -1460,6 +1677,9 @@ def test_reconcile_appliance_server_side_applies_state_and_returns_status() -> N
         call.read_namespaced_secret(
             name="example-keystone-config-secret", namespace="operators"
         ),
+        call.read_namespaced_config_map(
+            name="example-common-bootstrap-v1", namespace="operators"
+        ),
         call.create_namespaced_secret(namespace="operators", body=ANY),
         call.create_namespaced_secret(namespace="operators", body=ANY),
         call.create_namespaced_config_map(namespace="operators", body=ANY),
@@ -1478,6 +1698,7 @@ def test_reconcile_appliance_server_side_applies_state_and_returns_status() -> N
         call.create_namespaced_config_map(namespace="operators", body=ANY),
         call.create_namespaced_config_map(namespace="operators", body=ANY),
         call.create_namespaced_secret(namespace="operators", body=ANY),
+        call.create_namespaced_config_map(namespace="operators", body=ANY),
         call.create_namespaced_config_map(namespace="operators", body=ANY),
     ]
     assert status["observedGeneration"] == 7
@@ -1878,11 +2099,13 @@ def test_reconcile_compatible_legacy_dotted_and_long_names_proceed(
     meta = sample_meta()
     meta["name"] = appliance_name
     core_api = make_core_api(existing=legacy_marker(meta=meta, generation="1"))
+    batch_api = make_batch_api(appliance_name=appliance_name)
 
     status = reconcile_appliance(
         spec=valid_spec(),
         meta=meta,
         core_api=core_api,
+        batch_api=batch_api,
     )
 
     core_api.patch_namespaced_config_map.assert_called_once()
@@ -2739,6 +2962,7 @@ def test_managed_resources_use_resource_version_and_marker_is_last() -> None:
         _api_exception(404),
         _api_exception(404),
         _api_exception(404),
+        _api_exception(404),
     ]
     api.read_namespaced_secret.side_effect = [_api_exception(404)] * 8
 
@@ -2803,6 +3027,7 @@ def test_existing_managed_resource_without_resource_version_retries_before_write
         _api_exception(404),
         _api_exception(404),
         _api_exception(404),
+        _api_exception(404),
     ]
 
     with pytest.raises(main.ReconcileRetry) as excinfo:
@@ -2825,6 +3050,7 @@ def test_apply_header_is_removed_before_later_create() -> None:
     api.read_namespaced_config_map.side_effect = [
         _api_exception(404),
         managed_config,
+        _api_exception(404),
         _api_exception(404),
         _api_exception(404),
         _api_exception(404),
@@ -2921,6 +3147,7 @@ def test_foundational_managed_apply_conflict_stops_later_writes_and_marker() -> 
     api.read_namespaced_config_map.side_effect = [
         _api_exception(404),
         managed_config,
+        _api_exception(404),
         _api_exception(404),
         _api_exception(404),
         _api_exception(404),
@@ -3378,6 +3605,7 @@ def test_mariadb_reads_and_writes_follow_the_frozen_cross_api_order() -> None:
         ("read", "configmap", "example-keystone-config"),
         ("read", "secret", "example-keystone-config-secret"),
         ("read", "deployment", "example-keystone"),
+        ("read", "configmap", "example-common-bootstrap-v1"),
     ]
     assert [event for event in events if event[0] == "write"] == [
         ("write", "secret", "example-coriolis-credentials"),
@@ -3402,6 +3630,7 @@ def test_mariadb_reads_and_writes_follow_the_frozen_cross_api_order() -> None:
         ("write", "configmap", "example-keystone-config"),
         ("write", "secret", "example-keystone-config-secret"),
         ("write", "deployment", "example-keystone"),
+        ("write", "configmap", "example-common-bootstrap-v1"),
         ("write", "configmap", "example-operator-state"),
     ]
     assert status["acceptedVersion"] == "2603.4"
@@ -4136,6 +4365,7 @@ def test_keystone_reads_all_resources_before_the_first_write() -> None:
         "example-keystone-config",
         "example-keystone-config-secret",
         "example-keystone",
+        "example-common-bootstrap-v1",
     ]
     assert reads.index("example-keystone-database-credentials") > reads.index(
         "example-rabbitmq"
@@ -4270,6 +4500,7 @@ def test_keystone_retained_creation_precedes_mariadb_and_marker_is_last() -> Non
         "example-keystone-config",
         "example-keystone-config-secret",
         "example-keystone",
+        "example-common-bootstrap-v1",
         "example-operator-state",
     ]
 
@@ -4477,3 +4708,779 @@ def test_keystone_patch_failure_is_sanitized_and_stops_at_failed_write(
     assert "keystone-patch-sentinel" not in repr(excinfo.value.status)
     assert writes[-1] == (resource_kind, resource_name)
     assert ("ConfigMap", "example-operator-state") not in writes
+
+
+def bootstrap_config_map_body() -> dict:
+    return build_common_bootstrap_config_map(
+        appliance_name="example",
+        namespace="operators",
+        accepted_version="2603.4",
+        owner=OWNER,
+        script=_bootstrap_script(),
+    )
+
+
+def assert_no_marker_write(core_api: MagicMock) -> None:
+    marker_names = [
+        item.kwargs["body"]["metadata"]["name"]
+        for item in core_api.create_namespaced_config_map.call_args_list
+    ]
+    assert "example-operator-state" not in marker_names
+    patched_markers = [
+        item.kwargs["name"]
+        for item in core_api.patch_namespaced_config_map.call_args_list
+    ]
+    assert "example-operator-state" not in patched_markers
+
+
+def test_bootstrap_running_conditions_are_exact_six_conditions() -> None:
+    assert [
+        (condition_type, status, reason)
+        for condition_type, status, reason, _ in bootstrap_running_conditions()
+    ] == [
+        ("Accepted", "True", "Accepted"),
+        ("Progressing", "True", "BootstrapRunning"),
+        ("Reconciled", "False", "BootstrapRunning"),
+        ("Ready", "False", "RuntimeNotImplemented"),
+        ("Degraded", "False", "NotDegraded"),
+        ("Upgradeable", "False", "UpgradeNotSupported"),
+    ]
+
+
+def test_bootstrap_config_map_and_job_exact_contract() -> None:
+    config_map = bootstrap_config_map_body()
+    job = bootstrap_job_body()
+
+    assert config_map["apiVersion"] == "v1"
+    assert config_map["kind"] == "ConfigMap"
+    assert config_map["metadata"]["name"] == "example-common-bootstrap-v1"
+    assert config_map["metadata"]["namespace"] == "operators"
+    assert config_map["metadata"]["ownerReferences"] == [dict(OWNER, controller=True)]
+    assert config_map["immutable"] is True
+    assert set(config_map["data"]) == {"bootstrap.py"}
+    assert config_map["data"]["bootstrap.py"] == _bootstrap_script()
+
+    assert job["apiVersion"] == "batch/v1"
+    assert job["kind"] == "Job"
+    assert job["metadata"]["name"] == "example-common-bootstrap-v1"
+    assert job["metadata"]["namespace"] == "operators"
+    assert job["metadata"]["ownerReferences"] == [dict(OWNER, controller=True)]
+    assert BOOTSTRAP_SCRIPT_ANNOTATION in job["metadata"]["annotations"]
+    assert BOOTSTRAP_TEMPLATE_ANNOTATION in job["metadata"]["annotations"]
+
+    spec = job["spec"]
+    assert spec["backoffLimit"] == 2
+    assert spec["activeDeadlineSeconds"] == 600
+    assert spec["completions"] == 1
+    assert spec["parallelism"] == 1
+    template_meta = spec["template"]["metadata"]
+    assert (
+        template_meta["annotations"][BOOTSTRAP_TEMPLATE_ANNOTATION]
+        == (job["metadata"]["annotations"][BOOTSTRAP_TEMPLATE_ANNOTATION])
+    )
+    assert (
+        template_meta["annotations"][BOOTSTRAP_SCRIPT_ANNOTATION]
+        == (job["metadata"]["annotations"][BOOTSTRAP_SCRIPT_ANNOTATION])
+    )
+    assert "ttlSecondsAfterFinished" not in job["spec"]
+    pod = spec["template"]["spec"]
+    assert pod["restartPolicy"] == "Never"
+    assert pod["automountServiceAccountToken"] is False
+    assert pod["enableServiceLinks"] is False
+    assert "serviceAccountName" not in pod
+    assert pod["imagePullSecrets"] == [{"name": "coriolis-appliance-registry"}]
+    pod_sc = pod["securityContext"]
+    assert pod_sc["runAsUser"] == 42434
+    assert pod_sc["runAsGroup"] == 42434
+    assert pod_sc["fsGroup"] == 42434
+    assert pod_sc["fsGroupChangePolicy"] == "OnRootMismatch"
+
+    assert len(pod["containers"]) == 1
+    container = pod["containers"][0]
+    assert container["name"] == "common-bootstrap-v1"
+    assert container["image"] == CONDUCTOR_IMAGE
+    assert container["command"] == ["python3", "/etc/coriolis-bootstrap/bootstrap.py"]
+    assert "args" not in container
+    env = {entry["name"]: entry["value"] for entry in container["env"]}
+    assert env == {"HOME": "/tmp", "PYTHONDONTWRITEBYTECODE": "1"}
+    for name in env:
+        assert not any(
+            marker in name for marker in ("PASSWORD", "TOKEN", "SECRET", "CREDENTIAL")
+        )
+    security_context = container["securityContext"]
+    assert security_context["runAsNonRoot"] is True
+    assert security_context["readOnlyRootFilesystem"] is True
+    assert security_context["allowPrivilegeEscalation"] is False
+    assert security_context["capabilities"] == {"drop": ["ALL"]}
+    assert security_context["seccompProfile"] == {"type": "RuntimeDefault"}
+
+    volumes = {volume["name"]: volume for volume in pod["volumes"]}
+    assert set(volumes) == {
+        "tmp",
+        "script",
+        "config",
+        "infra-credentials",
+        "coriolis-credentials",
+    }
+    assert volumes["tmp"] == {"name": "tmp", "emptyDir": {}}
+    assert volumes["script"]["configMap"]["name"] == "example-common-bootstrap-v1"
+    assert volumes["script"]["configMap"]["items"] == [
+        {"key": "bootstrap.py", "path": "bootstrap.py", "mode": 0o444}
+    ]
+    assert volumes["config"]["secret"]["secretName"] == "example-coriolis-config-secret"
+    assert volumes["config"]["secret"]["items"] == [
+        {"key": "coriolis.conf", "path": "coriolis.conf", "mode": 0o440}
+    ]
+    assert (
+        volumes["infra-credentials"]["secret"]["secretName"]
+        == "example-infrastructure-credentials"
+    )
+    assert volumes["infra-credentials"]["secret"]["items"] == [
+        {
+            "key": "keystone_admin_password",
+            "path": "keystone-admin-password",
+            "mode": 0o440,
+        },
+        {"key": "rabbitmq_password", "path": "rabbitmq-password", "mode": 0o440},
+    ]
+    assert (
+        volumes["coriolis-credentials"]["secret"]["secretName"]
+        == "example-coriolis-credentials"
+    )
+    assert volumes["coriolis-credentials"]["secret"]["items"] == [
+        {
+            "key": "coriolis_keystone_password",
+            "path": "coriolis-keystone-password",
+            "mode": 0o440,
+        },
+        {
+            "key": "coriolis_database_password",
+            "path": "coriolis-database-password",
+            "mode": 0o440,
+        },
+    ]
+
+    mounts = {mount["name"]: mount for mount in container["volumeMounts"]}
+    assert mounts["script"]["mountPath"] == "/etc/coriolis-bootstrap"
+    assert mounts["script"]["readOnly"] is True
+    assert mounts["config"]["mountPath"] == "/etc/coriolis"
+    assert mounts["config"]["readOnly"] is True
+    assert mounts["infra-credentials"]["mountPath"] == "/etc/coriolis-bootstrap-infra"
+    assert mounts["infra-credentials"]["readOnly"] is True
+    assert mounts["coriolis-credentials"]["mountPath"] == (
+        "/etc/coriolis-bootstrap-coriolis"
+    )
+    assert mounts["coriolis-credentials"]["readOnly"] is True
+    assert mounts["tmp"]["mountPath"] == "/tmp"
+    assert "readOnly" not in mounts["tmp"]
+
+    mount_paths = [mount["mountPath"] for mount in container["volumeMounts"]]
+    assert len(set(mount_paths)) == 5
+    assert len(mount_paths) == 5
+    for path in mount_paths:
+        assert not any(
+            path != other and other.startswith(path + "/") for other in mount_paths
+        ), f"nested mount path: {path}"
+    for name in ("script", "config", "infra-credentials", "coriolis-credentials"):
+        assert mounts[name]["readOnly"] is True
+
+
+def test_bootstrap_absent_creates_job_and_raises_running_before_marker() -> None:
+    core_api = make_core_api()
+    batch_api = make_batch_api(job=None)
+
+    with pytest.raises(main.ReconcileRetry) as excinfo:
+        reconcile_appliance(
+            spec=valid_spec(),
+            meta=sample_meta(),
+            core_api=core_api,
+            batch_api=batch_api,
+        )
+
+    bootstrap_names = [
+        item.kwargs["body"]["metadata"]["name"]
+        for item in core_api.create_namespaced_config_map.call_args_list
+    ]
+    assert bootstrap_names[-1] == "example-common-bootstrap-v1"
+    batch_api.create_namespaced_job.assert_called_once_with(
+        namespace="operators", body=ANY
+    )
+    batch_api.patch_namespaced_job.assert_not_called()
+    assert_no_marker_write(core_api)
+    statuses = {item["type"]: item for item in excinfo.value.status["conditions"]}
+    assert statuses["Progressing"]["status"] == "True"
+    assert statuses["Progressing"]["reason"] == "BootstrapRunning"
+    assert statuses["Reconciled"]["status"] == "False"
+    assert statuses["Reconciled"]["reason"] == "BootstrapRunning"
+    assert statuses["Ready"]["status"] == "False"
+    assert statuses["Ready"]["reason"] == "RuntimeNotImplemented"
+    assert statuses["Degraded"]["status"] == "False"
+    assert statuses["Degraded"]["reason"] == "NotDegraded"
+
+
+def test_bootstrap_active_requeues_without_marker_or_job_patch() -> None:
+    core_api = make_core_api()
+    active = succeeded_bootstrap_job()
+    active["status"] = {}
+    batch_api = make_batch_api(job=active)
+
+    with pytest.raises(main.ReconcileRetry) as excinfo:
+        reconcile_appliance(
+            spec=valid_spec(),
+            meta=sample_meta(),
+            core_api=core_api,
+            batch_api=batch_api,
+        )
+
+    batch_api.create_namespaced_job.assert_not_called()
+    batch_api.patch_namespaced_job.assert_not_called()
+    assert_no_marker_write(core_api)
+    statuses = {item["type"]: item for item in excinfo.value.status["conditions"]}
+    assert statuses["Progressing"]["status"] == "True"
+    assert statuses["Progressing"]["reason"] == "BootstrapRunning"
+    assert statuses["Degraded"]["status"] == "False"
+    assert statuses["Degraded"]["reason"] == "NotDegraded"
+
+
+def test_bootstrap_succeeded_writes_marker_last_without_job_write() -> None:
+    core_api = make_core_api()
+    batch_api = make_batch_api()
+
+    status = reconcile_appliance(
+        spec=valid_spec(),
+        meta=sample_meta(),
+        core_api=core_api,
+        batch_api=batch_api,
+    )
+
+    batch_api.create_namespaced_job.assert_not_called()
+    batch_api.patch_namespaced_job.assert_not_called()
+    marker_names = [
+        item.kwargs["body"]["metadata"]["name"]
+        for item in core_api.create_namespaced_config_map.call_args_list
+    ]
+    assert marker_names[-1] == "example-operator-state"
+    statuses = {item["type"]: item for item in status["conditions"]}
+    assert statuses["Reconciled"]["status"] == "True"
+    assert statuses["Reconciled"]["reason"] == "Reconciled"
+    assert statuses["Ready"]["status"] == "False"
+    assert statuses["Ready"]["reason"] == "RuntimeNotImplemented"
+    assert statuses["Degraded"]["status"] == "False"
+
+
+def test_bootstrap_terminal_failed_is_stable_degraded_without_marker() -> None:
+    core_api = make_core_api()
+    failed = succeeded_bootstrap_job()
+    failed["status"] = {"conditions": [{"type": "Failed", "status": "True"}]}
+    batch_api = make_batch_api(job=failed)
+
+    status = reconcile_appliance(
+        spec=valid_spec(),
+        meta=sample_meta(),
+        core_api=core_api,
+        batch_api=batch_api,
+    )
+
+    batch_api.create_namespaced_job.assert_not_called()
+    batch_api.patch_namespaced_job.assert_not_called()
+    assert_no_marker_write(core_api)
+    statuses = {item["type"]: item for item in status["conditions"]}
+    assert statuses["Degraded"]["status"] == "True"
+    assert statuses["Degraded"]["reason"] == "BootstrapFailed"
+    assert statuses["Reconciled"]["status"] == "False"
+    assert statuses["Reconciled"]["reason"] == "BootstrapFailed"
+    assert statuses["Ready"]["status"] == "False"
+    assert statuses["Progressing"]["status"] == "False"
+
+
+def test_bootstrap_config_map_collision_has_zero_writes() -> None:
+    core_api = make_core_api()
+    collided = bootstrap_config_map_body()
+    collided["metadata"]["labels"]["app.kubernetes.io/managed-by"] = "other"
+    core_api.read_namespaced_config_map.side_effect = [
+        _api_exception(404),
+        _api_exception(404),
+        _api_exception(404),
+        _api_exception(404),
+        _api_exception(404),
+        collided,
+    ]
+    batch_api = make_batch_api(job=None)
+
+    status = reconcile_appliance(
+        spec=valid_spec(),
+        meta=sample_meta(),
+        core_api=core_api,
+        batch_api=batch_api,
+    )
+
+    assert status["conditions"][2]["reason"] == "ResourceCollision"
+    assert "operators/example-common-bootstrap-v1" in status["conditions"][2]["message"]
+    assert api_writes(core_api) == []
+    batch_api.create_namespaced_job.assert_not_called()
+
+
+def _drift_bootstrap_job(mutate) -> dict:
+    body = succeeded_bootstrap_job()
+    mutate(body)
+    return body
+
+
+JOB_DRIFT_MUTATORS = [
+    (
+        "metadata-annotation",
+        lambda b: b["metadata"]["annotations"].update(
+            {BOOTSTRAP_TEMPLATE_ANNOTATION: "different"}
+        ),
+    ),
+    (
+        "pod-template-annotation",
+        lambda b: b["spec"]["template"]["metadata"]["annotations"].update(
+            {BOOTSTRAP_TEMPLATE_ANNOTATION: "different"}
+        ),
+    ),
+    (
+        "script-metadata-annotation",
+        lambda b: b["metadata"]["annotations"].update(
+            {BOOTSTRAP_SCRIPT_ANNOTATION: "different"}
+        ),
+    ),
+    (
+        "script-template-annotation",
+        lambda b: b["spec"]["template"]["metadata"]["annotations"].update(
+            {BOOTSTRAP_SCRIPT_ANNOTATION: "different"}
+        ),
+    ),
+    ("backoffLimit", lambda b: b["spec"].update(backoffLimit=5)),
+    ("activeDeadlineSeconds", lambda b: b["spec"].update(activeDeadlineSeconds=999)),
+    ("completions", lambda b: b["spec"].update(completions=2)),
+    ("parallelism", lambda b: b["spec"].update(parallelism=2)),
+    (
+        "image",
+        lambda b: b["spec"]["template"]["spec"]["containers"][0].update(
+            image="cr.example/other:tag"
+        ),
+    ),
+    (
+        "command",
+        lambda b: b["spec"]["template"]["spec"]["containers"][0].update(
+            command=["other"]
+        ),
+    ),
+    (
+        "env",
+        lambda b: b["spec"]["template"]["spec"]["containers"][0]["env"].append(
+            {"name": "EXTRA", "value": "x"}
+        ),
+    ),
+    (
+        "container-security",
+        lambda b: b["spec"]["template"]["spec"]["containers"][0][
+            "securityContext"
+        ].update(runAsNonRoot=False),
+    ),
+    (
+        "pod-security",
+        lambda b: b["spec"]["template"]["spec"]["securityContext"].update(runAsUser=1),
+    ),
+    (
+        "mounts",
+        lambda b: b["spec"]["template"]["spec"]["containers"][0]["volumeMounts"].append(
+            {"name": "tmp", "mountPath": "/tmp2"}
+        ),
+    ),
+    (
+        "volume-source",
+        lambda b: b["spec"]["template"]["spec"]["volumes"][1]["configMap"].update(
+            name="other-config"
+        ),
+    ),
+    (
+        "volume-items",
+        lambda b: b["spec"]["template"]["spec"]["volumes"][1]["configMap"]["items"][
+            0
+        ].update(mode=0o755),
+    ),
+    (
+        "pull-secret",
+        lambda b: b["spec"]["template"]["spec"]["imagePullSecrets"][0].update(
+            name="other-secret"
+        ),
+    ),
+    (
+        "labels",
+        lambda b: b["spec"]["template"]["metadata"]["labels"].update(
+            {"app.kubernetes.io/component": "other"}
+        ),
+    ),
+]
+
+
+@pytest.mark.parametrize(
+    "mutate",
+    [case[1] for case in JOB_DRIFT_MUTATORS],
+    ids=[case[0] for case in JOB_DRIFT_MUTATORS],
+)
+def test_bootstrap_job_drift_is_collision_with_no_writes(mutate) -> None:
+    core_api = make_core_api()
+    batch_api = make_batch_api(job=_drift_bootstrap_job(mutate))
+
+    status = reconcile_appliance(
+        spec=valid_spec(),
+        meta=sample_meta(),
+        core_api=core_api,
+        batch_api=batch_api,
+    )
+
+    assert status["conditions"][2]["reason"] == "ResourceCollision"
+    assert "operators/example-common-bootstrap-v1" in status["conditions"][2]["message"]
+    assert api_writes(core_api) == []
+    batch_api.create_namespaced_job.assert_not_called()
+    batch_api.patch_namespaced_job.assert_not_called()
+
+
+def test_bootstrap_job_identity_collision_is_mutation_free() -> None:
+    core_api = make_core_api()
+    collided = succeeded_bootstrap_job()
+    collided["metadata"]["labels"]["coriolis.cloudbase.it/component"] = "other"
+    batch_api = make_batch_api(job=collided)
+
+    status = reconcile_appliance(
+        spec=valid_spec(),
+        meta=sample_meta(),
+        core_api=core_api,
+        batch_api=batch_api,
+    )
+
+    assert status["conditions"][2]["reason"] == "ResourceCollision"
+    assert api_writes(core_api) == []
+    batch_api.patch_namespaced_job.assert_not_called()
+
+
+def test_bootstrap_job_script_change_is_collision_without_writes() -> None:
+    different_script = render_bootstrap_script(
+        coriolis_api_host="example-coriolis-api",
+        rabbitmq_host="different-rabbitmq",
+        memcached_host="example-memcached",
+        database_host="example-mariadb",
+        keystone_host="example-keystone",
+    )
+    existing = build_common_bootstrap_job(
+        appliance_name="example",
+        namespace="operators",
+        accepted_version="2603.4",
+        owner=OWNER,
+        script=different_script,
+    )
+    existing["metadata"]["resourceVersion"] = "1"
+    core_api = make_core_api()
+    batch_api = make_batch_api(job=existing)
+
+    status = reconcile_appliance(
+        spec=valid_spec(),
+        meta=sample_meta(),
+        core_api=core_api,
+        batch_api=batch_api,
+    )
+
+    assert status["conditions"][2]["reason"] == "ResourceCollision"
+    assert api_writes(core_api) == []
+    batch_api.patch_namespaced_job.assert_not_called()
+
+
+def test_bootstrap_config_map_immutable_drift_is_collision_with_no_writes() -> None:
+    core_api = make_core_api()
+    collided = bootstrap_config_map_body()
+    collided["immutable"] = False
+    core_api.read_namespaced_config_map.side_effect = [
+        _api_exception(404),
+        _api_exception(404),
+        _api_exception(404),
+        _api_exception(404),
+        _api_exception(404),
+        collided,
+    ]
+    batch_api = make_batch_api()
+
+    status = reconcile_appliance(
+        spec=valid_spec(), meta=sample_meta(), core_api=core_api, batch_api=batch_api
+    )
+
+    assert status["conditions"][2]["reason"] == "ResourceCollision"
+    assert "operators/example-common-bootstrap-v1" in status["conditions"][2]["message"]
+    assert api_writes(core_api) == []
+    batch_api.create_namespaced_job.assert_not_called()
+
+
+def test_bootstrap_config_map_data_drift_is_collision_with_no_writes() -> None:
+    core_api = make_core_api()
+    collided = bootstrap_config_map_body()
+    collided["data"] = {"bootstrap.py": "corrupted script"}
+    core_api.read_namespaced_config_map.side_effect = [
+        _api_exception(404),
+        _api_exception(404),
+        _api_exception(404),
+        _api_exception(404),
+        _api_exception(404),
+        collided,
+    ]
+    batch_api = make_batch_api()
+
+    status = reconcile_appliance(
+        spec=valid_spec(), meta=sample_meta(), core_api=core_api, batch_api=batch_api
+    )
+
+    assert status["conditions"][2]["reason"] == "ResourceCollision"
+    assert api_writes(core_api) == []
+    batch_api.create_namespaced_job.assert_not_called()
+
+
+def test_bootstrap_config_map_managed_reuse_is_no_write() -> None:
+    core_api = make_core_api()
+    existing = bootstrap_config_map_body()
+    existing["metadata"]["resourceVersion"] = "5"
+    core_api.read_namespaced_config_map.side_effect = [
+        _api_exception(404),
+        _api_exception(404),
+        _api_exception(404),
+        _api_exception(404),
+        _api_exception(404),
+        existing,
+    ]
+    batch_api = make_batch_api()
+
+    status = reconcile_appliance(
+        spec=valid_spec(), meta=sample_meta(), core_api=core_api, batch_api=batch_api
+    )
+
+    created_names = [
+        item.kwargs["body"]["metadata"]["name"]
+        for item in core_api.create_namespaced_config_map.call_args_list
+    ]
+    assert "example-common-bootstrap-v1" not in created_names
+    patched_names = [
+        item.kwargs["name"]
+        for item in core_api.patch_namespaced_config_map.call_args_list
+    ]
+    assert "example-common-bootstrap-v1" not in patched_names
+    assert created_names[-1] == "example-operator-state"
+    statuses = {item["type"]: item for item in status["conditions"]}
+    assert statuses["Reconciled"]["status"] == "True"
+
+
+def test_bootstrap_config_map_is_never_patched() -> None:
+    core_api = make_core_api()
+    batch_api = make_batch_api()
+
+    reconcile_appliance(
+        spec=valid_spec(), meta=sample_meta(), core_api=core_api, batch_api=batch_api
+    )
+
+    patched_names = [
+        item.kwargs["name"]
+        for item in core_api.patch_namespaced_config_map.call_args_list
+    ]
+    assert "example-common-bootstrap-v1" not in patched_names
+
+
+def test_bootstrap_non_404_read_error_requests_sanitized_retry() -> None:
+    core_api = make_core_api()
+    batch_api = make_batch_api()
+    batch_api.read_namespaced_job.side_effect = client.ApiException(
+        status=500, reason="bootstrap-read-sentinel"
+    )
+
+    with pytest.raises(main.ReconcileRetry) as excinfo:
+        reconcile_appliance(
+            spec=valid_spec(),
+            meta=sample_meta(),
+            core_api=core_api,
+            batch_api=batch_api,
+        )
+
+    assert excinfo.value.status["conditions"][2]["reason"] == "ResourceReadFailed"
+    assert "bootstrap-read-sentinel" not in repr(excinfo.value.status)
+    assert api_writes(core_api) == []
+    batch_api.create_namespaced_job.assert_not_called()
+
+
+def test_bootstrap_job_create_failure_is_sanitized_and_skips_marker() -> None:
+    core_api = make_core_api()
+    batch_api = make_batch_api(job=None)
+    batch_api.create_namespaced_job.side_effect = client.ApiException(
+        status=409, reason="bootstrap-create-sentinel"
+    )
+
+    with pytest.raises(main.ReconcileRetry) as excinfo:
+        reconcile_appliance(
+            spec=valid_spec(),
+            meta=sample_meta(),
+            core_api=core_api,
+            batch_api=batch_api,
+        )
+
+    assert excinfo.value.status["conditions"][2]["reason"] == "ResourceApplyFailed"
+    assert "bootstrap-create-sentinel" not in repr(excinfo.value.status)
+    assert_no_marker_write(core_api)
+
+
+def test_bootstrap_job_reuse_performs_no_retained_writes() -> None:
+    core_api = make_core_api()
+    reused = succeeded_bootstrap_job()
+    reused["metadata"]["resourceVersion"] = "5"
+    batch_api = make_batch_api(job=reused)
+
+    status = reconcile_appliance(
+        spec=valid_spec(),
+        meta=sample_meta(),
+        core_api=core_api,
+        batch_api=batch_api,
+    )
+
+    batch_api.create_namespaced_job.assert_not_called()
+    batch_api.patch_namespaced_job.assert_not_called()
+    assert status["acceptedVersion"] == "2603.4"
+
+
+def test_bootstrap_long_names_derive_resource_and_api_host() -> None:
+    appliance_name = f"{'a' * 40}.{'b' * 40}.{'c' * 40}." + "d" * 40
+    job = build_common_bootstrap_job(
+        appliance_name=appliance_name,
+        namespace="operators",
+        accepted_version="2603.4",
+        owner=dict(OWNER, name=appliance_name, uid="abc-123"),
+        script=_bootstrap_script(appliance_name),
+    )
+    config_map = build_common_bootstrap_config_map(
+        appliance_name=appliance_name,
+        namespace="operators",
+        accepted_version="2603.4",
+        owner=dict(OWNER, name=appliance_name, uid="abc-123"),
+        script=_bootstrap_script(appliance_name),
+    )
+    resource_name = appliance_resource_name(appliance_name, BOOTSTRAP_COMPONENT)
+    assert job["metadata"]["name"] == resource_name
+    assert config_map["metadata"]["name"] == resource_name
+    api_host = appliance_resource_name(appliance_name, "coriolis-api")
+    assert (
+        f"http://{api_host}:7667/v1/%(tenant_id)s" in config_map["data"]["bootstrap.py"]
+    )
+
+
+def test_bootstrap_job_state_model_active() -> None:
+    job = client.V1Job(status=client.V1JobStatus())
+    assert _bootstrap_job_state(job) == "active"
+
+
+def test_bootstrap_job_state_model_succeeded_with_complete_condition() -> None:
+    job = client.V1Job(
+        status=client.V1JobStatus(
+            succeeded=1,
+            conditions=[client.V1JobCondition(type="Complete", status="True")],
+        )
+    )
+    assert _bootstrap_job_state(job) == "succeeded"
+
+
+def test_bootstrap_job_state_model_failed() -> None:
+    job = client.V1Job(
+        status=client.V1JobStatus(
+            conditions=[client.V1JobCondition(type="Failed", status="True")]
+        )
+    )
+    assert _bootstrap_job_state(job) == "failed"
+
+
+def test_bootstrap_job_state_failed_precedes_partial_success() -> None:
+    job = client.V1Job(
+        status=client.V1JobStatus(
+            succeeded=0,
+            failed=2,
+            conditions=[client.V1JobCondition(type="Failed", status="True")],
+        )
+    )
+    assert _bootstrap_job_state(job) == "failed"
+
+
+def test_bootstrap_job_state_ignores_non_terminal_failed_condition() -> None:
+    job = client.V1Job(
+        status=client.V1JobStatus(
+            failed=1,
+            conditions=[client.V1JobCondition(type="Failed", status="False")],
+        )
+    )
+    assert _bootstrap_job_state(job) == "active"
+
+
+def test_bootstrap_job_state_dict_failed_condition_status_robustness() -> None:
+    assert _bootstrap_job_state({"status": {"succeeded": 1}}) == "succeeded"
+    assert (
+        _bootstrap_job_state(
+            {"status": {"conditions": [{"type": "Failed", "status": "True"}]}}
+        )
+        == "failed"
+    )
+    assert (
+        _bootstrap_job_state(
+            {"status": {"conditions": [{"type": "Failed", "status": "False"}]}}
+        )
+        == "active"
+    )
+
+
+def test_bootstrap_succeeded_v1_job_model_writes_marker_last() -> None:
+    core_api = make_core_api()
+    job = to_v1_bootstrap_job(succeeded_bootstrap_job(), status={"succeeded": 1})
+    batch_api = make_batch_api(job=job)
+
+    status = reconcile_appliance(
+        spec=valid_spec(), meta=sample_meta(), core_api=core_api, batch_api=batch_api
+    )
+
+    batch_api.create_namespaced_job.assert_not_called()
+    batch_api.patch_namespaced_job.assert_not_called()
+    marker_names = [
+        item.kwargs["body"]["metadata"]["name"]
+        for item in core_api.create_namespaced_config_map.call_args_list
+    ]
+    assert marker_names[-1] == "example-operator-state"
+    statuses = {item["type"]: item for item in status["conditions"]}
+    assert statuses["Reconciled"]["status"] == "True"
+
+
+def test_bootstrap_active_v1_job_model_requeues_without_marker() -> None:
+    core_api = make_core_api()
+    job = to_v1_bootstrap_job(succeeded_bootstrap_job(), status={})
+    batch_api = make_batch_api(job=job)
+
+    with pytest.raises(main.ReconcileRetry) as excinfo:
+        reconcile_appliance(
+            spec=valid_spec(),
+            meta=sample_meta(),
+            core_api=core_api,
+            batch_api=batch_api,
+        )
+
+    statuses = {item["type"]: item for item in excinfo.value.status["conditions"]}
+    assert statuses["Progressing"]["reason"] == "BootstrapRunning"
+    assert statuses["Degraded"]["status"] == "False"
+    assert_no_marker_write(core_api)
+
+
+def test_bootstrap_failed_v1_job_model_is_degraded_without_marker() -> None:
+    core_api = make_core_api()
+    job = to_v1_bootstrap_job(
+        succeeded_bootstrap_job(),
+        status={"conditions": [{"type": "Failed", "status": "True"}]},
+    )
+    batch_api = make_batch_api(job=job)
+
+    status = reconcile_appliance(
+        spec=valid_spec(), meta=sample_meta(), core_api=core_api, batch_api=batch_api
+    )
+
+    statuses = {item["type"]: item for item in status["conditions"]}
+    assert statuses["Degraded"]["status"] == "True"
+    assert statuses["Degraded"]["reason"] == "BootstrapFailed"
+    assert statuses["Reconciled"]["status"] == "False"
+    assert_no_marker_write(core_api)

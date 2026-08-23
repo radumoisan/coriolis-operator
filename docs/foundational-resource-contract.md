@@ -269,7 +269,7 @@ A disposable local Docker validation proved direct `mariadbd` single-node operat
 
 This standalone evidence supports the development Kubernetes contract below. `log-error=/dev/stderr` must not be used because MariaDB tried `/dev/stderr.err`; direct `--console` emitted startup, ready-for-connections, normal shutdown, InnoDB shutdown, and shutdown-complete messages to container logs.
 
-`coriolis-dbsync` is an Alembic-to-head command proven in `coriolis-oss`. No local source proves its invocation, selected image, or ordering. No Job is selected.
+`coriolis-dbsync` is an Alembic-to-head command proven in `coriolis-oss`. No local source proves its invocation, selected image, or ordering. No Job is selected. **Superseded:** the Coriolis-common Bootstrap Kubernetes Contract below now selects the exact conductor Job, whose rendered script performs the Coriolis schema dbsync against the conductor image. This historical MariaDB-runtime sentence is retained as evidence of the pre-selection state, not current selection.
 
 ### :material-application-edit-outline: RabbitMQ Runtime Evidence
 
@@ -392,6 +392,36 @@ Before code for any dependency, require evidence for:
 - Startup, readiness, and liveness probes; replica and disruption behavior; dependency readiness.
 
 If evidence is absent, stop rather than infer.
+
+## :material-book-open-page-variant-outline: Coriolis-Common Bootstrap Kubernetes Contract
+
+This is a frozen development contract. The slice is implemented locally but uncommitted, unpushed, undeployed, and not POC-tested; it is absent from the published docs-only operator `0.5.15` at `f7c369d`, whose runtime behavior remains accepted through the `0.5.14` Keystone POC. `coriolis-common` remains a base image, not a workload.
+
+### :material-application-edit-outline: Image, Script, And Object Identity
+
+- The Job selects the exact conductor `2603.4` digest `27495f44fbb8b320098d0aa04cd9dcb2a4b432e57aa17417606efc5403ac09c7`. `coriolis-common` is not a workload; the bootstrap runs on the conductor image.
+- The owner ConfigMap and owner Job share the deterministic `<appliance>-common-bootstrap-v1` name (component `common-bootstrap-v1`). The ConfigMap is immutable and holds exactly one non-secret rendered `bootstrap.py`; it is create-only, with no patch, delete, or TTL.
+- The Job pins the conductor image and is create-only immutable with no patch, delete, or TTL. It binds the exact rendered script via a non-sensitive script-digest annotation and a template-id digest, both recorded in the object and immutable pod-template annotations; the template ID covers the script identity, so any script change under a given revision is a collision that requires an explicit next revision. No service-account token automount and no service links.
+
+### :material-application-edit-outline: Mounts, Values, And Security
+
+- The bootstrap script, the existing generated configuration, and the retained credential Secrets are projected file-only through independent, non-overlapping read-only mounts. No credential, config, or script content enters environment variables, argv, status, events, logs, or documentation.
+- The container runs as non-root UID/GID `42434`, read-only root, dropped capabilities, no-new-privileges, and only `/tmp` writable, under a restricted security context.
+
+### :material-application-edit-outline: Bounds And Completion
+
+- A bounded shared dependency wait of `300s` precedes the run; the Coriolis schema dbsync has a `120s` timeout; the Job has a `600s` active deadline and `backoffLimit: 2`.
+
+### :material-application-edit-outline: Validation Evidence
+
+- Tracked validator `scripts/validate-coriolis-bootstrap-runtime.py` ran the exact conductor as non-root UID/GID `42434` with read-only root, dropped capabilities/no-new-privileges, and only `/tmp` writable; the actual rendered script passed twice under all-read-only config/script/credential mounts across all four MariaDB/RabbitMQ/Memcached/Keystone protocol gates, the Coriolis schema dbsync, the exact Keystone user `coriolis` enabled with default project `service` and password convergence, the admin role, service name `coriolis` of type `migration` with description `Cloud Migration as a Service`, exactly one RegionOne endpoint per admin/internal/public at `http://coriolis-api:7667/v1/%(tenant_id)s`, and independent state verification. Final runtime `188.631s`; the actual bootstrap passed at `21.391s` and `25.273s`, verification at `10.416s`, with zero Docker leftovers.
+- The Coriolis DB/user/grants remain existing MariaDB effects; the service-project creation is a necessary dedicated-Keystone precondition.
+
+### :material-application-edit-outline: Reconciliation And RBAC
+
+- Reconciliation pre-reads the bootstrap ConfigMap and Job after Keystone and before writes; classification is collision-mutation-free. The immutable ConfigMap is created only when absent and is never patched (exact managed reuse is no-write). The Job is create-only: a managed Job is reusable only when its projected managed spec exactly equals the desired spec (image, command, env, security contexts, mounts, volume sources/items/modes, pull Secret, restart/deadline/backoff/completions/parallelism, and template labels/annotations) and both object metadata and pod-template annotations carry the exact script and template IDs; any drift is a mutation-free `ResourceCollision`. An absent/active Job returns `Progressing`/`BootstrapRunning` with the existing ten-second `TemporaryError` requeue and no marker; a terminal failed Job returns `Degraded`/`BootstrapFailed` with no marker; a succeeded Job is a no-writes path plus the marker last. The current accepted status remains `Ready=False/RuntimeNotImplemented`.
+- RBAC adds only batch/jobs `get`/`create`, with no patch/delete/list/watch/Pod/log or cluster scope. No CRD, application Service/Deployment, Ingress, new Secret, finalizer, or `Ready=True` is added.
+- Local validation passes at 477 unit tests, Ruff format/lint, mypy, Helm lint/template, Docker build, and `git diff --check`. This is local implementation and validator evidence only; no release, deployment, or cluster state changed, and no `Ready=True`.
 
 ## :material-book-open-page-variant-outline: Unresolved Gates
 

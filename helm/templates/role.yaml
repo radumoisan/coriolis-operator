@@ -69,6 +69,13 @@ rules:
       - create
       - patch
   - apiGroups:
+      - batch
+    resources:
+      - jobs
+    verbs:
+      - get
+      - create
+  - apiGroups:
       - ""
     resources:
       - events

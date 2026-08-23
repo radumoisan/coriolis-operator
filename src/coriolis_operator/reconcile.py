@@ -2,6 +2,7 @@
 
 import base64
 import hashlib
+import json
 import re
 import secrets
 from collections.abc import Callable, Mapping, Sequence
@@ -13,6 +14,24 @@ from typing import Any
 
 from kubernetes.utils.quantity import parse_quantity  # type: ignore[import-untyped]
 
+from coriolis_operator.common import (
+    BOOTSTRAP_ACTIVE_DEADLINE_SECONDS,
+    BOOTSTRAP_BACKOFF_LIMIT,
+    BOOTSTRAP_COMPONENT,
+    BOOTSTRAP_CONFIG_DIR,
+    BOOTSTRAP_CORIOLIS_CREDENTIALS_DIR,
+    BOOTSTRAP_IMAGE_PULL_SECRET_NAME,
+    BOOTSTRAP_INFRA_CREDENTIALS_DIR,
+    BOOTSTRAP_SCRIPT_ANNOTATION,
+    BOOTSTRAP_SCRIPT_DIR,
+    BOOTSTRAP_SCRIPT_FILENAME,
+    BOOTSTRAP_SCRIPT_PATH,
+    BOOTSTRAP_TEMPLATE_ANNOTATION,
+    BOOTSTRAP_TERMINATION_GRACE_PERIOD_SECONDS,
+    BOOTSTRAP_UID_GID,
+    CONDUCTOR_IMAGE,
+    render_bootstrap_script,
+)
 from coriolis_operator.configuration import (
     KubernetesCoriolisRenderInputs,
     SensitiveCoriolisEndpoints,
@@ -2665,3 +2684,477 @@ def build_status(
     if accepted_version is not None:
         result["acceptedVersion"] = accepted_version
     return result
+
+
+BOOTSTRAP_RUNNING_MESSAGE = "The Coriolis-common bootstrap is running."
+BOOTSTRAP_FAILED_MESSAGE = (
+    "The Coriolis-common bootstrap failed and must be removed before continuing."
+)
+
+
+def bootstrap_running_conditions() -> list[Condition]:
+    """Conditions when the Coriolis-common bootstrap is active or not yet done."""
+    return [
+        (
+            "Accepted",
+            "True",
+            "Accepted",
+            "The requested profile and version are supported.",
+        ),
+        ("Progressing", "True", "BootstrapRunning", BOOTSTRAP_RUNNING_MESSAGE),
+        ("Reconciled", "False", "BootstrapRunning", BOOTSTRAP_RUNNING_MESSAGE),
+        ("Ready", "False", "RuntimeNotImplemented", RUNTIME_NOT_IMPLEMENTED_MESSAGE),
+        ("Degraded", "False", "NotDegraded", NOT_DEGRADED_MESSAGE),
+        (
+            "Upgradeable",
+            "False",
+            "UpgradeNotSupported",
+            UPGRADE_NOT_SUPPORTED_MESSAGE,
+        ),
+    ]
+
+
+def bootstrap_failed_conditions() -> list[Condition]:
+    """Stable sanitized conditions when the Coriolis-common bootstrap is terminal."""
+    return [
+        (
+            "Accepted",
+            "True",
+            "Accepted",
+            "The requested profile and version are supported.",
+        ),
+        ("Progressing", "False", "BootstrapFailed", BOOTSTRAP_FAILED_MESSAGE),
+        ("Reconciled", "False", "BootstrapFailed", BOOTSTRAP_FAILED_MESSAGE),
+        ("Ready", "False", "RuntimeNotImplemented", RUNTIME_NOT_IMPLEMENTED_MESSAGE),
+        ("Degraded", "True", "BootstrapFailed", BOOTSTRAP_FAILED_MESSAGE),
+        (
+            "Upgradeable",
+            "False",
+            "UpgradeNotSupported",
+            UPGRADE_NOT_SUPPORTED_MESSAGE,
+        ),
+    ]
+
+
+def _bootstrap_job_template_id(job_spec: Any) -> str:
+    """Return a deterministic digest of the desired immutable Job spec."""
+    serialized = json.dumps(job_spec, sort_keys=True, separators=(",", ":"))
+    return hashlib.sha256(serialized.encode("utf-8")).hexdigest()[:NAME_HASH_LENGTH]
+
+
+def build_common_bootstrap_config_map(
+    *,
+    appliance_name: str,
+    namespace: str,
+    accepted_version: str,
+    owner: Mapping[str, Any],
+    script: str,
+) -> dict[str, Any]:
+    """Build the immutable, create-only versioned bootstrap ConfigMap."""
+    resource_name = appliance_resource_name(appliance_name, BOOTSTRAP_COMPONENT)
+    return {
+        "apiVersion": "v1",
+        "kind": "ConfigMap",
+        "metadata": build_resource_metadata(
+            resource_name=resource_name,
+            namespace=namespace,
+            appliance_name=appliance_name,
+            component=BOOTSTRAP_COMPONENT,
+            accepted_version=accepted_version,
+            owner=owner,
+        ),
+        "immutable": True,
+        "data": {BOOTSTRAP_SCRIPT_FILENAME: script},
+    }
+
+
+def build_common_bootstrap_job(
+    *,
+    appliance_name: str,
+    namespace: str,
+    accepted_version: str,
+    owner: Mapping[str, Any],
+    script: str,
+) -> dict[str, Any]:
+    """Build the immutable, create-only Coriolis-common bootstrap Job.
+
+    The Job binds the exact rendered bootstrap script via a non-sensitive
+    script-digest annotation in both its object metadata and its immutable
+    pod-template metadata, and the template-id digest covers that script
+    identity. Any change to the script or template under a given revision is
+    therefore a collision rather than a patch.
+    """
+    component = BOOTSTRAP_COMPONENT
+    resource_name = appliance_resource_name(appliance_name, component)
+    metadata = build_resource_metadata(
+        resource_name=resource_name,
+        namespace=namespace,
+        appliance_name=appliance_name,
+        component=component,
+        accepted_version=accepted_version,
+        owner=owner,
+    )
+    config_secret_name = appliance_resource_name(
+        appliance_name, "coriolis-config-secret"
+    )
+    infra_credentials_name = appliance_resource_name(
+        appliance_name, "infrastructure-credentials"
+    )
+    coriolis_credentials_name = appliance_resource_name(
+        appliance_name, "coriolis-credentials"
+    )
+    pod_spec = {
+        "imagePullSecrets": [{"name": BOOTSTRAP_IMAGE_PULL_SECRET_NAME}],
+        "restartPolicy": "Never",
+        "automountServiceAccountToken": False,
+        "enableServiceLinks": False,
+        "terminationGracePeriodSeconds": BOOTSTRAP_TERMINATION_GRACE_PERIOD_SECONDS,
+        "securityContext": {
+            "runAsUser": BOOTSTRAP_UID_GID,
+            "runAsGroup": BOOTSTRAP_UID_GID,
+            "fsGroup": BOOTSTRAP_UID_GID,
+            "fsGroupChangePolicy": "OnRootMismatch",
+        },
+        "containers": [
+            {
+                "name": component,
+                "image": CONDUCTOR_IMAGE,
+                "command": ["python3", BOOTSTRAP_SCRIPT_PATH],
+                "env": [
+                    {"name": "HOME", "value": "/tmp"},
+                    {"name": "PYTHONDONTWRITEBYTECODE", "value": "1"},
+                ],
+                "securityContext": {
+                    "runAsNonRoot": True,
+                    "readOnlyRootFilesystem": True,
+                    "allowPrivilegeEscalation": False,
+                    "capabilities": {"drop": ["ALL"]},
+                    "seccompProfile": {"type": "RuntimeDefault"},
+                },
+                "volumeMounts": [
+                    {
+                        "name": "script",
+                        "mountPath": BOOTSTRAP_SCRIPT_DIR,
+                        "readOnly": True,
+                    },
+                    {
+                        "name": "config",
+                        "mountPath": BOOTSTRAP_CONFIG_DIR,
+                        "readOnly": True,
+                    },
+                    {
+                        "name": "infra-credentials",
+                        "mountPath": BOOTSTRAP_INFRA_CREDENTIALS_DIR,
+                        "readOnly": True,
+                    },
+                    {
+                        "name": "coriolis-credentials",
+                        "mountPath": BOOTSTRAP_CORIOLIS_CREDENTIALS_DIR,
+                        "readOnly": True,
+                    },
+                    {"name": "tmp", "mountPath": "/tmp"},
+                ],
+            }
+        ],
+        "volumes": [
+            {"name": "tmp", "emptyDir": {}},
+            {
+                "name": "script",
+                "configMap": {
+                    "name": resource_name,
+                    "items": [
+                        {
+                            "key": BOOTSTRAP_SCRIPT_FILENAME,
+                            "path": BOOTSTRAP_SCRIPT_FILENAME,
+                            "mode": 0o444,
+                        }
+                    ],
+                },
+            },
+            {
+                "name": "config",
+                "secret": {
+                    "secretName": config_secret_name,
+                    "items": [
+                        {"key": "coriolis.conf", "path": "coriolis.conf", "mode": 0o440}
+                    ],
+                },
+            },
+            {
+                "name": "infra-credentials",
+                "secret": {
+                    "secretName": infra_credentials_name,
+                    "items": [
+                        {
+                            "key": "keystone_admin_password",
+                            "path": "keystone-admin-password",
+                            "mode": 0o440,
+                        },
+                        {
+                            "key": "rabbitmq_password",
+                            "path": "rabbitmq-password",
+                            "mode": 0o440,
+                        },
+                    ],
+                },
+            },
+            {
+                "name": "coriolis-credentials",
+                "secret": {
+                    "secretName": coriolis_credentials_name,
+                    "items": [
+                        {
+                            "key": "coriolis_keystone_password",
+                            "path": "coriolis-keystone-password",
+                            "mode": 0o440,
+                        },
+                        {
+                            "key": "coriolis_database_password",
+                            "path": "coriolis-database-password",
+                            "mode": 0o440,
+                        },
+                    ],
+                },
+            },
+        ],
+    }
+    template_metadata = {"labels": dict(metadata["labels"])}
+    script_id = _bootstrap_script_id(script)
+    metadata["annotations"][BOOTSTRAP_SCRIPT_ANNOTATION] = script_id
+    template_metadata["annotations"] = {BOOTSTRAP_SCRIPT_ANNOTATION: script_id}
+    job_spec = {
+        "backoffLimit": BOOTSTRAP_BACKOFF_LIMIT,
+        "activeDeadlineSeconds": BOOTSTRAP_ACTIVE_DEADLINE_SECONDS,
+        "completions": 1,
+        "parallelism": 1,
+        "template": {"metadata": template_metadata, "spec": pod_spec},
+    }
+    template_id = _bootstrap_job_template_id(job_spec)
+    metadata["annotations"][BOOTSTRAP_TEMPLATE_ANNOTATION] = template_id
+    template_metadata["annotations"][BOOTSTRAP_TEMPLATE_ANNOTATION] = template_id
+    return {
+        "apiVersion": "batch/v1",
+        "kind": "Job",
+        "metadata": metadata,
+        "spec": job_spec,
+    }
+
+
+def _bootstrap_script_id(script: str) -> str:
+    """Return a deterministic digest of the exact rendered bootstrap script."""
+    return hashlib.sha256(script.encode("utf-8")).hexdigest()[:NAME_HASH_LENGTH]
+
+
+_SPEC_PROJECTION_MISMATCH = object()
+
+
+def _project_spec_value(existing: Any, desired: Any) -> Any:
+    """Project ``existing`` onto the exact shape/keys of ``desired``.
+
+    Mappings are projected key-by-key via ``_field`` (handling both dict and
+    Kubernetes model objects), lists element-wise by position, and scalars are
+    copied directly. Server-added fields, defaults, and labels that are not
+    present in ``desired`` are ignored; any structural or scalar mismatch
+    returns ``_SPEC_PROJECTION_MISMATCH``.
+    """
+    if isinstance(desired, Mapping):
+        if existing is None or isinstance(existing, (Sequence, str, bytes)):
+            return _SPEC_PROJECTION_MISMATCH
+        projected: dict[str, Any] = {}
+        for key, desired_value in desired.items():
+            existing_value = _field(existing, key)
+            if existing_value is None and desired_value is not None:
+                return _SPEC_PROJECTION_MISMATCH
+            projected[key] = _project_spec_value(existing_value, desired_value)
+        return projected
+    if isinstance(desired, Sequence) and not isinstance(desired, (str, bytes)):
+        if not isinstance(existing, Sequence) or isinstance(existing, (str, bytes)):
+            return _SPEC_PROJECTION_MISMATCH
+        if len(existing) != len(desired):
+            return _SPEC_PROJECTION_MISMATCH
+        return [
+            _project_spec_value(existing_item, desired_item)
+            for existing_item, desired_item in zip(existing, desired, strict=True)
+        ]
+    if isinstance(existing, Mapping) or (
+        isinstance(existing, Sequence) and not isinstance(existing, (str, bytes))
+    ):
+        return _SPEC_PROJECTION_MISMATCH
+    return existing
+
+
+def _project_bootstrap_spec(existing_spec: Any, desired_spec: Any) -> Any | None:
+    """Return the projected existing spec, or None on any mismatch."""
+    projected = _project_spec_value(existing_spec, desired_spec)
+    if projected is _SPEC_PROJECTION_MISMATCH:
+        return None
+    return projected
+
+
+def _matching_annotations(existing_annotations: Any, desired_annotations: Any) -> bool:
+    existing = _mapping_value(existing_annotations)
+    desired = _mapping_value(desired_annotations)
+    for key in (BOOTSTRAP_SCRIPT_ANNOTATION, BOOTSTRAP_TEMPLATE_ANNOTATION):
+        if existing.get(key) != desired.get(key):
+            return False
+    return True
+
+
+def classify_common_bootstrap_config_map(
+    *,
+    existing: Any,
+    resource_name: str,
+    namespace: str,
+    appliance_name: str,
+    accepted_version: str,
+    owner: Mapping[str, Any],
+    desired_config_map: Mapping[str, Any],
+) -> OwnedClassification:
+    """Classify an existing immutable bootstrap ConfigMap, rejecting drift.
+
+    A managed ConfigMap must be immutable and carry exactly the rendered
+    bootstrap script. Any drift is an immutable collision and is never patched,
+    deleted, or reused.
+    """
+    classification = classify_owned_resource(
+        existing=existing,
+        resource_name=resource_name,
+        namespace=namespace,
+        appliance_name=appliance_name,
+        component=BOOTSTRAP_COMPONENT,
+        accepted_version=accepted_version,
+        owner=owner,
+    )
+    if classification is not OwnedClassification.MANAGED:
+        return classification
+    if _field(existing, "immutable") is not True:
+        return OwnedClassification.COLLISION
+    existing_data = _mapping_value(_field(existing, "data"))
+    desired_data = _mapping_value(desired_config_map.get("data"))
+    if existing_data != desired_data:
+        return OwnedClassification.COLLISION
+    return OwnedClassification.MANAGED
+
+
+def classify_common_bootstrap_job(
+    *,
+    existing: Any,
+    resource_name: str,
+    namespace: str,
+    appliance_name: str,
+    accepted_version: str,
+    owner: Mapping[str, Any],
+    desired_job: Mapping[str, Any],
+) -> OwnedClassification:
+    """Classify an existing Job against the exact desired spec and identity.
+
+    A managed Job is reusable only when the projected existing spec equals the
+    exact desired spec (including image, command, env, security contexts,
+    mounts, volume sources/items/modes, pull Secret, restart/deadline/
+    backoff/completions/parallelism, and template labels/annotations) and both
+    the object metadata and pod-template annotations carry the exact script and
+    template IDs. Any mismatch is an immutable collision and is never patched,
+    deleted, or reused.
+    """
+    classification = classify_owned_resource(
+        existing=existing,
+        resource_name=resource_name,
+        namespace=namespace,
+        appliance_name=appliance_name,
+        component=BOOTSTRAP_COMPONENT,
+        accepted_version=accepted_version,
+        owner=owner,
+    )
+    if classification is not OwnedClassification.MANAGED:
+        return classification
+
+    existing_spec = _field(existing, "spec")
+    desired_spec = _field(desired_job, "spec")
+    projected = _project_bootstrap_spec(existing_spec, desired_spec)
+    if projected is None or projected != desired_spec:
+        return OwnedClassification.COLLISION
+    if not _matching_annotations(
+        _field(_field(existing, "metadata"), "annotations"),
+        _field(_field(desired_job, "metadata"), "annotations"),
+    ):
+        return OwnedClassification.COLLISION
+    return OwnedClassification.MANAGED
+
+
+@dataclass(frozen=True)
+class BootstrapResourcePreflight:
+    """Pure Coriolis-common bootstrap classification and apply-ordered bodies."""
+
+    config_map_classification: OwnedClassification
+    job_classification: OwnedClassification
+    manifests: tuple[dict[str, Any], ...] = field(repr=False)
+
+
+def preflight_common_bootstrap_resources(
+    *,
+    appliance_name: str,
+    namespace: str,
+    accepted_version: str,
+    owner: Mapping[str, Any],
+    bootstrap_config_map: Any | None,
+    bootstrap_job: Any | None,
+) -> BootstrapResourcePreflight:
+    """Classify the bootstrap ConfigMap and Job before rendering or building.
+
+    The rendered script is produced first because both desired bodies and both
+    classifiers depend on it. Any identity, immutable, data, or managed-spec
+    drift is a collision and yields no writeable manifests.
+    """
+    resource_name = appliance_resource_name(appliance_name, BOOTSTRAP_COMPONENT)
+    script = render_bootstrap_script(
+        coriolis_api_host=appliance_resource_name(appliance_name, "coriolis-api"),
+        rabbitmq_host=appliance_resource_name(appliance_name, "rabbitmq"),
+        memcached_host=appliance_resource_name(appliance_name, "memcached"),
+        database_host=appliance_resource_name(appliance_name, "mariadb"),
+        keystone_host=appliance_resource_name(appliance_name, "keystone"),
+    )
+    job_body = build_common_bootstrap_job(
+        appliance_name=appliance_name,
+        namespace=namespace,
+        accepted_version=accepted_version,
+        owner=owner,
+        script=script,
+    )
+    config_map_body = build_common_bootstrap_config_map(
+        appliance_name=appliance_name,
+        namespace=namespace,
+        accepted_version=accepted_version,
+        owner=owner,
+        script=script,
+    )
+    config_map_classification = classify_common_bootstrap_config_map(
+        existing=bootstrap_config_map,
+        resource_name=resource_name,
+        namespace=namespace,
+        appliance_name=appliance_name,
+        accepted_version=accepted_version,
+        owner=owner,
+        desired_config_map=config_map_body,
+    )
+    if config_map_classification is OwnedClassification.COLLISION:
+        return BootstrapResourcePreflight(
+            config_map_classification, OwnedClassification.COLLISION, ()
+        )
+    job_classification = classify_common_bootstrap_job(
+        existing=bootstrap_job,
+        resource_name=resource_name,
+        namespace=namespace,
+        appliance_name=appliance_name,
+        accepted_version=accepted_version,
+        owner=owner,
+        desired_job=job_body,
+    )
+    if job_classification is OwnedClassification.COLLISION:
+        return BootstrapResourcePreflight(
+            config_map_classification, job_classification, ()
+        )
+    return BootstrapResourcePreflight(
+        config_map_classification,
+        job_classification,
+        (config_map_body, job_body),
+    )

@@ -9,6 +9,7 @@ from typing import Any
 import kopf
 from kubernetes import client  # type: ignore[import-untyped]
 
+from coriolis_operator.common import BOOTSTRAP_COMPONENT
 from coriolis_operator.configuration import (
     SensitiveCoriolisCredentials,
     render_coriolis_config,
@@ -29,6 +30,8 @@ from coriolis_operator.reconcile import (
     accepted_conditions,
     appliance_resource_name,
     blocked_conditions,
+    bootstrap_failed_conditions,
+    bootstrap_running_conditions,
     build_coriolis_config_map,
     build_coriolis_config_secret,
     build_coriolis_credentials_secret,
@@ -41,6 +44,7 @@ from coriolis_operator.reconcile import (
     collision_conditions,
     invalid_runtime_configuration_conditions,
     kubernetes_coriolis_render_inputs,
+    preflight_common_bootstrap_resources,
     preflight_foundational_resources,
     preflight_keystone_resources,
     preflight_mariadb_resources,
@@ -192,6 +196,41 @@ def _create_or_apply(
         raise _retry_status(generation, accepted_version, status, category) from None
 
 
+def _bootstrap_job_state(existing: Any) -> str:
+    """Classify a read bootstrap Job as succeeded, failed, or active."""
+    status = (
+        existing.get("status")
+        if isinstance(existing, Mapping)
+        else getattr(existing, "status", None)
+    )
+    if status is None:
+        return "active"
+    status_map = status if isinstance(status, Mapping) else {}
+    conditions = status_map.get("conditions")
+    if conditions is None and not isinstance(status, Mapping):
+        conditions = getattr(status, "conditions", None)
+    if isinstance(conditions, list):
+        for condition in conditions:
+            condition_type = (
+                condition.get("type")
+                if isinstance(condition, Mapping)
+                else getattr(condition, "type", None)
+            )
+            condition_status = (
+                condition.get("status")
+                if isinstance(condition, Mapping)
+                else getattr(condition, "status", None)
+            )
+            if condition_type == "Failed" and condition_status == "True":
+                return "failed"
+    succeeded = status_map.get("succeeded")
+    if succeeded is None and not isinstance(status, Mapping):
+        succeeded = getattr(status, "succeeded", None)
+    if isinstance(succeeded, int) and succeeded >= 1:
+        return "succeeded"
+    return "active"
+
+
 def reconcile_appliance(
     *,
     spec: Mapping[str, Any],
@@ -199,6 +238,7 @@ def reconcile_appliance(
     status: Mapping[str, Any] | None = None,
     core_api: client.CoreV1Api | None = None,
     apps_api: client.AppsV1Api | None = None,
+    batch_api: client.BatchV1Api | None = None,
 ) -> dict[str, Any]:
     """Reconcile foundational resources, dependency Services, and workloads."""
     name = str(meta["name"])
@@ -313,6 +353,7 @@ def reconcile_appliance(
             name, "keystone-config-secret"
         )
         keystone_deployment_name = appliance_resource_name(name, "keystone")
+        bootstrap_resource_name = appliance_resource_name(name, BOOTSTRAP_COMPONENT)
     except ReconcileRetry:
         raise
     except Exception:
@@ -322,6 +363,7 @@ def reconcile_appliance(
     try:
         api = core_api if core_api is not None else client.CoreV1Api()
         workloads_api = apps_api if apps_api is not None else client.AppsV1Api()
+        batch_api = batch_api if batch_api is not None else client.BatchV1Api()
     except ReconcileRetry:
         raise
     except Exception:
@@ -490,6 +532,22 @@ def reconcile_appliance(
     keystone_deployment_existing = _read_or_absent(
         workloads_api.read_namespaced_deployment,
         name=keystone_deployment_name,
+        namespace=namespace,
+        generation=generation,
+        accepted_version=accepted_version,
+        status=status,
+    )
+    bootstrap_config_map_existing = _read_or_absent(
+        api.read_namespaced_config_map,
+        name=bootstrap_resource_name,
+        namespace=namespace,
+        generation=generation,
+        accepted_version=accepted_version,
+        status=status,
+    )
+    bootstrap_job_existing = _read_or_absent(
+        batch_api.read_namespaced_job,
+        name=bootstrap_resource_name,
         namespace=namespace,
         generation=generation,
         accepted_version=accepted_version,
@@ -816,6 +874,32 @@ def reconcile_appliance(
     ):
         raise _retry_status(generation, accepted_version, status, "ResourceApplyFailed")
 
+    try:
+        bootstrap_preflight = preflight_common_bootstrap_resources(
+            appliance_name=name,
+            namespace=namespace,
+            accepted_version=requested_version,
+            owner=owner,
+            bootstrap_config_map=bootstrap_config_map_existing,
+            bootstrap_job=bootstrap_job_existing,
+        )
+    except ReconcileRetry:
+        raise
+    except Exception:
+        raise _retry_status(
+            generation, accepted_version, status, "ResourceApplyFailed"
+        ) from None
+    if (
+        bootstrap_preflight.config_map_classification is OwnedClassification.COLLISION
+        or bootstrap_preflight.job_classification is OwnedClassification.COLLISION
+    ):
+        return build_status(
+            generation,
+            accepted_version=accepted_version,
+            conditions=collision_conditions(namespace, bootstrap_resource_name),
+            prior_conditions=_prior_conditions(status),
+        )
+
     (
         mariadb_data_pvc_body,
         mariadb_config_map_body,
@@ -1098,6 +1182,54 @@ def reconcile_appliance(
             generation=generation,
             accepted_version=accepted_version,
             status=status,
+        )
+    (bootstrap_config_map_body, bootstrap_job_body) = bootstrap_preflight.manifests
+    if bootstrap_preflight.config_map_classification is OwnedClassification.ABSENT:
+        _create_or_apply(
+            api,
+            kind="config_map",
+            body=bootstrap_config_map_body,
+            existing=None,
+            category="ResourceApplyFailed",
+            generation=generation,
+            accepted_version=accepted_version,
+            status=status,
+        )
+    if bootstrap_preflight.job_classification is OwnedClassification.ABSENT:
+        _create_or_apply(
+            batch_api,
+            kind="job",
+            body=bootstrap_job_body,
+            existing=None,
+            category="ResourceApplyFailed",
+            generation=generation,
+            accepted_version=accepted_version,
+            status=status,
+        )
+        raise ReconcileRetry(
+            build_status(
+                generation,
+                accepted_version=accepted_version,
+                conditions=bootstrap_running_conditions(),
+                prior_conditions=_prior_conditions(status),
+            )
+        )
+    job_state = _bootstrap_job_state(bootstrap_job_existing)
+    if job_state == "failed":
+        return build_status(
+            generation,
+            accepted_version=accepted_version,
+            conditions=bootstrap_failed_conditions(),
+            prior_conditions=_prior_conditions(status),
+        )
+    if job_state != "succeeded":
+        raise ReconcileRetry(
+            build_status(
+                generation,
+                accepted_version=accepted_version,
+                conditions=bootstrap_running_conditions(),
+                prior_conditions=_prior_conditions(status),
+            )
         )
     _create_or_apply(
         api,
