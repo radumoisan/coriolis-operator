@@ -38,6 +38,19 @@ Evidence produced:
   6. A disposable exact-digest RabbitMQ and Memcached support pair closes the
      healthy-dependency gap, reusing the operator renderers and direct
      source-proven commands, and is fully cleaned up.
+  7. The pinned conductor runs as the real long-running workload (direct
+     `coriolis-conductor --config-file=/etc/coriolis/coriolis.conf`, entrypoint
+     bypassed) and the exact API binary runs on the same internal network with
+     the generated config. Container configuration is inspected to assert the
+     direct command, exact image, UID/GID, read-only root, cap-drop, and
+     no-new-privileges, internal network, readonly config mount plus writable
+     isolated /tmp, /var/log/coriolis and /opt/coriolis/locks, and no host
+     port. The API's unauthenticated `/v1` gate must return 401, then an
+     authenticated secret-aware verifier proves the API->RabbitMQ RPC->conductor
+     ->MariaDB path for `/v1/{project_id}/endpoints` without emitting any
+     sensitive value. The conductor must remain running over a bounded stability
+     interval, exit cleanly on SIGTERM/`docker stop`, restart and serve RPC
+     again, and recover RPC after a RabbitMQ restart without being recreated.
 
 This script must never print credentials, DSNs, tokens, headers, bodies, raw
 sensitive logs, or process environments. It prints sanitized PASS/FAIL stage
@@ -58,6 +71,17 @@ from collections.abc import Callable, Sequence
 from dataclasses import dataclass
 from pathlib import Path
 
+from coriolis_operator.api import (  # type: ignore[import-untyped]
+    API_ARGS,
+    API_COMMAND,
+    API_CONFIG_DIR,
+    API_IMAGE,
+    API_LOCKS_DIR,
+    API_LOG_DIR,
+    API_PORT,
+    API_PROTOCOL_PROBE,
+    API_RUN_AS_ID,
+)
 from coriolis_operator.common import (  # type: ignore[import-untyped]
     BOOTSTRAP_CONFIG_DIR,
     BOOTSTRAP_CORIOLIS_CREDENTIALS_DIR,
@@ -66,8 +90,10 @@ from coriolis_operator.common import (  # type: ignore[import-untyped]
     render_bootstrap_script,
 )
 from coriolis_operator.configuration import (  # type: ignore[import-untyped]
+    KubernetesCoriolisRenderInputs,
     SensitiveCoriolisCredentials,
     SensitiveCoriolisEndpoints,
+    render_coriolis_config,
     render_sensitive_coriolis_config,
 )
 from coriolis_operator.keystone import (  # type: ignore[import-untyped]
@@ -125,6 +151,10 @@ CONDUCTOR_RUN_AS_ID = 42434
 KEYSTONE_ID = "42425"
 KOLLA_GROUP = "42400"
 CORIOLIS_SCHEMA_TABLES = ("migrate_version", "endpoint", "service", "region")
+
+API_ALIAS = "coriolis-api"
+API_VERSION_TAG = "2603.4"
+STABILITY_INTERVAL = 20.0
 
 CONDUCTOR_ENTRYPOINT = "/entrypoint.sh"
 CONDUCTOR_COMMAND = (
@@ -295,6 +325,18 @@ class Resources:
     def memcached_probe(self) -> str:
         return f"{PREFIX}-{self.token}-memcached-probe"
 
+    @property
+    def conductor_main(self) -> str:
+        return f"{PREFIX}-{self.token}-conductor"
+
+    @property
+    def api_main(self) -> str:
+        return f"{PREFIX}-{self.token}-api"
+
+    @property
+    def rpc_probe(self) -> str:
+        return f"{PREFIX}-{self.token}-rpc-probe"
+
 
 def _run(command: Sequence[str], timeout: int) -> subprocess.CompletedProcess[str]:
     return subprocess.run(
@@ -447,6 +489,53 @@ except Exception:
     fail()
 """
 
+# Authenticated API->RabbitMQ RPC->conductor->MariaDB path. This script reads
+# the already-generated Coriolis Keystone password from the mounted private
+# evidence file, authenticates to the `service` project, resolves the project
+# ID, and calls GET /v1/{project_id}/endpoints on the in-network API alias. It
+# emits only fixed success/failure markers: never credentials, tokens, project
+# IDs, URL catalogs, headers, response bodies, config, or environment.
+
+CORIOLIS_RPC_PROBE = """import http.client
+import json
+import sys
+from pathlib import Path
+from keystoneauth1.identity import v3
+from keystoneauth1 import session as ks_session
+
+def fail():
+    print('CORIOLIS_RPC_FAIL')
+    sys.exit(1)
+
+try:
+    password = Path(
+        '/evidence/coriolis-secret/coriolis-keystone-password').read_text().strip()
+    auth = v3.Password(auth_url='http://keystone:5000/v3',
+        username='coriolis', password=password, project_name='service',
+        user_domain_name='Default', project_domain_name='Default')
+    session = ks_session.Session(auth=auth)
+    token = session.get_token()
+    project_id = auth.get_project_id(session)
+    if not token or not project_id:
+        fail()
+    connection = http.client.HTTPConnection('coriolis-api', 7667, timeout=60)
+    connection.request('GET', '/v1/%s/endpoints' % project_id,
+        headers={'X-Auth-Token': token, 'Accept': 'application/json'})
+    response = connection.getresponse()
+    body = response.read()
+    connection.close()
+    if response.status != 200:
+        fail()
+    payload = json.loads(body)
+    if not isinstance(payload, dict):
+        fail()
+    if not isinstance(payload.get('endpoints'), list):
+        fail()
+    print('coriolis-rpc-ok')
+except Exception:
+    fail()
+"""
+
 
 def create_evidence_files(
     repository_root: Path, mariadb_hostname: str = "mariadb"
@@ -535,6 +624,24 @@ def create_evidence_files(
             ),
         )
         _write_private(coriolis / "coriolis.conf", coriolis_config["coriolis.conf"])
+        runtime_config = render_coriolis_config(
+            inputs=KubernetesCoriolisRenderInputs(
+                bind_address="0.0.0.0",
+                coriolis_port=API_PORT,
+                coriolis_config_dir=API_CONFIG_DIR,
+                coriolis_vmware_vix_disklib_log_dir="/var/log/coriolis/vmware-root",
+                endpoints=SensitiveCoriolisEndpoints(
+                    rabbitmq_host="rabbitmq",
+                    memcached_host="memcached",
+                    database_host=mariadb_hostname,
+                    keystone_host="keystone",
+                ),
+            ),
+            accepted_version=API_VERSION_TAG,
+        )
+        for name, content in runtime_config.items():
+            _write_private(coriolis / name, content)
+        _write_private(coriolis / "coriolis_rpc_probe.py", CORIOLIS_RPC_PROBE)
         _write_private(
             coriolis / "bootstrap.py",
             render_bootstrap_script(
@@ -1517,6 +1624,290 @@ class Validator:
             self._stage(f"coriolis-common-bootstrap{suffix}", self._run_bootstrapper)
         self._stage("gate-coriolis-bootstrap-state", self._probe_bootstrap_state)
 
+    def _conductor_runtime_arguments(self, container_name: str) -> list[str]:
+        return [
+            "run",
+            "--name",
+            container_name,
+            "--detach",
+            "--network",
+            self.resources.network,
+            "--user",
+            f"{CONDUCTOR_RUN_AS_ID}:{CONDUCTOR_RUN_AS_ID}",
+            "--read-only",
+            "--cap-drop",
+            "ALL",
+            "--security-opt",
+            "no-new-privileges",
+            "--env",
+            "HOME=/tmp",
+            "--env",
+            "PYTHONDONTWRITEBYTECODE=1",
+            "--tmpfs",
+            "/tmp:rw,noexec,nosuid,size=64m",
+            "--tmpfs",
+            f"{API_LOG_DIR}:rw,noexec,nosuid,size=64m,uid={CONDUCTOR_RUN_AS_ID},gid={CONDUCTOR_RUN_AS_ID},mode=0700",
+            "--tmpfs",
+            f"{API_LOCKS_DIR}:rw,noexec,nosuid,size=16m,uid={CONDUCTOR_RUN_AS_ID},gid={CONDUCTOR_RUN_AS_ID},mode=0700",
+            "--mount",
+            f"type=volume,src={self.resources.coriolis_config_volume},dst={API_CONFIG_DIR},readonly",
+            "--entrypoint",
+            CONDUCTOR_COMMAND[0],
+            CONDUCTOR_IMAGE,
+            *CONDUCTOR_COMMAND[1:],
+        ]
+
+    def _api_runtime_arguments(self, container_name: str) -> list[str]:
+        return [
+            "run",
+            "--name",
+            container_name,
+            "--detach",
+            "--network",
+            self.resources.network,
+            "--network-alias",
+            API_ALIAS,
+            "--user",
+            f"{API_RUN_AS_ID}:{API_RUN_AS_ID}",
+            "--read-only",
+            "--cap-drop",
+            "ALL",
+            "--security-opt",
+            "no-new-privileges",
+            "--env",
+            "HOME=/tmp",
+            "--env",
+            "PYTHONDONTWRITEBYTECODE=1",
+            "--tmpfs",
+            "/tmp:rw,noexec,nosuid,size=64m",
+            "--tmpfs",
+            f"{API_LOG_DIR}:rw,noexec,nosuid,size=64m,uid={API_RUN_AS_ID},gid={API_RUN_AS_ID},mode=0700",
+            "--tmpfs",
+            f"{API_LOCKS_DIR}:rw,noexec,nosuid,size=16m,uid={API_RUN_AS_ID},gid={API_RUN_AS_ID},mode=0700",
+            "--mount",
+            f"type=volume,src={self.resources.coriolis_config_volume},dst={API_CONFIG_DIR},readonly",
+            "--entrypoint",
+            API_COMMAND,
+            API_IMAGE,
+            *API_ARGS,
+        ]
+
+    def _start_conductor(self) -> None:
+        self._checked(
+            "start-conductor",
+            self._docker(
+                *self._conductor_runtime_arguments(self.resources.conductor_main)
+            ),
+        )
+
+    def _start_api(self) -> None:
+        self._checked(
+            "start-api",
+            self._docker(*self._api_runtime_arguments(self.resources.api_main)),
+        )
+
+    def _container_running(self, name: str) -> bool:
+        try:
+            result = self.runner(
+                self._docker("inspect", "--format={{.State.Running}}", name),
+                self.timeout,
+            )
+        except (OSError, subprocess.SubprocessError):
+            return False
+        return result.returncode == 0 and result.stdout.strip() == "true"
+
+    def _inspect_runtime(
+        self,
+        stage: str,
+        name: str,
+        image: str,
+        entrypoint: str,
+        command: Sequence[str],
+    ) -> None:
+        try:
+            result = self.runner(self._docker("inspect", name), self.timeout)
+        except (OSError, subprocess.SubprocessError):
+            raise ValidationFailure(stage) from None
+        if result.returncode != 0:
+            raise ValidationFailure(stage)
+        try:
+            payload = json.loads(result.stdout)
+        except json.JSONDecodeError:
+            raise ValidationFailure(stage) from None
+        if len(payload) != 1:
+            raise ValidationFailure(stage)
+        container = payload[0]
+        config = container["Config"]
+        host_config = container["HostConfig"]
+        if config.get("Image") != image:
+            raise ValidationFailure(stage)
+        if config.get("User") != f"{CONDUCTOR_RUN_AS_ID}:{CONDUCTOR_RUN_AS_ID}":
+            raise ValidationFailure(stage)
+        if tuple(config.get("Entrypoint") or ()) != (entrypoint,):
+            raise ValidationFailure(stage)
+        if tuple(config.get("Cmd") or ()) != tuple(command):
+            raise ValidationFailure(stage)
+        if host_config.get("ReadonlyRootfs") is not True:
+            raise ValidationFailure(stage)
+        if host_config.get("CapDrop") != ["ALL"]:
+            raise ValidationFailure(stage)
+        if "no-new-privileges" not in (host_config.get("SecurityOpt") or []):
+            raise ValidationFailure(stage)
+        if host_config.get("NetworkMode") != self.resources.network:
+            raise ValidationFailure(stage)
+        if host_config.get("PortBindings"):
+            raise ValidationFailure(stage)
+        mounts = host_config.get("Mounts") or []
+        if not any(
+            m.get("Target") == API_CONFIG_DIR and m.get("ReadOnly") is True
+            for m in mounts
+        ):
+            raise ValidationFailure(stage)
+        tmpfs = host_config.get("Tmpfs") or {}
+        for path in ("/tmp", API_LOG_DIR, API_LOCKS_DIR):
+            if path not in tmpfs:
+                raise ValidationFailure(stage)
+
+    def _gate_api_unauthenticated(self) -> None:
+        deadline = self.clock() + self.timeout
+        while self.clock() < deadline:
+            try:
+                result = self.runner(
+                    self._docker(
+                        "exec",
+                        self.resources.api_main,
+                        "python3",
+                        "-c",
+                        API_PROTOCOL_PROBE,
+                    ),
+                    self.timeout,
+                )
+            except (OSError, subprocess.SubprocessError):
+                raise ValidationFailure("gate-api-unauthenticated") from None
+            if not self._container_running(self.resources.api_main):
+                raise ValidationFailure("api-container-exited")
+            if result.returncode == 0:
+                return
+            self.sleeper(POLL_INTERVAL)
+        raise ValidationFailure("gate-api-unauthenticated")
+
+    def _gate_conductor_rpc(self, stage: str) -> None:
+        self._poll_mounted_probe(
+            stage, self.resources.rpc_probe, "coriolis_rpc_probe.py"
+        )
+
+    def _conductor_stability(self) -> None:
+        deadline = self.clock() + STABILITY_INTERVAL
+        while self.clock() < deadline:
+            if not self._container_running(self.resources.conductor_main):
+                raise ValidationFailure("conductor-stability")
+            self.sleeper(POLL_INTERVAL)
+        if not self._container_running(self.resources.conductor_main):
+            raise ValidationFailure("conductor-stability")
+
+    def _stop_conductor_graceful(self) -> None:
+        self._checked(
+            "stop-conductor-graceful",
+            self._docker("stop", "--time", "15", self.resources.conductor_main),
+        )
+        try:
+            result = self.runner(
+                self._docker(
+                    "inspect",
+                    "--format={{.State.ExitCode}}",
+                    self.resources.conductor_main,
+                ),
+                self.timeout,
+            )
+        except (OSError, subprocess.SubprocessError):
+            raise ValidationFailure("stop-conductor-graceful") from None
+        if result.returncode != 0 or result.stdout.strip() != "0":
+            raise ValidationFailure("stop-conductor-graceful")
+
+    def _start_conductor_again(self) -> None:
+        self._checked(
+            "start-conductor-again",
+            self._docker("start", self.resources.conductor_main),
+        )
+
+    def _container_id(self, stage: str, name: str) -> str:
+        try:
+            result = self.runner(
+                self._docker("inspect", "--format={{.Id}}", name), self.timeout
+            )
+        except (OSError, subprocess.SubprocessError):
+            raise ValidationFailure(stage) from None
+        if result.returncode != 0 or not result.stdout.strip():
+            raise ValidationFailure(stage)
+        return result.stdout.strip()
+
+    def _restart_rabbitmq(self) -> None:
+        self._checked(
+            "restart-rabbitmq", self._docker("restart", self.resources.rabbitmq_main)
+        )
+
+    def _rabbitmq_recovery_evidence(self) -> None:
+        before = self._container_id("conductor-identity", self.resources.conductor_main)
+        self._stage("restart-rabbitmq", self._restart_rabbitmq)
+        self._stage(
+            "gate-rabbitmq-protocol-recovery",
+            lambda: self._poll_mounted_probe(
+                "gate-rabbitmq-protocol-recovery",
+                self.resources.rabbitmq_probe,
+                "rabbitmq_probe.py",
+            ),
+        )
+        self._stage(
+            "gate-conductor-rpc-rabbitmq-recovery",
+            lambda: self._gate_conductor_rpc("gate-conductor-rpc-rabbitmq-recovery"),
+        )
+        if (
+            self._container_id("conductor-identity", self.resources.conductor_main)
+            != before
+        ):
+            raise ValidationFailure("conductor-recreated-on-rabbitmq-restart")
+
+    def _runtime_evidence(self) -> None:
+        self._stage("start-conductor", self._start_conductor)
+        self._stage("start-api", self._start_api)
+        self._stage(
+            "inspect-conductor",
+            lambda: self._inspect_runtime(
+                "inspect-conductor",
+                self.resources.conductor_main,
+                CONDUCTOR_IMAGE,
+                CONDUCTOR_COMMAND[0],
+                CONDUCTOR_COMMAND[1:],
+            ),
+        )
+        self._stage(
+            "inspect-api",
+            lambda: self._inspect_runtime(
+                "inspect-api",
+                self.resources.api_main,
+                API_IMAGE,
+                API_COMMAND,
+                API_ARGS,
+            ),
+        )
+        self._stage("gate-api-unauthenticated", self._gate_api_unauthenticated)
+        self._stage(
+            "gate-conductor-rpc",
+            lambda: self._gate_conductor_rpc("gate-conductor-rpc"),
+        )
+        self._stage("conductor-stability", self._conductor_stability)
+        self._stage(
+            "gate-conductor-rpc-after-stability",
+            lambda: self._gate_conductor_rpc("gate-conductor-rpc-after-stability"),
+        )
+        self._stage("stop-conductor-graceful", self._stop_conductor_graceful)
+        self._stage("start-conductor-again", self._start_conductor_again)
+        self._stage(
+            "gate-conductor-rpc-after-restart",
+            lambda: self._gate_conductor_rpc("gate-conductor-rpc-after-restart"),
+        )
+        self._rabbitmq_recovery_evidence()
+
     def _cleanup_resources(self) -> None:
         resources: list[tuple[str, str]] = [
             ("container", self.resources.mariadb_main),
@@ -1534,6 +1925,9 @@ class Validator:
             ("container", self.resources.rabbitmq_probe),
             ("container", self.resources.memcached_main),
             ("container", self.resources.memcached_probe),
+            ("container", self.resources.conductor_main),
+            ("container", self.resources.api_main),
+            ("container", self.resources.rpc_probe),
             ("network", self.resources.network),
             ("volume", self.resources.runtime_volume),
             ("volume", self.resources.data_volume),
@@ -1618,6 +2012,7 @@ class Validator:
         )
         for stage, image in (
             ("conductor-image-available", CONDUCTOR_IMAGE),
+            ("api-image-available", API_IMAGE),
             ("mariadb-image-available", MARIADB_IMAGE),
             ("keystone-image-available", KEYSTONE_IMAGE),
             ("rabbitmq-image-available", RABBITMQ_IMAGE),
@@ -1699,6 +2094,7 @@ class Validator:
             ),
         )
         self._coriolis_keystone_evidence()
+        self._runtime_evidence()
 
     def _start_memcached(self) -> None:
         self._checked(

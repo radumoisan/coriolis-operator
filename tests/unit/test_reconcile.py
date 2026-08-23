@@ -46,6 +46,7 @@ from coriolis_operator.reconcile import (
     build_api_service,
     build_common_bootstrap_config_map,
     build_common_bootstrap_job,
+    build_conductor_deployment,
     build_coriolis_config_map,
     build_coriolis_config_secret,
     build_coriolis_credentials_secret,
@@ -1521,8 +1522,8 @@ def test_build_status_reports_accepted_api_only_slice() -> None:
                 "Reconciled",
                 "The foundational appliance resources, dependency Services, MariaDB, "
                 "RabbitMQ, Memcached, Keystone, Coriolis-common bootstrap, Coriolis "
-                "API, and controller state marker were reconciled in Kubernetes; "
-                "runtime readiness is not implemented yet.",
+                "API, Coriolis conductor, and controller state marker were reconciled "
+                "in Kubernetes; runtime readiness is not implemented yet.",
             ),
             condition(
                 "Ready",
@@ -3810,6 +3811,7 @@ def test_mariadb_reads_and_writes_follow_the_frozen_cross_api_order() -> None:
         ("read", "secret", "example-keystone-config-secret"),
         ("read", "deployment", "example-keystone"),
         ("read", "deployment", "example-coriolis-api"),
+        ("read", "deployment", "example-coriolis-conductor"),
         ("read", "configmap", "example-common-bootstrap-v2"),
     ]
     assert [event for event in events if event[0] == "write"] == [
@@ -3836,6 +3838,7 @@ def test_mariadb_reads_and_writes_follow_the_frozen_cross_api_order() -> None:
         ("write", "secret", "example-keystone-config-secret"),
         ("write", "deployment", "example-keystone"),
         ("write", "configmap", "example-common-bootstrap-v2"),
+        ("write", "deployment", "example-coriolis-conductor"),
         ("write", "service", "example-coriolis-api"),
         ("write", "deployment", "example-coriolis-api"),
         ("write", "configmap", "example-operator-state"),
@@ -4574,6 +4577,7 @@ def test_keystone_reads_all_resources_before_the_first_write() -> None:
         "example-keystone-config-secret",
         "example-keystone",
         "example-coriolis-api",
+        "example-coriolis-conductor",
         "example-common-bootstrap-v2",
     ]
     assert reads.index("example-keystone-database-credentials") > reads.index(
@@ -4710,6 +4714,7 @@ def test_keystone_retained_creation_precedes_mariadb_and_marker_is_last() -> Non
         "example-keystone-config-secret",
         "example-keystone",
         "example-common-bootstrap-v2",
+        "example-coriolis-conductor",
         "example-coriolis-api",
         "example-coriolis-api",
         "example-operator-state",
@@ -5387,6 +5392,163 @@ def test_managed_api_without_resource_version_retries_before_writes(
     assert excinfo.value.status["conditions"][2]["reason"] == "ResourceApplyFailed"
     assert api_writes(core_api) == []
     assert api_writes(apps_api) == []
+
+
+def test_conductor_collision_is_mutation_free() -> None:
+    core_api = make_core_api()
+    apps_api = make_apps_api()
+    conductor = build_conductor_deployment(
+        appliance_name="example",
+        namespace="operators",
+        accepted_version="2603.4",
+        owner=OWNER,
+    )
+    collided = copy.deepcopy(conductor)
+    collided["metadata"]["labels"]["app.kubernetes.io/managed-by"] = "other"
+
+    def read_deployment(*, name: str, namespace: str) -> object:
+        assert namespace == "operators"
+        if name == "example-coriolis-conductor":
+            return collided
+        raise _api_exception(404)
+
+    apps_api.read_namespaced_deployment.side_effect = read_deployment
+
+    status = reconcile_appliance(
+        spec=valid_spec(), meta=sample_meta(), core_api=core_api, apps_api=apps_api
+    )
+
+    assert status["conditions"][2]["reason"] == "ResourceCollision"
+    assert "operators/example-coriolis-conductor" in status["conditions"][2]["message"]
+    assert api_writes(core_api) == []
+    assert api_writes(apps_api) == []
+
+
+def test_managed_conductor_uses_guarded_ssa() -> None:
+    core_api = make_core_api()
+    apps_api = make_apps_api()
+    conductor = build_conductor_deployment(
+        appliance_name="example",
+        namespace="operators",
+        accepted_version="2603.4",
+        owner=OWNER,
+    )
+    conductor["metadata"]["resourceVersion"] = "40"
+
+    def read_deployment(*, name: str, namespace: str) -> object:
+        assert namespace == "operators"
+        if name == "example-coriolis-conductor":
+            return conductor
+        raise _api_exception(404)
+
+    apps_api.read_namespaced_deployment.side_effect = read_deployment
+    apps_api.api_client.default_headers["Content-Type"] = "application/json"
+
+    reconcile_appliance(
+        spec=valid_spec(), meta=sample_meta(), core_api=core_api, apps_api=apps_api
+    )
+
+    conductor_call = apps_api.patch_namespaced_deployment.call_args
+    assert conductor_call.kwargs["name"] == "example-coriolis-conductor"
+    assert conductor_call.kwargs["body"]["metadata"]["resourceVersion"] == "40"
+    assert conductor_call.kwargs["field_manager"] == "coriolis-operator"
+    assert conductor_call.kwargs["force"] is True
+    assert apps_api.api_client.default_headers["Content-Type"] == "application/json"
+
+
+def test_conductor_apply_failure_is_sanitized_and_skips_marker() -> None:
+    core_api = make_core_api()
+    apps_api = make_apps_api()
+
+    def fail_conductor(*, body: dict, **_: object) -> None:
+        if body["metadata"]["name"] == "example-coriolis-conductor":
+            raise client.ApiException(status=409, reason="conductor-apply-sentinel")
+
+    apps_api.create_namespaced_deployment.side_effect = fail_conductor
+
+    with pytest.raises(main.ReconcileRetry) as excinfo:
+        reconcile_appliance(
+            spec=valid_spec(), meta=sample_meta(), core_api=core_api, apps_api=apps_api
+        )
+
+    assert excinfo.value.status["conditions"][2]["reason"] == "ResourceApplyFailed"
+    assert "conductor-apply-sentinel" not in repr(excinfo.value.status)
+    assert_no_marker_write(core_api)
+
+
+def test_managed_conductor_without_resource_version_retries_before_writes() -> None:
+    core_api = make_core_api()
+    apps_api = make_apps_api()
+    conductor = build_conductor_deployment(
+        appliance_name="example",
+        namespace="operators",
+        accepted_version="2603.4",
+        owner=OWNER,
+    )
+
+    def read_deployment(*, name: str, namespace: str) -> object:
+        assert namespace == "operators"
+        if name == "example-coriolis-conductor":
+            return conductor
+        raise _api_exception(404)
+
+    apps_api.read_namespaced_deployment.side_effect = read_deployment
+
+    with pytest.raises(main.ReconcileRetry) as excinfo:
+        reconcile_appliance(
+            spec=valid_spec(), meta=sample_meta(), core_api=core_api, apps_api=apps_api
+        )
+
+    assert excinfo.value.status["conditions"][2]["reason"] == "ResourceApplyFailed"
+    assert api_writes(core_api) == []
+    assert api_writes(apps_api) == []
+
+
+def test_bootstrap_active_creates_no_conductor() -> None:
+    core_api = make_core_api()
+    apps_api = make_apps_api()
+    active = succeeded_bootstrap_job()
+    active["status"] = {}
+
+    with pytest.raises(main.ReconcileRetry):
+        reconcile_appliance(
+            spec=valid_spec(),
+            meta=sample_meta(),
+            core_api=core_api,
+            apps_api=apps_api,
+            batch_api=make_batch_api(job=active),
+        )
+
+    created_deployments = [
+        item.kwargs["body"]["metadata"]["name"]
+        for item in apps_api.create_namespaced_deployment.call_args_list
+    ]
+    assert "example-coriolis-conductor" not in created_deployments
+    assert_no_marker_write(core_api)
+
+
+def test_bootstrap_failed_creates_no_conductor() -> None:
+    core_api = make_core_api()
+    apps_api = make_apps_api()
+    failed = succeeded_bootstrap_job()
+    failed["status"] = {"conditions": [{"type": "Failed", "status": "True"}]}
+
+    status = reconcile_appliance(
+        spec=valid_spec(),
+        meta=sample_meta(),
+        core_api=core_api,
+        apps_api=apps_api,
+        batch_api=make_batch_api(job=failed),
+    )
+
+    created_deployments = [
+        item.kwargs["body"]["metadata"]["name"]
+        for item in apps_api.create_namespaced_deployment.call_args_list
+    ]
+    assert "example-coriolis-conductor" not in created_deployments
+    assert status["conditions"][2]["reason"] == "BootstrapFailed"
+    assert status["conditions"][4]["status"] == "True"
+    assert_no_marker_write(core_api)
 
 
 def test_bootstrap_terminal_failed_is_stable_degraded_without_marker() -> None:

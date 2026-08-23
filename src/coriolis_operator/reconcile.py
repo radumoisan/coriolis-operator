@@ -47,6 +47,19 @@ from coriolis_operator.common import (
     CONDUCTOR_IMAGE,
     render_bootstrap_script,
 )
+from coriolis_operator.conductor import (
+    CONDUCTOR_ARGS,
+    CONDUCTOR_COMMAND,
+    CONDUCTOR_COMPONENT,
+    CONDUCTOR_CONFIG_DIR,
+    CONDUCTOR_CONFIG_MAP_KEYS,
+    CONDUCTOR_IMAGE_PULL_SECRET_NAME,
+    CONDUCTOR_LOCKS_DIR,
+    CONDUCTOR_LOG_DIR,
+    CONDUCTOR_REPLICAS,
+    CONDUCTOR_RUN_AS_ID,
+    CONDUCTOR_TERMINATION_GRACE_PERIOD_SECONDS,
+)
 from coriolis_operator.configuration import (
     KubernetesCoriolisRenderInputs,
     SensitiveCoriolisEndpoints,
@@ -148,9 +161,9 @@ NOT_DEGRADED_MESSAGE = "The appliance is not degraded."
 NOT_RECONCILED_MESSAGE = "No resources were applied to Kubernetes."
 RECONCILED_MESSAGE = (
     "The foundational appliance resources, dependency Services, MariaDB, RabbitMQ, "
-    "Memcached, Keystone, Coriolis-common bootstrap, Coriolis API, and controller "
-    "state marker were reconciled in Kubernetes; runtime readiness is not implemented "
-    "yet."
+    "Memcached, Keystone, Coriolis-common bootstrap, Coriolis API, Coriolis "
+    "conductor, and controller state marker were reconciled in Kubernetes; runtime "
+    "readiness is not implemented yet."
 )
 UPGRADE_NOT_SUPPORTED_MESSAGE = "The core profile has no supported upgrade path."
 INVALID_RUNTIME_CONFIGURATION_MESSAGE = (
@@ -293,6 +306,14 @@ class APIResourcePreflight:
 
     service_classification: OwnedClassification
     deployment_classification: OwnedClassification
+    manifests: tuple[dict[str, Any], ...] = field(repr=False)
+
+
+@dataclass(frozen=True)
+class ConductorResourcePreflight:
+    """Pure preflight outcome and desired Coriolis conductor Deployment body."""
+
+    classification: OwnedClassification
     manifests: tuple[dict[str, Any], ...] = field(repr=False)
 
 
@@ -1321,6 +1342,161 @@ def preflight_api_resources(
                 owner=owner,
             ),
             build_api_deployment(
+                appliance_name=appliance_name,
+                namespace=namespace,
+                accepted_version=accepted_version,
+                owner=owner,
+            ),
+        ),
+    )
+
+
+def build_conductor_deployment(
+    *,
+    appliance_name: str,
+    namespace: str,
+    accepted_version: str,
+    owner: Mapping[str, Any],
+) -> dict[str, Any]:
+    """Build the restricted single-replica direct Coriolis conductor Deployment.
+
+    The conductor exposes no supported HTTP endpoint, so it intentionally has no
+    Service, ports, listeners, or probes; Pod readiness is not RPC readiness.
+    """
+    component = CONDUCTOR_COMPONENT
+    resource_name = appliance_resource_name(appliance_name, component)
+    metadata = build_resource_metadata(
+        resource_name=resource_name,
+        namespace=namespace,
+        appliance_name=appliance_name,
+        component=component,
+        accepted_version=accepted_version,
+        owner=owner,
+    )
+    selector = {
+        "coriolis.cloudbase.it/appliance": appliance_identity(appliance_name),
+        "coriolis.cloudbase.it/component": component,
+    }
+    config_map_name = appliance_resource_name(appliance_name, "coriolis-config")
+    config_secret_name = appliance_resource_name(
+        appliance_name, "coriolis-config-secret"
+    )
+    container = {
+        "name": component,
+        "image": CONDUCTOR_IMAGE,
+        "command": [CONDUCTOR_COMMAND],
+        "args": list(CONDUCTOR_ARGS),
+        "env": [
+            {"name": "HOME", "value": "/tmp"},
+            {"name": "PYTHONDONTWRITEBYTECODE", "value": "1"},
+        ],
+        "securityContext": {
+            "runAsNonRoot": True,
+            "readOnlyRootFilesystem": True,
+            "allowPrivilegeEscalation": False,
+            "capabilities": {"drop": ["ALL"]},
+            "seccompProfile": {"type": "RuntimeDefault"},
+        },
+        "volumeMounts": [
+            {"name": "config", "mountPath": CONDUCTOR_CONFIG_DIR, "readOnly": True},
+            {"name": "tmp", "mountPath": "/tmp"},
+            {"name": "logs", "mountPath": CONDUCTOR_LOG_DIR},
+            {"name": "locks", "mountPath": CONDUCTOR_LOCKS_DIR},
+        ],
+    }
+    return {
+        "apiVersion": "apps/v1",
+        "kind": "Deployment",
+        "metadata": metadata,
+        "spec": {
+            "replicas": CONDUCTOR_REPLICAS,
+            "strategy": {"type": "Recreate"},
+            "selector": {"matchLabels": selector},
+            "template": {
+                "metadata": {"labels": dict(metadata["labels"])},
+                "spec": {
+                    "imagePullSecrets": [{"name": CONDUCTOR_IMAGE_PULL_SECRET_NAME}],
+                    "securityContext": {
+                        "runAsUser": CONDUCTOR_RUN_AS_ID,
+                        "runAsGroup": CONDUCTOR_RUN_AS_ID,
+                        "fsGroup": CONDUCTOR_RUN_AS_ID,
+                        "fsGroupChangePolicy": "OnRootMismatch",
+                    },
+                    "automountServiceAccountToken": False,
+                    "enableServiceLinks": False,
+                    "terminationGracePeriodSeconds": (
+                        CONDUCTOR_TERMINATION_GRACE_PERIOD_SECONDS
+                    ),
+                    "containers": [container],
+                    "volumes": [
+                        {
+                            "name": "config",
+                            "projected": {
+                                "sources": [
+                                    {
+                                        "configMap": {
+                                            "name": config_map_name,
+                                            "items": [
+                                                {
+                                                    "key": key,
+                                                    "path": key,
+                                                    "mode": 0o444,
+                                                }
+                                                for key in CONDUCTOR_CONFIG_MAP_KEYS
+                                            ],
+                                        }
+                                    },
+                                    {
+                                        "secret": {
+                                            "name": config_secret_name,
+                                            "items": [
+                                                {
+                                                    "key": "coriolis.conf",
+                                                    "path": "coriolis.conf",
+                                                    "mode": 0o440,
+                                                }
+                                            ],
+                                        }
+                                    },
+                                ]
+                            },
+                        },
+                        {"name": "tmp", "emptyDir": {"medium": "Memory"}},
+                        {"name": "logs", "emptyDir": {}},
+                        {"name": "locks", "emptyDir": {}},
+                    ],
+                },
+            },
+        },
+    }
+
+
+def preflight_conductor_resource(
+    *,
+    appliance_name: str,
+    namespace: str,
+    accepted_version: str,
+    owner: Mapping[str, Any],
+    conductor_deployment: Any | None,
+) -> ConductorResourcePreflight:
+    """Classify the conductor before building its desired Deployment."""
+    component = CONDUCTOR_COMPONENT
+    resource_name = appliance_resource_name(appliance_name, component)
+    classification = classify_owned_resource(
+        existing=conductor_deployment,
+        resource_name=resource_name,
+        namespace=namespace,
+        appliance_name=appliance_name,
+        component=component,
+        accepted_version=accepted_version,
+        owner=owner,
+    )
+    if classification is OwnedClassification.COLLISION:
+        return ConductorResourcePreflight(classification, ())
+    return ConductorResourcePreflight(
+        classification,
+        (
+            build_conductor_deployment(
                 appliance_name=appliance_name,
                 namespace=namespace,
                 accepted_version=accepted_version,
