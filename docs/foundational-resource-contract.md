@@ -395,17 +395,18 @@ If evidence is absent, stop rather than infer.
 
 ## :material-book-open-page-variant-outline: Coriolis-Common Bootstrap Kubernetes Contract
 
-This is a frozen development contract. The slice is implemented locally but uncommitted, unpushed, undeployed, and not POC-tested; it is absent from the published docs-only operator `0.5.15` at `f7c369d`, whose runtime behavior remains accepted through the `0.5.14` Keystone POC. `coriolis-common` remains a base image, not a workload.
+Source `391f94c6095f55178ba125c5eec22270284b0b92` was published by successful CIXpress pipeline `v2nv5t` as release `0.5.16` at CI commit `54381936f98941473b166543274c0ea29a263e40`. Its disposable released-artifact POC in `coriolis-common-validation-20260823`, using Argo Application `coriolis-common-poc-20260823`, reached ready dependencies and Services, but immutable `<appliance>-common-bootstrap-v1` failed all three attempts before dbsync. The operator correctly reported `BootstrapFailed`, wrote no marker, retained `Ready=False/RuntimeNotImplemented`, and did not mutate the failed Job. Sanitized exact-image diagnosis found oslo-config provider-continuation parse failures at first line 15 and then line 27 after a partial diagnostic correction; no content or credentials are recorded. The local v2 correction is uncommitted, unpushed, unreleased, undeployed, and pending its released-artifact POC. `coriolis-common` remains a base image, not a workload.
 
 ### :material-application-edit-outline: Image, Script, And Object Identity
 
 - The Job selects the exact conductor `2603.4` digest `27495f44fbb8b320098d0aa04cd9dcb2a4b432e57aa17417606efc5403ac09c7`. `coriolis-common` is not a workload; the bootstrap runs on the conductor image.
-- The owner ConfigMap and owner Job share the deterministic `<appliance>-common-bootstrap-v1` name (component `common-bootstrap-v1`). The ConfigMap is immutable and holds exactly one non-secret rendered `bootstrap.py`; it is create-only, with no patch, delete, or TTL.
+- The owner ConfigMap and owner Job share deterministic `<appliance>-common-bootstrap-v2` identity (component `common-bootstrap-v2`). The ConfigMap is immutable and holds exactly one non-secret rendered `bootstrap.py`; it is create-only, with no patch, delete, or TTL.
 - The Job pins the conductor image and is create-only immutable with no patch, delete, or TTL. It binds the exact rendered script via a non-sensitive script-digest annotation and a template-id digest, both recorded in the object and immutable pod-template annotations; the template ID covers the script identity, so any script change under a given revision is a collision that requires an explicit next revision. No service-account token automount and no service links.
 
 ### :material-application-edit-outline: Mounts, Values, And Security
 
 - The bootstrap script, the existing generated configuration, and the retained credential Secrets are projected file-only through independent, non-overlapping read-only mounts. No credential, config, or script content enters environment variables, argv, status, events, logs, or documentation.
+- Kubernetes-derived `coriolis.conf` emits the provider list as one contiguous indented oslo-config multiline value. Dbsync retains the complete generated configuration and adds only supported `--nouse-syslog --log-dir=` overrides for the restricted Job.
 - The container runs as non-root UID/GID `42434`, read-only root, dropped capabilities, no-new-privileges, and only `/tmp` writable, under a restricted security context.
 
 ### :material-application-edit-outline: Bounds And Completion
@@ -414,14 +415,14 @@ This is a frozen development contract. The slice is implemented locally but unco
 
 ### :material-application-edit-outline: Validation Evidence
 
-- Tracked validator `scripts/validate-coriolis-bootstrap-runtime.py` ran the exact conductor as non-root UID/GID `42434` with read-only root, dropped capabilities/no-new-privileges, and only `/tmp` writable; the actual rendered script passed twice under all-read-only config/script/credential mounts across all four MariaDB/RabbitMQ/Memcached/Keystone protocol gates, the Coriolis schema dbsync, the exact Keystone user `coriolis` enabled with default project `service` and password convergence, the admin role, service name `coriolis` of type `migration` with description `Cloud Migration as a Service`, exactly one RegionOne endpoint per admin/internal/public at `http://coriolis-api:7667/v1/%(tenant_id)s`, and independent state verification. Final runtime `188.631s`; the actual bootstrap passed at `21.391s` and `25.273s`, verification at `10.416s`, with zero Docker leftovers.
+- Tracked validator `scripts/validate-coriolis-bootstrap-runtime.py` uses the actual full sensitive renderer, not a minimal dbsync config, and emits no secrets. Dependencies, dbsync and repeat (`5.076s`, `3.761s`), actual bootstrap and repeat (`23.886s`, `20.044s`), and independent verification (`8.022s`) passed in `135.212s` with zero leftovers.
 - The Coriolis DB/user/grants remain existing MariaDB effects; the service-project creation is a necessary dedicated-Keystone precondition.
 
 ### :material-application-edit-outline: Reconciliation And RBAC
 
 - Reconciliation pre-reads the bootstrap ConfigMap and Job after Keystone and before writes; classification is collision-mutation-free. The immutable ConfigMap is created only when absent and is never patched (exact managed reuse is no-write). The Job is create-only: a managed Job is reusable only when its projected managed spec exactly equals the desired spec (image, command, env, security contexts, mounts, volume sources/items/modes, pull Secret, restart/deadline/backoff/completions/parallelism, and template labels/annotations) and both object metadata and pod-template annotations carry the exact script and template IDs; any drift is a mutation-free `ResourceCollision`. An absent/active Job returns `Progressing`/`BootstrapRunning` with the existing ten-second `TemporaryError` requeue and no marker; a terminal failed Job returns `Degraded`/`BootstrapFailed` with no marker; a succeeded Job is a no-writes path plus the marker last. The current accepted status remains `Ready=False/RuntimeNotImplemented`.
 - RBAC adds only batch/jobs `get`/`create`, with no patch/delete/list/watch/Pod/log or cluster scope. No CRD, application Service/Deployment, Ingress, new Secret, finalizer, or `Ready=True` is added.
-- Local validation passes at 477 unit tests, Ruff format/lint, mypy, Helm lint/template, Docker build, and `git diff --check`. This is local implementation and validator evidence only; no release, deployment, or cluster state changed, and no `Ready=True`.
+- Local validation passes at 477 unit tests, Ruff lint/format, mypy, Helm lint/template, exact conductor parser check, Docker build, and `git diff --check`. This is local implementation and validator evidence only; no `Ready=True`, application workload, or RBAC change is added.
 
 ## :material-book-open-page-variant-outline: Unresolved Gates
 

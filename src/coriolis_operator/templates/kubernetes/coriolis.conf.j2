@@ -11,12 +11,9 @@ logging_debug_format_suffix = from (pid=%(process)d) %(funcName)s %(pathname)s:%
 logging_default_format_string = %(asctime)s.%(msecs)03d %(levelname)s %(name)s [-] %(instance)s%(message)s
 logging_context_format_string = %(asctime)s.%(msecs)03d %(levelname)s %(name)s [%(request_id)s] %(instance)s%(message)s
 
-providers=
-{%- for item in coriolis_export_providers %}
-{{ merged_export_modules[item] }},
-{%- endfor %}
-{%- for item in coriolis_import_providers %}
-{{ merged_import_modules[item] }}{% if not loop.last %},{% endif %}
+providers =
+{% for item in coriolis_export_providers %}  {{ merged_export_modules[item] }},
+{% endfor %}{% for item in coriolis_import_providers %}  {{ merged_import_modules[item] }}{% if not loop.last %},{% endif %}
 {% endfor %}
 
 caching = True

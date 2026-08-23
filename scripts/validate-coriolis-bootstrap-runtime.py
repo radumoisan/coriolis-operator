@@ -57,7 +57,6 @@ import time
 from collections.abc import Callable, Sequence
 from dataclasses import dataclass
 from pathlib import Path
-from urllib.parse import quote
 
 from coriolis_operator.common import (  # type: ignore[import-untyped]
     BOOTSTRAP_CONFIG_DIR,
@@ -65,6 +64,11 @@ from coriolis_operator.common import (  # type: ignore[import-untyped]
     BOOTSTRAP_INFRA_CREDENTIALS_DIR,
     BOOTSTRAP_SCRIPT_DIR,
     render_bootstrap_script,
+)
+from coriolis_operator.configuration import (  # type: ignore[import-untyped]
+    SensitiveCoriolisCredentials,
+    SensitiveCoriolisEndpoints,
+    render_sensitive_coriolis_config,
 )
 from coriolis_operator.keystone import (  # type: ignore[import-untyped]
     KEYSTONE_CONFIG_PATH,
@@ -478,6 +482,7 @@ def create_evidence_files(
         admin_password = secrets.token_urlsafe(32)
         coriolis_keystone_password = secrets.token_urlsafe(32)
         rabbitmq_password = secrets.token_urlsafe(32)
+        temp_keypair_password = secrets.token_urlsafe(32)
 
         for name, content in render_mariadb_config().items():
             _write_private(mariadb_public / name, content)
@@ -515,12 +520,21 @@ def create_evidence_files(
             _write_private(rabbitmq / name, content)
         _write_private(rabbitmq_secret / "rabbitmq_password", rabbitmq_password)
 
-        _write_private(
-            coriolis / "coriolis.conf",
-            "[DEFAULT]\nuse_stderr = true\nlog_dir =\n"
-            f"[database]\nconnection = mysql+pymysql://coriolis:"
-            f"{quote(coriolis_password, safe='')}@{mariadb_hostname}:3306/coriolis\n",
+        coriolis_config = render_sensitive_coriolis_config(
+            endpoints=SensitiveCoriolisEndpoints(
+                rabbitmq_host="rabbitmq",
+                memcached_host="memcached",
+                database_host=mariadb_hostname,
+                keystone_host="keystone",
+            ),
+            credentials=SensitiveCoriolisCredentials(
+                rabbitmq_password=rabbitmq_password,
+                coriolis_database_password=coriolis_password,
+                coriolis_keystone_password=coriolis_keystone_password,
+                temp_keypair_password=temp_keypair_password,
+            ),
         )
+        _write_private(coriolis / "coriolis.conf", coriolis_config["coriolis.conf"])
         _write_private(
             coriolis / "bootstrap.py",
             render_bootstrap_script(
@@ -1094,7 +1108,8 @@ class Validator:
                 *self._coriolis_dbsync_arguments(self.resources.dbsync_runner),
                 "-c",
                 "set -eu; "
-                "coriolis-dbsync --config-file=/evidence/coriolis/coriolis.conf",
+                "coriolis-dbsync --config-file=/evidence/coriolis/coriolis.conf "
+                "--nouse-syslog --log-dir=",
             ),
         )
 

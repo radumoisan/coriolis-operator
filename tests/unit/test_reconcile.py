@@ -1678,7 +1678,7 @@ def test_reconcile_appliance_server_side_applies_state_and_returns_status() -> N
             name="example-keystone-config-secret", namespace="operators"
         ),
         call.read_namespaced_config_map(
-            name="example-common-bootstrap-v1", namespace="operators"
+            name="example-common-bootstrap-v2", namespace="operators"
         ),
         call.create_namespaced_secret(namespace="operators", body=ANY),
         call.create_namespaced_secret(namespace="operators", body=ANY),
@@ -3605,7 +3605,7 @@ def test_mariadb_reads_and_writes_follow_the_frozen_cross_api_order() -> None:
         ("read", "configmap", "example-keystone-config"),
         ("read", "secret", "example-keystone-config-secret"),
         ("read", "deployment", "example-keystone"),
-        ("read", "configmap", "example-common-bootstrap-v1"),
+        ("read", "configmap", "example-common-bootstrap-v2"),
     ]
     assert [event for event in events if event[0] == "write"] == [
         ("write", "secret", "example-coriolis-credentials"),
@@ -3630,7 +3630,7 @@ def test_mariadb_reads_and_writes_follow_the_frozen_cross_api_order() -> None:
         ("write", "configmap", "example-keystone-config"),
         ("write", "secret", "example-keystone-config-secret"),
         ("write", "deployment", "example-keystone"),
-        ("write", "configmap", "example-common-bootstrap-v1"),
+        ("write", "configmap", "example-common-bootstrap-v2"),
         ("write", "configmap", "example-operator-state"),
     ]
     assert status["acceptedVersion"] == "2603.4"
@@ -4365,7 +4365,7 @@ def test_keystone_reads_all_resources_before_the_first_write() -> None:
         "example-keystone-config",
         "example-keystone-config-secret",
         "example-keystone",
-        "example-common-bootstrap-v1",
+        "example-common-bootstrap-v2",
     ]
     assert reads.index("example-keystone-database-credentials") > reads.index(
         "example-rabbitmq"
@@ -4500,7 +4500,7 @@ def test_keystone_retained_creation_precedes_mariadb_and_marker_is_last() -> Non
         "example-keystone-config",
         "example-keystone-config-secret",
         "example-keystone",
-        "example-common-bootstrap-v1",
+        "example-common-bootstrap-v2",
         "example-operator-state",
     ]
 
@@ -4753,7 +4753,7 @@ def test_bootstrap_config_map_and_job_exact_contract() -> None:
 
     assert config_map["apiVersion"] == "v1"
     assert config_map["kind"] == "ConfigMap"
-    assert config_map["metadata"]["name"] == "example-common-bootstrap-v1"
+    assert config_map["metadata"]["name"] == "example-common-bootstrap-v2"
     assert config_map["metadata"]["namespace"] == "operators"
     assert config_map["metadata"]["ownerReferences"] == [dict(OWNER, controller=True)]
     assert config_map["immutable"] is True
@@ -4762,7 +4762,7 @@ def test_bootstrap_config_map_and_job_exact_contract() -> None:
 
     assert job["apiVersion"] == "batch/v1"
     assert job["kind"] == "Job"
-    assert job["metadata"]["name"] == "example-common-bootstrap-v1"
+    assert job["metadata"]["name"] == "example-common-bootstrap-v2"
     assert job["metadata"]["namespace"] == "operators"
     assert job["metadata"]["ownerReferences"] == [dict(OWNER, controller=True)]
     assert BOOTSTRAP_SCRIPT_ANNOTATION in job["metadata"]["annotations"]
@@ -4797,7 +4797,7 @@ def test_bootstrap_config_map_and_job_exact_contract() -> None:
 
     assert len(pod["containers"]) == 1
     container = pod["containers"][0]
-    assert container["name"] == "common-bootstrap-v1"
+    assert container["name"] == "common-bootstrap-v2"
     assert container["image"] == CONDUCTOR_IMAGE
     assert container["command"] == ["python3", "/etc/coriolis-bootstrap/bootstrap.py"]
     assert "args" not in container
@@ -4823,7 +4823,7 @@ def test_bootstrap_config_map_and_job_exact_contract() -> None:
         "coriolis-credentials",
     }
     assert volumes["tmp"] == {"name": "tmp", "emptyDir": {}}
-    assert volumes["script"]["configMap"]["name"] == "example-common-bootstrap-v1"
+    assert volumes["script"]["configMap"]["name"] == "example-common-bootstrap-v2"
     assert volumes["script"]["configMap"]["items"] == [
         {"key": "bootstrap.py", "path": "bootstrap.py", "mode": 0o444}
     ]
@@ -4901,7 +4901,7 @@ def test_bootstrap_absent_creates_job_and_raises_running_before_marker() -> None
         item.kwargs["body"]["metadata"]["name"]
         for item in core_api.create_namespaced_config_map.call_args_list
     ]
-    assert bootstrap_names[-1] == "example-common-bootstrap-v1"
+    assert bootstrap_names[-1] == "example-common-bootstrap-v2"
     batch_api.create_namespaced_job.assert_called_once_with(
         namespace="operators", body=ANY
     )
@@ -5015,7 +5015,7 @@ def test_bootstrap_config_map_collision_has_zero_writes() -> None:
     )
 
     assert status["conditions"][2]["reason"] == "ResourceCollision"
-    assert "operators/example-common-bootstrap-v1" in status["conditions"][2]["message"]
+    assert "operators/example-common-bootstrap-v2" in status["conditions"][2]["message"]
     assert api_writes(core_api) == []
     batch_api.create_namespaced_job.assert_not_called()
 
@@ -5133,7 +5133,7 @@ def test_bootstrap_job_drift_is_collision_with_no_writes(mutate) -> None:
     )
 
     assert status["conditions"][2]["reason"] == "ResourceCollision"
-    assert "operators/example-common-bootstrap-v1" in status["conditions"][2]["message"]
+    assert "operators/example-common-bootstrap-v2" in status["conditions"][2]["message"]
     assert api_writes(core_api) == []
     batch_api.create_namespaced_job.assert_not_called()
     batch_api.patch_namespaced_job.assert_not_called()
@@ -5207,7 +5207,7 @@ def test_bootstrap_config_map_immutable_drift_is_collision_with_no_writes() -> N
     )
 
     assert status["conditions"][2]["reason"] == "ResourceCollision"
-    assert "operators/example-common-bootstrap-v1" in status["conditions"][2]["message"]
+    assert "operators/example-common-bootstrap-v2" in status["conditions"][2]["message"]
     assert api_writes(core_api) == []
     batch_api.create_namespaced_job.assert_not_called()
 
@@ -5257,12 +5257,12 @@ def test_bootstrap_config_map_managed_reuse_is_no_write() -> None:
         item.kwargs["body"]["metadata"]["name"]
         for item in core_api.create_namespaced_config_map.call_args_list
     ]
-    assert "example-common-bootstrap-v1" not in created_names
+    assert "example-common-bootstrap-v2" not in created_names
     patched_names = [
         item.kwargs["name"]
         for item in core_api.patch_namespaced_config_map.call_args_list
     ]
-    assert "example-common-bootstrap-v1" not in patched_names
+    assert "example-common-bootstrap-v2" not in patched_names
     assert created_names[-1] == "example-operator-state"
     statuses = {item["type"]: item for item in status["conditions"]}
     assert statuses["Reconciled"]["status"] == "True"
@@ -5280,7 +5280,7 @@ def test_bootstrap_config_map_is_never_patched() -> None:
         item.kwargs["name"]
         for item in core_api.patch_namespaced_config_map.call_args_list
     ]
-    assert "example-common-bootstrap-v1" not in patched_names
+    assert "example-common-bootstrap-v2" not in patched_names
 
 
 def test_bootstrap_non_404_read_error_requests_sanitized_retry() -> None:

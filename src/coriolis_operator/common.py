@@ -15,7 +15,7 @@ CONDUCTOR_IMAGE = (
     "@sha256:27495f44fbb8b320098d0aa04cd9dcb2a4b432e57aa17417606efc5403ac09c7"
 )
 BOOTSTRAP_IMAGE_PULL_SECRET_NAME = "coriolis-appliance-registry"
-BOOTSTRAP_REVISION = "v1"
+BOOTSTRAP_REVISION = "v2"
 BOOTSTRAP_UID_GID = 42434
 BOOTSTRAP_COMPONENT = f"common-bootstrap-{BOOTSTRAP_REVISION}"
 BOOTSTRAP_BACKOFF_LIMIT = 2
@@ -181,7 +181,12 @@ def wait_for_dependencies():
 
 def run_dbsync():
     result = subprocess.run(
-        ['coriolis-dbsync', '--config-file=/etc/coriolis/coriolis.conf'],
+        [
+            'coriolis-dbsync',
+            '--config-file=/etc/coriolis/coriolis.conf',
+            '--nouse-syslog',
+            '--log-dir=',
+        ],
         stdout=subprocess.DEVNULL,
         stderr=subprocess.DEVNULL,
         timeout=DBSYNC_TIMEOUT_SECONDS,

@@ -61,9 +61,9 @@ def extract_function(script: str, name: str, globals_: dict | None = None):
 
 def test_common_bootstrap_constants_are_exact() -> None:
     assert CONDUCTOR_IMAGE == EXACT_CONDUCTOR_IMAGE
-    assert BOOTSTRAP_REVISION == "v1"
+    assert BOOTSTRAP_REVISION == "v2"
     assert BOOTSTRAP_UID_GID == 42434
-    assert BOOTSTRAP_COMPONENT == "common-bootstrap-v1"
+    assert BOOTSTRAP_COMPONENT == "common-bootstrap-v2"
     assert BOOTSTRAP_COMPONENT == f"common-bootstrap-{BOOTSTRAP_REVISION}"
     assert BOOTSTRAP_IMAGE_PULL_SECRET_NAME == "coriolis-appliance-registry"
     assert BOOTSTRAP_BACKOFF_LIMIT == 2
@@ -142,7 +142,9 @@ def test_render_bootstrap_script_embeds_dependency_hosts_and_paths() -> None:
         "CORIOLIS_DATABASE_PASSWORD_PATH = "
         "'/etc/coriolis-bootstrap-coriolis/coriolis-database-password'" in script
     )
-    assert "['coriolis-dbsync', '--config-file=/etc/coriolis/coriolis.conf']" in script
+    assert "'--config-file=/etc/coriolis/coriolis.conf'," in script
+    assert "'--nouse-syslog'," in script
+    assert "'--log-dir='," in script
     assert "stdout=subprocess.DEVNULL" in script
     assert "stderr=subprocess.DEVNULL" in script
     assert "DBSYNC_TIMEOUT_SECONDS = 120" in script

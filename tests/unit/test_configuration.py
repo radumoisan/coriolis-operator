@@ -94,6 +94,29 @@ PROVIDER_MODULES = (
     "coriolis_provider_libvirt.ImportProvider",
     "coriolis_provider_cloudstack.imp.ImportProvider",
 )
+EXPECTED_PROVIDER_BLOCK = (
+    "providers =\n"
+    + "\n".join(
+        f"  {module}{',' if index < len(PROVIDER_MODULES) - 1 else ''}"
+        for index, module in enumerate(PROVIDER_MODULES)
+    )
+    + "\n"
+)
+UPSTREAM_PROVIDER_TEMPLATE_BLOCK = """providers=
+{%- for item in coriolis_export_providers %}
+{{ merged_export_modules[item] }},
+{%- endfor %}
+{%- for item in coriolis_import_providers %}
+{{ merged_import_modules[item] }}{% if not loop.last %},{% endif %}
+{% endfor %}
+"""
+KUBERNETES_PROVIDER_TEMPLATE_BLOCK = (
+    "providers =\n"
+    "{% for item in coriolis_export_providers %}  {{ merged_export_modules[item] }},\n"
+    "{% endfor %}{% for item in coriolis_import_providers %}  "
+    "{{ merged_import_modules[item] }}{% if not loop.last %},{% endif %}\n"
+    "{% endfor %}\n"
+)
 OWNER = {
     "apiVersion": "coriolis.cloudbase.it/v1alpha1",
     "kind": "CoriolisAppliance",
@@ -190,7 +213,7 @@ def test_package_resources_include_templates_and_attribution() -> None:
     }
 
 
-def test_kubernetes_templates_have_only_the_approved_plaintext_delta() -> None:
+def test_kubernetes_templates_have_only_the_approved_deltas() -> None:
     template_root = files("coriolis_operator").joinpath("templates")
     upstream_coriolis = template_root.joinpath("coriolis.conf.j2").read_text()
     derived_coriolis = template_root.joinpath("kubernetes/coriolis.conf.j2").read_text()
@@ -204,7 +227,9 @@ def test_kubernetes_templates_have_only_the_approved_plaintext_delta() -> None:
             "ssl = True\n"
             "ssl_ca_file = {{ coriolis_config_dir }}/ssl/ca/coriolis-ca.crt\n",
             "ssl = False\n",
-        ).replace("cafile = {{ coriolis_config_dir }}/ssl/ca/coriolis-ca.crt\n", "")
+        )
+        .replace("cafile = {{ coriolis_config_dir }}/ssl/ca/coriolis-ca.crt\n", "")
+        .replace(UPSTREAM_PROVIDER_TEMPLATE_BLOCK, KUBERNETES_PROVIDER_TEMPLATE_BLOCK)
     )
     assert derived_wsgi == (
         upstream_wsgi.replace(
@@ -333,6 +358,11 @@ def test_sensitive_render_has_frozen_providers_and_fixed_values() -> None:
         content.index(module) for module in PROVIDER_MODULES
     )
     assert all(content.count(module) == 1 for module in PROVIDER_MODULES)
+    provider_block = content.split("\n\ncaching =", maxsplit=1)[0].rsplit(
+        "\n\n", maxsplit=1
+    )[1]
+    assert provider_block == EXPECTED_PROVIDER_BLOCK
+    assert "\n\n" not in provider_block
     for fixed_line in (
         "messaging_transport_url = rabbit://openstack:RABBIT_SENTINEL_41e9@rabbitmq.synthetic.test:5672/",
         "debug = True",
