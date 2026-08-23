@@ -42,6 +42,8 @@ from coriolis_operator.reconcile import (
     appliance_resource_name,
     blocked_conditions,
     bootstrap_running_conditions,
+    build_api_deployment,
+    build_api_service,
     build_common_bootstrap_config_map,
     build_common_bootstrap_job,
     build_coriolis_config_map,
@@ -1518,9 +1520,9 @@ def test_build_status_reports_accepted_api_only_slice() -> None:
                 "True",
                 "Reconciled",
                 "The foundational appliance resources, dependency Services, MariaDB, "
-                "RabbitMQ, Memcached, and Keystone resources, and controller state "
-                "marker were reconciled in Kubernetes; runtime readiness is not "
-                "implemented yet.",
+                "RabbitMQ, Memcached, Keystone, Coriolis-common bootstrap, Coriolis "
+                "API, and controller state marker were reconciled in Kubernetes; "
+                "runtime readiness is not implemented yet.",
             ),
             condition(
                 "Ready",
@@ -1647,6 +1649,9 @@ def test_reconcile_appliance_server_side_applies_state_and_returns_status() -> N
         call.read_namespaced_service(name="example-memcached", namespace="operators"),
         call.read_namespaced_service(name="example-mariadb", namespace="operators"),
         call.read_namespaced_service(name="example-keystone", namespace="operators"),
+        call.read_namespaced_service(
+            name="example-coriolis-api", namespace="operators"
+        ),
         call.read_namespaced_persistent_volume_claim(
             name="example-mariadb-data", namespace="operators"
         ),
@@ -1699,6 +1704,7 @@ def test_reconcile_appliance_server_side_applies_state_and_returns_status() -> N
         call.create_namespaced_config_map(namespace="operators", body=ANY),
         call.create_namespaced_secret(namespace="operators", body=ANY),
         call.create_namespaced_config_map(namespace="operators", body=ANY),
+        call.create_namespaced_service(namespace="operators", body=ANY),
         call.create_namespaced_config_map(namespace="operators", body=ANY),
     ]
     assert status["observedGeneration"] == 7
@@ -3496,7 +3502,7 @@ def test_dependency_services_read_and_create_in_order() -> None:
     assert read_names == [
         appliance_resource_name("example", component)
         for component, _ in DEPENDENCY_SERVICES
-    ]
+    ] + ["example-coriolis-api"]
     created_names = [
         call.kwargs["body"]["metadata"]["name"]
         for call in api.create_namespaced_service.call_args_list
@@ -3504,7 +3510,7 @@ def test_dependency_services_read_and_create_in_order() -> None:
     assert created_names == [
         appliance_resource_name("example", component)
         for component, _ in DEPENDENCY_SERVICES
-    ]
+    ] + ["example-coriolis-api"]
     assert api.method_calls[-1] == call.create_namespaced_config_map(
         namespace="operators", body=ANY
     )
@@ -3514,7 +3520,11 @@ def test_managed_dependency_services_use_guarded_ssa_and_restore_content_type() 
     api = make_core_api()
     api.api_client.default_headers["Content-Type"] = "application/json"
     api.read_namespaced_service.side_effect = [
-        _managed_dependency_service(component) for component, _ in DEPENDENCY_SERVICES
+        *[
+            _managed_dependency_service(component)
+            for component, _ in DEPENDENCY_SERVICES
+        ],
+        _api_exception(404),
     ]
 
     def patch_service(**_: object) -> None:
@@ -3552,6 +3562,7 @@ def test_dependency_service_collision_has_no_writes_after_all_service_reads() ->
     api.read_namespaced_service.side_effect = [
         collided,
         *[_api_exception(404) for _ in DEPENDENCY_SERVICES[1:]],
+        _api_exception(404),
     ]
 
     status = reconcile_appliance(
@@ -3560,7 +3571,7 @@ def test_dependency_service_collision_has_no_writes_after_all_service_reads() ->
         core_api=api,
     )
 
-    assert api.read_namespaced_service.call_count == len(DEPENDENCY_SERVICES)
+    assert api.read_namespaced_service.call_count == len(DEPENDENCY_SERVICES) + 1
     assert status["conditions"][2]["reason"] == "ResourceCollision"
     assert "operators/example-rabbitmq" in status["conditions"][2]["message"]
     assert not [
@@ -3577,6 +3588,7 @@ def test_dependency_service_read_error_and_missing_version_retry() -> None:
     missing_version_api.read_namespaced_service.side_effect = [
         _managed_dependency_service("rabbitmq", resource_version=None),
         *[_api_exception(404) for _ in DEPENDENCY_SERVICES[1:]],
+        _api_exception(404),
     ]
 
     for api in (read_error_api, missing_version_api):
@@ -3603,8 +3615,11 @@ def test_dependency_service_apply_failure_prevents_marker_write(operation: str) 
     api = make_core_api()
     if operation == "patch":
         api.read_namespaced_service.side_effect = [
-            _managed_dependency_service(component)
-            for component, _ in DEPENDENCY_SERVICES
+            *[
+                _managed_dependency_service(component)
+                for component, _ in DEPENDENCY_SERVICES
+            ],
+            _api_exception(404),
         ]
         api.patch_namespaced_service.side_effect = [
             None,
@@ -3779,6 +3794,7 @@ def test_mariadb_reads_and_writes_follow_the_frozen_cross_api_order() -> None:
         ("read", "service", "example-memcached"),
         ("read", "service", "example-mariadb"),
         ("read", "service", "example-keystone"),
+        ("read", "service", "example-coriolis-api"),
         ("read", "pvc", "example-mariadb-data"),
         ("read", "configmap", "example-mariadb-config"),
         ("read", "secret", "example-mariadb-config-secret"),
@@ -3793,6 +3809,7 @@ def test_mariadb_reads_and_writes_follow_the_frozen_cross_api_order() -> None:
         ("read", "configmap", "example-keystone-config"),
         ("read", "secret", "example-keystone-config-secret"),
         ("read", "deployment", "example-keystone"),
+        ("read", "deployment", "example-coriolis-api"),
         ("read", "configmap", "example-common-bootstrap-v2"),
     ]
     assert [event for event in events if event[0] == "write"] == [
@@ -3819,6 +3836,8 @@ def test_mariadb_reads_and_writes_follow_the_frozen_cross_api_order() -> None:
         ("write", "secret", "example-keystone-config-secret"),
         ("write", "deployment", "example-keystone"),
         ("write", "configmap", "example-common-bootstrap-v2"),
+        ("write", "service", "example-coriolis-api"),
+        ("write", "deployment", "example-coriolis-api"),
         ("write", "configmap", "example-operator-state"),
     ]
     assert status["acceptedVersion"] == "2603.4"
@@ -4539,6 +4558,7 @@ def test_keystone_reads_all_resources_before_the_first_write() -> None:
         "example-memcached",
         "example-mariadb",
         "example-keystone",
+        "example-coriolis-api",
         "example-mariadb-data",
         "example-mariadb-config",
         "example-mariadb-config-secret",
@@ -4553,6 +4573,7 @@ def test_keystone_reads_all_resources_before_the_first_write() -> None:
         "example-keystone-config",
         "example-keystone-config-secret",
         "example-keystone",
+        "example-coriolis-api",
         "example-common-bootstrap-v2",
     ]
     assert reads.index("example-keystone-database-credentials") > reads.index(
@@ -4689,6 +4710,8 @@ def test_keystone_retained_creation_precedes_mariadb_and_marker_is_last() -> Non
         "example-keystone-config-secret",
         "example-keystone",
         "example-common-bootstrap-v2",
+        "example-coriolis-api",
+        "example-coriolis-api",
         "example-operator-state",
     ]
 
@@ -5154,6 +5177,216 @@ def test_bootstrap_succeeded_writes_marker_last_without_job_write() -> None:
     assert statuses["Ready"]["status"] == "False"
     assert statuses["Ready"]["reason"] == "RuntimeNotImplemented"
     assert statuses["Degraded"]["status"] == "False"
+
+
+def test_api_resources_are_not_applied_until_bootstrap_succeeds() -> None:
+    core_api = make_core_api()
+    apps_api = make_apps_api()
+    active = succeeded_bootstrap_job()
+    active["status"] = {}
+
+    with pytest.raises(main.ReconcileRetry):
+        reconcile_appliance(
+            spec=valid_spec(),
+            meta=sample_meta(),
+            core_api=core_api,
+            apps_api=apps_api,
+            batch_api=make_batch_api(job=active),
+        )
+
+    created_services = [
+        item.kwargs["body"]["metadata"]["name"]
+        for item in core_api.create_namespaced_service.call_args_list
+    ]
+    created_deployments = [
+        item.kwargs["body"]["metadata"]["name"]
+        for item in apps_api.create_namespaced_deployment.call_args_list
+    ]
+    assert "example-coriolis-api" not in created_services
+    assert "example-coriolis-api" not in created_deployments
+    assert_no_marker_write(core_api)
+
+
+@pytest.mark.parametrize("collision_kind", ["service", "deployment"])
+def test_api_collision_is_mutation_free(collision_kind: str) -> None:
+    core_api = make_core_api()
+    apps_api = make_apps_api()
+    api_service = build_api_service(
+        appliance_name="example",
+        namespace="operators",
+        accepted_version="2603.4",
+        owner=OWNER,
+    )
+    api_deployment = build_api_deployment(
+        appliance_name="example",
+        namespace="operators",
+        accepted_version="2603.4",
+        owner=OWNER,
+    )
+    collided = api_service if collision_kind == "service" else api_deployment
+    collided["metadata"]["labels"]["app.kubernetes.io/managed-by"] = "other"
+
+    def read_service(*, name: str, namespace: str) -> object:
+        assert namespace == "operators"
+        if name == "example-coriolis-api" and collision_kind == "service":
+            return collided
+        raise _api_exception(404)
+
+    def read_deployment(*, name: str, namespace: str) -> object:
+        assert namespace == "operators"
+        if name == "example-coriolis-api" and collision_kind == "deployment":
+            return collided
+        raise _api_exception(404)
+
+    core_api.read_namespaced_service.side_effect = read_service
+    apps_api.read_namespaced_deployment.side_effect = read_deployment
+
+    status = reconcile_appliance(
+        spec=valid_spec(),
+        meta=sample_meta(),
+        core_api=core_api,
+        apps_api=apps_api,
+    )
+
+    assert status["conditions"][2]["reason"] == "ResourceCollision"
+    assert "operators/example-coriolis-api" in status["conditions"][2]["message"]
+    assert api_writes(core_api) == []
+    assert api_writes(apps_api) == []
+
+
+def test_managed_api_resources_use_guarded_ssa() -> None:
+    core_api = make_core_api()
+    apps_api = make_apps_api()
+    service = build_api_service(
+        appliance_name="example",
+        namespace="operators",
+        accepted_version="2603.4",
+        owner=OWNER,
+    )
+    deployment = build_api_deployment(
+        appliance_name="example",
+        namespace="operators",
+        accepted_version="2603.4",
+        owner=OWNER,
+    )
+    service["metadata"]["resourceVersion"] = "31"
+    deployment["metadata"]["resourceVersion"] = "32"
+
+    def read_service(*, name: str, namespace: str) -> object:
+        assert namespace == "operators"
+        if name == "example-coriolis-api":
+            return service
+        raise _api_exception(404)
+
+    def read_deployment(*, name: str, namespace: str) -> object:
+        assert namespace == "operators"
+        if name == "example-coriolis-api":
+            return deployment
+        raise _api_exception(404)
+
+    core_api.read_namespaced_service.side_effect = read_service
+    apps_api.read_namespaced_deployment.side_effect = read_deployment
+    core_api.api_client.default_headers["Content-Type"] = "application/json"
+    apps_api.api_client.default_headers["Content-Type"] = "application/json"
+
+    reconcile_appliance(
+        spec=valid_spec(),
+        meta=sample_meta(),
+        core_api=core_api,
+        apps_api=apps_api,
+    )
+
+    service_call = core_api.patch_namespaced_service.call_args
+    assert service_call.kwargs["name"] == "example-coriolis-api"
+    assert service_call.kwargs["body"]["metadata"]["resourceVersion"] == "31"
+    assert service_call.kwargs["field_manager"] == "coriolis-operator"
+    assert service_call.kwargs["force"] is True
+    deployment_call = apps_api.patch_namespaced_deployment.call_args
+    assert deployment_call.kwargs["name"] == "example-coriolis-api"
+    assert deployment_call.kwargs["body"]["metadata"]["resourceVersion"] == "32"
+    assert deployment_call.kwargs["field_manager"] == "coriolis-operator"
+    assert deployment_call.kwargs["force"] is True
+    assert core_api.api_client.default_headers["Content-Type"] == "application/json"
+    assert apps_api.api_client.default_headers["Content-Type"] == "application/json"
+
+
+@pytest.mark.parametrize("resource_kind", ["service", "deployment"])
+def test_api_apply_failure_is_sanitized_and_skips_marker(
+    resource_kind: str,
+) -> None:
+    core_api = make_core_api()
+    apps_api = make_apps_api()
+
+    def fail_api(*, body: dict, **_: object) -> None:
+        if body["metadata"]["name"] == "example-coriolis-api":
+            raise client.ApiException(status=409, reason="api-apply-sentinel")
+
+    if resource_kind == "service":
+        core_api.create_namespaced_service.side_effect = fail_api
+    else:
+        apps_api.create_namespaced_deployment.side_effect = fail_api
+
+    with pytest.raises(main.ReconcileRetry) as excinfo:
+        reconcile_appliance(
+            spec=valid_spec(),
+            meta=sample_meta(),
+            core_api=core_api,
+            apps_api=apps_api,
+        )
+
+    assert excinfo.value.status["conditions"][2]["reason"] == "ResourceApplyFailed"
+    assert "api-apply-sentinel" not in repr(excinfo.value.status)
+    assert_no_marker_write(core_api)
+
+
+@pytest.mark.parametrize("resource_kind", ["service", "deployment"])
+def test_managed_api_without_resource_version_retries_before_writes(
+    resource_kind: str,
+) -> None:
+    core_api = make_core_api()
+    apps_api = make_apps_api()
+    body = (
+        build_api_service(
+            appliance_name="example",
+            namespace="operators",
+            accepted_version="2603.4",
+            owner=OWNER,
+        )
+        if resource_kind == "service"
+        else build_api_deployment(
+            appliance_name="example",
+            namespace="operators",
+            accepted_version="2603.4",
+            owner=OWNER,
+        )
+    )
+
+    def read_service(*, name: str, namespace: str) -> object:
+        assert namespace == "operators"
+        if name == "example-coriolis-api" and resource_kind == "service":
+            return body
+        raise _api_exception(404)
+
+    def read_deployment(*, name: str, namespace: str) -> object:
+        assert namespace == "operators"
+        if name == "example-coriolis-api" and resource_kind == "deployment":
+            return body
+        raise _api_exception(404)
+
+    core_api.read_namespaced_service.side_effect = read_service
+    apps_api.read_namespaced_deployment.side_effect = read_deployment
+
+    with pytest.raises(main.ReconcileRetry) as excinfo:
+        reconcile_appliance(
+            spec=valid_spec(),
+            meta=sample_meta(),
+            core_api=core_api,
+            apps_api=apps_api,
+        )
+
+    assert excinfo.value.status["conditions"][2]["reason"] == "ResourceApplyFailed"
+    assert api_writes(core_api) == []
+    assert api_writes(apps_api) == []
 
 
 def test_bootstrap_terminal_failed_is_stable_degraded_without_marker() -> None:

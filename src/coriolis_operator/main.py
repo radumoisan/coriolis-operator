@@ -44,6 +44,7 @@ from coriolis_operator.reconcile import (
     collision_conditions,
     invalid_runtime_configuration_conditions,
     kubernetes_coriolis_render_inputs,
+    preflight_api_resources,
     preflight_common_bootstrap_resources,
     preflight_foundational_resources,
     preflight_keystone_resources,
@@ -358,6 +359,7 @@ def reconcile_appliance(
             (component, appliance_resource_name(name, component))
             for component, _ in DEPENDENCY_SERVICES
         )
+        coriolis_api_name = appliance_resource_name(name, "coriolis-api")
         mariadb_data_pvc_name = appliance_resource_name(name, "mariadb-data")
         mariadb_config_map_name = appliance_resource_name(name, "mariadb-config")
         mariadb_config_secret_name = appliance_resource_name(
@@ -453,6 +455,14 @@ def reconcile_appliance(
             ),
         )
         for component, service_name in dependency_service_names
+    )
+    coriolis_api_service_existing = _read_or_absent(
+        api.read_namespaced_service,
+        name=coriolis_api_name,
+        namespace=namespace,
+        generation=generation,
+        accepted_version=accepted_version,
+        status=status,
     )
     mariadb_data_pvc_existing = _read_or_absent(
         api.read_namespaced_persistent_volume_claim,
@@ -561,6 +571,14 @@ def reconcile_appliance(
     keystone_deployment_existing = _read_or_absent(
         workloads_api.read_namespaced_deployment,
         name=keystone_deployment_name,
+        namespace=namespace,
+        generation=generation,
+        accepted_version=accepted_version,
+        status=status,
+    )
+    coriolis_api_deployment_existing = _read_or_absent(
+        workloads_api.read_namespaced_deployment,
+        name=coriolis_api_name,
         namespace=namespace,
         generation=generation,
         accepted_version=accepted_version,
@@ -929,6 +947,43 @@ def reconcile_appliance(
             prior_conditions=_prior_conditions(status),
         )
 
+    try:
+        api_preflight = preflight_api_resources(
+            appliance_name=name,
+            namespace=namespace,
+            accepted_version=requested_version,
+            owner=owner,
+            api_service=coriolis_api_service_existing,
+            api_deployment=coriolis_api_deployment_existing,
+        )
+    except ReconcileRetry:
+        raise
+    except Exception:
+        raise _retry_status(
+            generation, accepted_version, status, "ResourceApplyFailed"
+        ) from None
+    if OwnedClassification.COLLISION in (
+        api_preflight.service_classification,
+        api_preflight.deployment_classification,
+    ):
+        return build_status(
+            generation,
+            accepted_version=accepted_version,
+            conditions=collision_conditions(namespace, coriolis_api_name),
+            prior_conditions=_prior_conditions(status),
+        )
+    for existing, classification in (
+        (coriolis_api_service_existing, api_preflight.service_classification),
+        (coriolis_api_deployment_existing, api_preflight.deployment_classification),
+    ):
+        if (
+            classification is OwnedClassification.MANAGED
+            and _resource_version(existing) is None
+        ):
+            raise _retry_status(
+                generation, accepted_version, status, "ResourceApplyFailed"
+            )
+
     (
         mariadb_data_pvc_body,
         mariadb_config_map_body,
@@ -948,6 +1003,7 @@ def reconcile_appliance(
         keystone_config_secret_body,
         keystone_deployment_body,
     ) = keystone_preflight.manifests
+    coriolis_api_service_body, coriolis_api_deployment_body = api_preflight.manifests
 
     try:
         config_map_body = build_coriolis_config_map(
@@ -1260,6 +1316,26 @@ def reconcile_appliance(
                 prior_conditions=_prior_conditions(status),
             )
         )
+    _create_or_apply(
+        api,
+        kind="service",
+        body=coriolis_api_service_body,
+        existing=coriolis_api_service_existing,
+        category="ResourceApplyFailed",
+        generation=generation,
+        accepted_version=accepted_version,
+        status=status,
+    )
+    _create_or_apply(
+        workloads_api,
+        kind="deployment",
+        body=coriolis_api_deployment_body,
+        existing=coriolis_api_deployment_existing,
+        category="ResourceApplyFailed",
+        generation=generation,
+        accepted_version=accepted_version,
+        status=status,
+    )
     _create_or_apply(
         api,
         kind="config_map",

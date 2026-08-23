@@ -426,11 +426,32 @@ Release `0.5.20` is accepted for collision recovery. Corrective source `5f52c700
 - RBAC adds only batch/jobs `get`/`create`, with no patch/delete/list/watch/Pod/log or cluster scope. No CRD, application Service/Deployment, Ingress, new Secret, finalizer, or `Ready=True` is added.
 - Full local validation passes at 490 unit tests, Ruff lint/format, mypy, Helm lint/template, container build, and `git diff --check`. No `Ready=True`, application workload, or RBAC change is added.
 
+## :material-book-open-page-variant-outline: Coriolis API Kubernetes Contract
+
+This contract is implemented locally but is not yet committed, released, deployed, or POC-accepted. It is the first application workload after accepted Coriolis-common bootstrap and does not establish full runtime readiness.
+
+### :material-application-edit-outline: Exact Image And Process
+
+- Pin `cr.virtomat.io/virtomat/coriolis/coriolis-api:2603.4@sha256:fce6369f07ef777b5174d3a4f849d4eac914256a20a47ffa0cd1c98081be2705`. Run the direct `/usr/local/bin/coriolis-api --worker-process-count 1 --config-file=/etc/coriolis/coriolis.conf` interface, not the rejected legacy Apache startup path.
+- Exact-image qualification with synthetic generated configuration proved one master and one worker, 30-second stability, exact unauthenticated `/v1` HTTP `401`, the fixed output-suppressed Python exec probe, and normal exit `0` in `0.848s`. No live dependency was required for that negative auth probe; meaningful authenticated API behavior remains coupled to conductor RPC.
+
+### :material-application-edit-outline: Service, Workload, And Security
+
+- Create owner-referenced `<appliance>-coriolis-api` ClusterIP Service TCP `7667` and one-replica `Recreate` Deployment. Select only the label-safe appliance identity and component `coriolis-api`; do not add external exposure or Ingress in this slice.
+- Project all six existing non-sensitive ConfigMap keys plus sensitive `coriolis.conf` together read-only at `/etc/coriolis`, with explicit key/path/mode entries, no `subPath`, no environment credentials, and no Pod-template value/hash leakage. Use ordinary `emptyDir` for `/var/log/coriolis` and `/opt/coriolis/locks`, memory-backed `emptyDir` for `/tmp`, and no PVC, init container, sidecar, or resource API invention.
+- Run UID/GID/fsGroup `42434`, `fsGroupChangePolicy: OnRootMismatch`, no service-account token, no service links, 15-second termination, read-only root, non-root, no privilege escalation, dropped `ALL`, and `RuntimeDefault`. Startup/readiness/liveness all execute the fixed Python localhost `/v1` probe and accept only HTTP `401`; liveness uses a six-failure threshold.
+
+### :material-application-edit-outline: Reconciliation And Validation
+
+- Pre-read the API Service after dependency Services and the API Deployment after existing dependency Deployments, before any mutation. Classify both before building manifests; either collision returns mutation-free `ResourceCollision`. Managed resources require resourceVersion-guarded SSA.
+- Build all API desired state before writes but apply neither resource while common bootstrap is absent, active, or failed. After a succeeded immutable bootstrap Job, apply Service then Deployment, then marker last. Existing Service/Deployment `get`/`create`/`patch` RBAC is sufficient; add no watch/list/delete, child handler, finalizer, or CRD change.
+- Full local validation passes at 503 unit tests, Ruff lint/format, strict mypy, Helm lint/template, container build, and `git diff --check`. `Accepted=True/Reconciled=True` may describe desired-state application, but `Ready=False/RuntimeNotImplemented` remains mandatory until required workloads and internal checks exist.
+
 ## :material-book-open-page-variant-outline: Unresolved Gates
 
 The development stack through MariaDB reconciliation is included in released `0.5.6`. Memcached source `063e438ef416599e9816a2400afcc5a5a7af9aa0` is included in released `0.5.8`; pipeline `4dcpfk` and each expected step succeeded. The completed POC removed its CR, Helm release, namespace, copied registry Secret, retained PVC, and Delete-policy PV; the node remained Ready/schedulable and zero appliances remained cluster-wide. No workload remains deployed after cleanup.
 
-For MariaDB, the development contract fixes workload, retained storage, generated manifests, bootstrap, probes, resource rules, lifecycle, and console logging; preparation, reconciliation, and anonymous-account prevention are published on `origin/dev`, with the fix released as `0.5.6`. Released clean-first-boot single-node `local-path` validation passed for RWO, fsGroup, zero anonymous/test accounts, retained reuse, same-node remount, authenticated probes, persistence, and clean termination without repair. RabbitMQ `0.5.11` accepted POC evidence covers its single-node local-path contract, including clean-storage smoke and normal cleanup. Keystone is released as `0.5.14` with accepted released-artifact POC evidence. CSI/cross-node, backup/restore, HA, RPO/RTO, credential and key rotation, and production storage remain open. Provider private material, optional component credentials, Barbican and other backend Services, and Ingress routes remain deferred.
+For MariaDB, the development contract fixes workload, retained storage, generated manifests, bootstrap, probes, resource rules, lifecycle, and console logging; preparation, reconciliation, and anonymous-account prevention are published on `origin/dev`, with the fix released as `0.5.6`. Released clean-first-boot single-node `local-path` validation passed for RWO, fsGroup, zero anonymous/test accounts, retained reuse, same-node remount, authenticated probes, persistence, and clean termination without repair. RabbitMQ `0.5.11` accepted POC evidence covers its single-node local-path contract, including clean-storage smoke and normal cleanup. Keystone is released as `0.5.14` with accepted released-artifact POC evidence. The local API slice still requires released-artifact POC acceptance; conductor remains absent, so authenticated API/RPC behavior is not claimed. CSI/cross-node, backup/restore, HA, RPO/RTO, credential and key rotation, and production storage remain open. Provider private material, optional component credentials, Barbican and other backend Services, and Ingress routes remain deferred.
 
 ### :material-application-edit-outline: Milestone History
 

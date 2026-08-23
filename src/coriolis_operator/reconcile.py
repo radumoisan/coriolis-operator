@@ -14,6 +14,21 @@ from typing import Any
 
 from kubernetes.utils.quantity import parse_quantity  # type: ignore[import-untyped]
 
+from coriolis_operator.api import (
+    API_ARGS,
+    API_COMMAND,
+    API_CONFIG_DIR,
+    API_CONFIG_MAP_KEYS,
+    API_IMAGE,
+    API_IMAGE_PULL_SECRET_NAME,
+    API_LOCKS_DIR,
+    API_LOG_DIR,
+    API_PORT,
+    API_PROTOCOL_PROBE,
+    API_REPLICAS,
+    API_RUN_AS_ID,
+    API_TERMINATION_GRACE_PERIOD_SECONDS,
+)
 from coriolis_operator.common import (
     BOOTSTRAP_ACTIVE_DEADLINE_SECONDS,
     BOOTSTRAP_BACKOFF_LIMIT,
@@ -133,8 +148,9 @@ NOT_DEGRADED_MESSAGE = "The appliance is not degraded."
 NOT_RECONCILED_MESSAGE = "No resources were applied to Kubernetes."
 RECONCILED_MESSAGE = (
     "The foundational appliance resources, dependency Services, MariaDB, RabbitMQ, "
-    "Memcached, and Keystone resources, and controller state marker were reconciled in "
-    "Kubernetes; runtime readiness is not implemented yet."
+    "Memcached, Keystone, Coriolis-common bootstrap, Coriolis API, and controller "
+    "state marker were reconciled in Kubernetes; runtime readiness is not implemented "
+    "yet."
 )
 UPGRADE_NOT_SUPPORTED_MESSAGE = "The core profile has no supported upgrade path."
 INVALID_RUNTIME_CONFIGURATION_MESSAGE = (
@@ -268,6 +284,15 @@ class MemcachedResourcePreflight:
     """Pure preflight outcome and desired Memcached Deployment body."""
 
     classification: OwnedClassification
+    manifests: tuple[dict[str, Any], ...] = field(repr=False)
+
+
+@dataclass(frozen=True)
+class APIResourcePreflight:
+    """Pure preflight outcome and desired Coriolis API resource bodies."""
+
+    service_classification: OwnedClassification
+    deployment_classification: OwnedClassification
     manifests: tuple[dict[str, Any], ...] = field(repr=False)
 
 
@@ -1064,6 +1089,238 @@ def preflight_memcached_resource(
         classification,
         (
             build_memcached_deployment(
+                appliance_name=appliance_name,
+                namespace=namespace,
+                accepted_version=accepted_version,
+                owner=owner,
+            ),
+        ),
+    )
+
+
+def build_api_service(
+    *,
+    appliance_name: str,
+    namespace: str,
+    accepted_version: str,
+    owner: Mapping[str, Any],
+) -> dict[str, Any]:
+    """Build the internal ClusterIP Service for the Coriolis API."""
+    component = "coriolis-api"
+    metadata = build_resource_metadata(
+        resource_name=appliance_resource_name(appliance_name, component),
+        namespace=namespace,
+        appliance_name=appliance_name,
+        component=component,
+        accepted_version=accepted_version,
+        owner=owner,
+    )
+    return {
+        "apiVersion": "v1",
+        "kind": "Service",
+        "metadata": metadata,
+        "spec": {
+            "type": "ClusterIP",
+            "selector": {
+                "coriolis.cloudbase.it/appliance": appliance_identity(appliance_name),
+                "coriolis.cloudbase.it/component": component,
+            },
+            "ports": [
+                {
+                    "name": "api",
+                    "protocol": "TCP",
+                    "port": API_PORT,
+                    "targetPort": API_PORT,
+                }
+            ],
+        },
+    }
+
+
+def build_api_deployment(
+    *,
+    appliance_name: str,
+    namespace: str,
+    accepted_version: str,
+    owner: Mapping[str, Any],
+) -> dict[str, Any]:
+    """Build the restricted single-replica direct Coriolis API Deployment."""
+    component = "coriolis-api"
+    resource_name = appliance_resource_name(appliance_name, component)
+    metadata = build_resource_metadata(
+        resource_name=resource_name,
+        namespace=namespace,
+        appliance_name=appliance_name,
+        component=component,
+        accepted_version=accepted_version,
+        owner=owner,
+    )
+    selector = {
+        "coriolis.cloudbase.it/appliance": appliance_identity(appliance_name),
+        "coriolis.cloudbase.it/component": component,
+    }
+    probe = {
+        "exec": {"command": ["/usr/bin/python3", "-c", API_PROTOCOL_PROBE]},
+    }
+    volume_mounts = [
+        {"name": "config", "mountPath": API_CONFIG_DIR, "readOnly": True},
+        {"name": "tmp", "mountPath": "/tmp"},
+        {"name": "logs", "mountPath": API_LOG_DIR},
+        {"name": "locks", "mountPath": API_LOCKS_DIR},
+    ]
+    container = {
+        "name": component,
+        "image": API_IMAGE,
+        "command": [API_COMMAND],
+        "args": list(API_ARGS),
+        "ports": [{"name": "api", "containerPort": API_PORT, "protocol": "TCP"}],
+        "securityContext": {
+            "runAsNonRoot": True,
+            "readOnlyRootFilesystem": True,
+            "allowPrivilegeEscalation": False,
+            "capabilities": {"drop": ["ALL"]},
+            "seccompProfile": {"type": "RuntimeDefault"},
+        },
+        "volumeMounts": volume_mounts,
+        "startupProbe": dict(
+            probe,
+            periodSeconds=2,
+            timeoutSeconds=5,
+            failureThreshold=30,
+        ),
+        "readinessProbe": dict(
+            probe,
+            periodSeconds=5,
+            timeoutSeconds=5,
+            failureThreshold=3,
+            successThreshold=1,
+        ),
+        "livenessProbe": dict(
+            probe,
+            periodSeconds=10,
+            timeoutSeconds=5,
+            failureThreshold=6,
+        ),
+    }
+    config_map_name = appliance_resource_name(appliance_name, "coriolis-config")
+    config_secret_name = appliance_resource_name(
+        appliance_name, "coriolis-config-secret"
+    )
+    return {
+        "apiVersion": "apps/v1",
+        "kind": "Deployment",
+        "metadata": metadata,
+        "spec": {
+            "replicas": API_REPLICAS,
+            "strategy": {"type": "Recreate"},
+            "selector": {"matchLabels": selector},
+            "template": {
+                "metadata": {"labels": dict(metadata["labels"])},
+                "spec": {
+                    "imagePullSecrets": [{"name": API_IMAGE_PULL_SECRET_NAME}],
+                    "securityContext": {
+                        "runAsUser": API_RUN_AS_ID,
+                        "runAsGroup": API_RUN_AS_ID,
+                        "fsGroup": API_RUN_AS_ID,
+                        "fsGroupChangePolicy": "OnRootMismatch",
+                    },
+                    "automountServiceAccountToken": False,
+                    "enableServiceLinks": False,
+                    "terminationGracePeriodSeconds": (
+                        API_TERMINATION_GRACE_PERIOD_SECONDS
+                    ),
+                    "containers": [container],
+                    "volumes": [
+                        {
+                            "name": "config",
+                            "projected": {
+                                "sources": [
+                                    {
+                                        "configMap": {
+                                            "name": config_map_name,
+                                            "items": [
+                                                {
+                                                    "key": key,
+                                                    "path": key,
+                                                    "mode": 0o444,
+                                                }
+                                                for key in API_CONFIG_MAP_KEYS
+                                            ],
+                                        }
+                                    },
+                                    {
+                                        "secret": {
+                                            "name": config_secret_name,
+                                            "items": [
+                                                {
+                                                    "key": "coriolis.conf",
+                                                    "path": "coriolis.conf",
+                                                    "mode": 0o440,
+                                                }
+                                            ],
+                                        }
+                                    },
+                                ]
+                            },
+                        },
+                        {"name": "tmp", "emptyDir": {"medium": "Memory"}},
+                        {"name": "logs", "emptyDir": {}},
+                        {"name": "locks", "emptyDir": {}},
+                    ],
+                },
+            },
+        },
+    }
+
+
+def preflight_api_resources(
+    *,
+    appliance_name: str,
+    namespace: str,
+    accepted_version: str,
+    owner: Mapping[str, Any],
+    api_service: Any | None,
+    api_deployment: Any | None,
+) -> APIResourcePreflight:
+    """Classify all Coriolis API resources before building desired bodies."""
+    component = "coriolis-api"
+    resource_name = appliance_resource_name(appliance_name, component)
+    service_classification = classify_owned_resource(
+        existing=api_service,
+        resource_name=resource_name,
+        namespace=namespace,
+        appliance_name=appliance_name,
+        component=component,
+        accepted_version=accepted_version,
+        owner=owner,
+    )
+    deployment_classification = classify_owned_resource(
+        existing=api_deployment,
+        resource_name=resource_name,
+        namespace=namespace,
+        appliance_name=appliance_name,
+        component=component,
+        accepted_version=accepted_version,
+        owner=owner,
+    )
+    if OwnedClassification.COLLISION in (
+        service_classification,
+        deployment_classification,
+    ):
+        return APIResourcePreflight(
+            service_classification, deployment_classification, ()
+        )
+    return APIResourcePreflight(
+        service_classification,
+        deployment_classification,
+        (
+            build_api_service(
+                appliance_name=appliance_name,
+                namespace=namespace,
+                accepted_version=accepted_version,
+                owner=owner,
+            ),
+            build_api_deployment(
                 appliance_name=appliance_name,
                 namespace=namespace,
                 accepted_version=accepted_version,
