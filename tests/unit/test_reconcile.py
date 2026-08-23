@@ -2067,6 +2067,59 @@ def test_collision_timer_avoids_churn_then_publishes_recovery(
     assert reconcile.call_count == 2
 
 
+def test_collision_timer_continues_kopf_retry_after_bootstrap_starts(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    collision_status = {
+        "observedGeneration": 7,
+        "conditions": [
+            {"type": "Reconciled", "status": "False", "reason": "ResourceCollision"}
+        ],
+    }
+    bootstrap_running_status = build_status(
+        7,
+        accepted_version=None,
+        conditions=bootstrap_running_conditions(),
+        prior_conditions=collision_status["conditions"],
+    )
+    accepted_status = build_status(
+        7,
+        accepted_version="2603.4",
+        conditions=accepted_conditions(),
+        prior_conditions=bootstrap_running_status["conditions"],
+    )
+    reconcile = MagicMock(
+        side_effect=[main.ReconcileRetry(bootstrap_running_status), accepted_status]
+    )
+    monkeypatch.setattr(main, "reconcile_appliance", reconcile)
+
+    running_patch = MagicMock()
+    with pytest.raises(kopf.TemporaryError):
+        main.retry_resource_collision(
+            valid_spec(), {"name": "example"}, running_patch, collision_status
+        )
+    running_patch.status.update.assert_called_once_with(
+        {"conditions": bootstrap_running_status["conditions"]}
+    )
+
+    accepted_patch = MagicMock()
+    main.retry_resource_collision(
+        valid_spec(),
+        {"name": "example"},
+        accepted_patch,
+        bootstrap_running_status,
+        retry=1,
+    )
+
+    accepted_patch.status.update.assert_called_once_with(
+        {
+            "acceptedVersion": "2603.4",
+            "conditions": accepted_status["conditions"],
+        }
+    )
+    assert reconcile.call_count == 2
+
+
 def test_profile_field_handler_routes_through_reconcile(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

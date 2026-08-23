@@ -2,6 +2,12 @@
 
 Validate the work relevant to each change.
 
+## :material-book-open-page-variant-outline: Release 0.5.19 Retry-Continuation Regression
+
+- Release `0.5.19` is published but its POC is unaccepted: source `c89b57fcd5b2ee160c1a0986be9fedc9edc19ec8`, pipeline `mg04ql`, and CI release `3a2af04270762069f3d50905ad6f4255d699c302`. Persistent collision remained no-churn. Conflict deletion at `14:50:14Z` started timer recovery at `14:50:42Z` (28s), but the subsequent Kopf retry saw `BootstrapRunning` rather than `ResourceCollision` and no-oped.
+- The Job completed at `14:51:42Z` with exit `0` and restarts `0`, and dependencies were healthy, but the CR remained `Reconciled=False/BootstrapRunning` for more than 10 minutes. This is not accepted POC evidence.
+- Local, unpublished coverage adds the regression: the collision call publishes `BootstrapRunning` and raises `kopf.TemporaryError`; a subsequent `retry=1` call with persisted `BootstrapRunning` continues reconciliation and publishes the accepted-status delta. Noncollision `retry=0` remains a no-op. `uv run pytest tests/unit/test_reconcile.py -k 'resource_collision_predicate or collision_timer'` passed: 11 selected tests. Full validation passes at 490 unit tests, Ruff lint/format, mypy, Helm lint/template, container build, and `git diff --check`; release and re-POC remain pending.
+
 ## :material-book-open-page-variant-outline: Local Bounded Collision Recovery Validation
 
 - `uv run pytest tests/unit/test_reconcile.py -k 'resource_collision_predicate or collision_timer or unchanged_computed_status or unchanged_retry_status or handler_updates_patch_status or handler_patches_sanitized_status_before_retry'` passed: 14 selected tests. Coverage includes the exact persisted `Reconciled=False/ResourceCollision` predicate, malformed/noncollision no-ops, timer routing through normal reconciliation, persistent-collision status-churn suppression followed by recovered-status publication, normal and retry unchanged computed-status patch suppression, and existing handler behavior.

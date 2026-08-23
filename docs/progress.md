@@ -2,6 +2,12 @@
 
 This log is append-only. Add a dated entry for meaningful project progress.
 
+## :material-book-open-page-variant-outline: 2026-08-23: Release 0.5.19 POC Unaccepted; Local Retry Correction
+
+Release `0.5.19` was published from source `c89b57fcd5b2ee160c1a0986be9fedc9edc19ec8` by successful pipeline `mg04ql` as CI release `3a2af04270762069f3d50905ad6f4255d699c302`, but its POC is unaccepted. Persistent collision correctly caused no churn. Removing the conflict at `14:50:14Z` triggered timer recovery at `14:50:42Z` (28s); it created resources and raised `TemporaryError` with `BootstrapRunning`. Kopf retried after the status changed, but the timer rechecked only `ResourceCollision` and no-oped. The bootstrap Job still succeeded at `14:51:42Z` with exit `0` and restarts `0`, and dependencies were healthy, while the CR remained `Reconciled=False/BootstrapRunning` for more than 10 minutes.
+
+The local, unpublished correction explicitly accepts the Kopf timer `retry` argument and invokes normal reconciliation for either the original exact collision or `retry > 0`; a noncollision initial timer call remains a no-op. It preserves the 60-second timer, RBAC, status suppression, and scope. Full validation passes at 490 unit tests, Ruff lint/format, mypy, Helm lint/template, container build, and `git diff --check`; release and a re-POC remain pending, and no success is claimed.
+
 ## :material-book-open-page-variant-outline: 2026-08-23: Local Bounded Collision Recovery
 
 Local, unpublished implementation adds a Kopf timer with a 60-second initial delay and 60-second interval. It invokes normal reconciliation only when persisted status contains the exact `Reconciled=False/ResourceCollision` condition, allowing a removed collision to converge without metadata or child watches; malformed and noncollision status are no-ops. Status delivery patches only changed operator-owned computed fields and preserves unrelated status. Full local validation passes at 489 unit tests, Ruff lint/format, mypy, Helm lint/template, container build, and `git diff --check`. No RBAC expansion, CRD change, finalizer, destructive behavior, broad periodic reconciliation, or readiness change is included. Released-artifact POC remains pending.

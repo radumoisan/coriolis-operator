@@ -1,10 +1,10 @@
 # Backlog
 
-## Completed Locally: Bounded Collision Recovery
+## Open: Collision Recovery Retry Continuation
 
-- Add a 60-second initial-delay/60-second interval Kopf timer gated exclusively on persisted `Reconciled=False/ResourceCollision`; malformed and noncollision status must no-op, and eligible calls reuse normal reconciliation.
-- Suppress status patches when operator-owned computed status (`acceptedVersion`, `observedGeneration`, `conditions`) is unchanged, preserving unrelated persisted status fields.
-- Full local validation passes at 489 unit tests, Ruff lint/format, mypy, Helm lint/template, container build, and `git diff --check`; focused coverage includes the predicate, timer routing/no-op behavior, persistent-collision no-churn and recovery publication, normal and retry status suppression, and existing handler behavior. No child watches, child list/watch/delete RBAC, CRD changes, finalizers, destructive operations, broad periodic reconciliation, or readiness changes are included. Publication, deployment, and released-artifact POC remain pending.
+- Release `0.5.19` was published from `c89b57fcd5b2ee160c1a0986be9fedc9edc19ec8` by successful pipeline `mg04ql` as `3a2af04270762069f3d50905ad6f4255d699c302`, but its POC is unaccepted. Persistent collision was correctly no-churn. After conflict deletion at `14:50:14Z`, timer recovery began at `14:50:42Z` (28s), created the bootstrap resources, and raised `TemporaryError` with `BootstrapRunning`; the framework retry no-oped because status was no longer `ResourceCollision`.
+- The bootstrap Job subsequently succeeded at `14:51:42Z` with exit `0` and restarts `0`, and dependencies were healthy, but the CR remained `Reconciled=False/BootstrapRunning` for more than 10 minutes.
+- Local, unpublished correction accepts Kopf `retry` and invokes normal reconciliation only for an exact persisted collision or `retry > 0`. It preserves the 60-second timer, noncollision `retry=0` no-op, status suppression, and no RBAC/watch/CRD/finalizer/destructive/readiness changes. Full validation passes at 490 unit tests, Ruff lint/format, mypy, Helm lint/template, container build, and `git diff --check`; publication and re-POC are pending.
 
 ## Completed Locally: Bootstrap and Controller Skeleton
 
