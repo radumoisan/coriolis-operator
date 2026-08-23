@@ -1,5 +1,11 @@
 # Backlog
 
+## Completed Locally: Bounded Collision Recovery
+
+- Add a 60-second initial-delay/60-second interval Kopf timer gated exclusively on persisted `Reconciled=False/ResourceCollision`; malformed and noncollision status must no-op, and eligible calls reuse normal reconciliation.
+- Suppress status patches when operator-owned computed status (`acceptedVersion`, `observedGeneration`, `conditions`) is unchanged, preserving unrelated persisted status fields.
+- Full local validation passes at 489 unit tests, Ruff lint/format, mypy, Helm lint/template, container build, and `git diff --check`; focused coverage includes the predicate, timer routing/no-op behavior, persistent-collision no-churn and recovery publication, normal and retry status suppression, and existing handler behavior. No child watches, child list/watch/delete RBAC, CRD changes, finalizers, destructive operations, broad periodic reconciliation, or readiness changes are included. Publication, deployment, and released-artifact POC remain pending.
+
 ## Completed Locally: Bootstrap and Controller Skeleton
 
 - Create the Python 3.12, uv, and Kopf project skeleton.

@@ -2,6 +2,10 @@
 
 This log is append-only. Add a dated entry for meaningful project progress.
 
+## :material-book-open-page-variant-outline: 2026-08-23: Local Bounded Collision Recovery
+
+Local, unpublished implementation adds a Kopf timer with a 60-second initial delay and 60-second interval. It invokes normal reconciliation only when persisted status contains the exact `Reconciled=False/ResourceCollision` condition, allowing a removed collision to converge without metadata or child watches; malformed and noncollision status are no-ops. Status delivery patches only changed operator-owned computed fields and preserves unrelated status. Full local validation passes at 489 unit tests, Ruff lint/format, mypy, Helm lint/template, container build, and `git diff --check`. No RBAC expansion, CRD change, finalizer, destructive behavior, broad periodic reconciliation, or readiness change is included. Released-artifact POC remains pending.
+
 ## 2026-08-20: Documentation and Tracking Baseline
 
 Created the project documentation and tracking baseline before implementation of the bootstrap/controller skeleton. Recorded the initial namespace-scoped, non-destructive controller contract and pending operational decisions.

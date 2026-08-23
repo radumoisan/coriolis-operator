@@ -1929,7 +1929,142 @@ def test_handler_updates_patch_status_and_returns_none(
         meta={"name": "example"},
         status={"conditions": []},
     )
-    patch.status.update.assert_called_once_with(reconciled_status)
+    patch.status.update.assert_called_once_with({"observedGeneration": 7})
+
+
+def test_handler_does_not_patch_unchanged_computed_status(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    status = {"observedGeneration": 7, "conditions": [], "external": "preserved"}
+    monkeypatch.setattr(
+        main, "reconcile_appliance", MagicMock(return_value=dict(status))
+    )
+    patch = MagicMock()
+
+    main._handle_reconcile(valid_spec(), {"name": "example"}, patch, status)
+
+    patch.status.update.assert_not_called()
+
+
+def test_handler_does_not_patch_unchanged_retry_status(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    status = {"observedGeneration": 7, "conditions": [], "external": "preserved"}
+    monkeypatch.setattr(
+        main,
+        "reconcile_appliance",
+        MagicMock(side_effect=main.ReconcileRetry(dict(status))),
+    )
+    patch = MagicMock()
+
+    with pytest.raises(kopf.TemporaryError):
+        main._handle_reconcile(valid_spec(), {"name": "example"}, patch, status)
+
+    patch.status.update.assert_not_called()
+
+
+def test_resource_collision_predicate_requires_exact_reconciled_condition() -> None:
+    assert main._has_resource_collision(
+        {
+            "conditions": [
+                {
+                    "type": "Reconciled",
+                    "status": "False",
+                    "reason": "ResourceCollision",
+                }
+            ]
+        }
+    )
+
+
+@pytest.mark.parametrize(
+    "status",
+    [
+        None,
+        {},
+        {"conditions": "invalid"},
+        {"conditions": [{}]},
+        {
+            "conditions": [
+                {"type": "Reconciled", "status": "True", "reason": "ResourceCollision"}
+            ]
+        },
+        {"conditions": [{"type": "Reconciled", "status": "False", "reason": "Other"}]},
+    ],
+)
+def test_resource_collision_predicate_rejects_malformed_or_noncollision_status(
+    status: object,
+) -> None:
+    candidate = status if isinstance(status, dict) else None
+    assert not main._has_resource_collision(candidate)
+
+
+def test_collision_timer_noops_without_stable_collision(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    handled = MagicMock()
+    monkeypatch.setattr(main, "_handle_reconcile", handled)
+
+    main.retry_resource_collision(
+        valid_spec(), {"name": "example"}, MagicMock(), {"conditions": []}
+    )
+
+    handled.assert_not_called()
+
+
+def test_collision_timer_routes_stable_collision_through_reconcile(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    handled = MagicMock()
+    status = {
+        "conditions": [
+            {"type": "Reconciled", "status": "False", "reason": "ResourceCollision"}
+        ]
+    }
+    monkeypatch.setattr(main, "_handle_reconcile", handled)
+    patch = MagicMock()
+
+    main.retry_resource_collision(valid_spec(), {"name": "example"}, patch, status)
+
+    handled.assert_called_once_with(valid_spec(), {"name": "example"}, patch, status)
+
+
+def test_collision_timer_avoids_churn_then_publishes_recovery(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    collision_status = {
+        "observedGeneration": 7,
+        "conditions": [
+            {"type": "Reconciled", "status": "False", "reason": "ResourceCollision"}
+        ],
+    }
+    recovered_status = {
+        "observedGeneration": 7,
+        "acceptedVersion": "2603.4",
+        "conditions": [
+            {"type": "Reconciled", "status": "True", "reason": "Reconciled"}
+        ],
+    }
+    reconcile = MagicMock(side_effect=[collision_status, recovered_status])
+    monkeypatch.setattr(main, "reconcile_appliance", reconcile)
+
+    unchanged_patch = MagicMock()
+    main.retry_resource_collision(
+        valid_spec(), {"name": "example"}, unchanged_patch, collision_status
+    )
+    unchanged_patch.status.update.assert_not_called()
+
+    recovered_patch = MagicMock()
+    main.retry_resource_collision(
+        valid_spec(), {"name": "example"}, recovered_patch, collision_status
+    )
+    recovered_patch.status.update.assert_called_once_with(
+        {
+            "acceptedVersion": "2603.4",
+            "conditions": recovered_status["conditions"],
+        }
+    )
+    assert reconcile.call_count == 2
 
 
 def test_profile_field_handler_routes_through_reconcile(

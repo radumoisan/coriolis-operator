@@ -2,6 +2,11 @@
 
 Validate the work relevant to each change.
 
+## :material-book-open-page-variant-outline: Local Bounded Collision Recovery Validation
+
+- `uv run pytest tests/unit/test_reconcile.py -k 'resource_collision_predicate or collision_timer or unchanged_computed_status or unchanged_retry_status or handler_updates_patch_status or handler_patches_sanitized_status_before_retry'` passed: 14 selected tests. Coverage includes the exact persisted `Reconciled=False/ResourceCollision` predicate, malformed/noncollision no-ops, timer routing through normal reconciliation, persistent-collision status-churn suppression followed by recovered-status publication, normal and retry unchanged computed-status patch suppression, and existing handler behavior.
+- Full local validation passes at 489 unit tests, Ruff lint/format, mypy, Helm lint/template, container build, and `git diff --check`. The implementation is unpublished and undeployed. It adds only a 60-second initial-delay/60-second interval collision-gated timer; it adds no RBAC, CRD, watch, finalizer, destructive behavior, broad periodic reconciliation, or readiness change. Released-artifact POC validation remains pending.
+
 ## :material-book-open-page-variant-outline: Released RabbitMQ Validation And POC
 
 - Source `6a5a2b589c0dbfc2f5734f5863f9f8591c5f8c2d` passed successful Default pipeline `qhvqt1` (13:59:46-14:01:07 UTC) and released `0.5.10` at CI commit `c48fd79622a8e760591333bf1ab6a0aa25d2f9d3`. Its isolated clean bootstrap/authenticated-AMQP POC was not accepted: three sequential readiness diagnostics at period `5s`/timeout `5s` caused 37 timeout failures and Endpoint flapping despite zero restarts.

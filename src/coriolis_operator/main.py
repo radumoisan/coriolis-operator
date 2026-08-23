@@ -85,6 +85,35 @@ def _prior_conditions(status: Mapping[str, Any] | None) -> object:
     return status.get("conditions")
 
 
+def _has_resource_collision(status: Mapping[str, Any] | None) -> bool:
+    """Return whether status is the stable collision result eligible for retry."""
+    if not isinstance(status, Mapping):
+        return False
+    conditions = status.get("conditions")
+    if not isinstance(conditions, list):
+        return False
+    return any(
+        isinstance(condition, Mapping)
+        and condition.get("type") == "Reconciled"
+        and condition.get("status") == "False"
+        and condition.get("reason") == "ResourceCollision"
+        for condition in conditions
+    )
+
+
+def _changed_computed_status(
+    computed_status: Mapping[str, Any], status: Mapping[str, Any] | None
+) -> dict[str, Any]:
+    """Return only changed operator-owned status fields without touching others."""
+    prior_status = status if isinstance(status, Mapping) else {}
+    return {
+        key: value
+        for key, value in computed_status.items()
+        if key in {"acceptedVersion", "observedGeneration", "conditions"}
+        and prior_status.get(key) != value
+    }
+
+
 def _reject(
     generation: int,
     *,
@@ -1259,11 +1288,15 @@ def _handle_reconcile(
     try:
         reconciled_status = reconcile_appliance(spec=spec, meta=meta, status=status)
     except ReconcileRetry as exc:
-        patch.status.update(exc.status)
+        changed_status = _changed_computed_status(exc.status, status)
+        if changed_status:
+            patch.status.update(changed_status)
         raise kopf.TemporaryError(
             "Kubernetes resource reconciliation will be retried.", delay=10
         ) from None
-    patch.status.update(reconciled_status)
+    changed_status = _changed_computed_status(reconciled_status, status)
+    if changed_status:
+        patch.status.update(changed_status)
 
 
 @kopf.on.create(GROUP, VERSION, PLURAL)
@@ -1336,6 +1369,19 @@ def update_appliance_resources(
 ) -> None:
     """Reconcile requested appliance resource changes."""
     _handle_reconcile(spec, meta, patch, status, **kwargs)
+
+
+@kopf.timer(GROUP, VERSION, PLURAL, initial_delay=60, interval=60)
+def retry_resource_collision(
+    spec: Mapping[str, Any],
+    meta: Mapping[str, Any],
+    patch: kopf.Patch,
+    status: Mapping[str, Any] | None = None,
+    **kwargs: Any,
+) -> None:
+    """Retry only stable collisions, so removed conflicts converge without a watch."""
+    if _has_resource_collision(status):
+        _handle_reconcile(spec, meta, patch, status, **kwargs)
 
 
 def main() -> None:
