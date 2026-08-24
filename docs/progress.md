@@ -2,7 +2,17 @@
 
 This log is append-only. Add a dated entry for meaningful project progress.
 
-## :material-book-open-page-variant-outline: 2026-08-24: Local Scheduler Controller Slice
+## :material-book-open-page-variant-outline: 2026-08-24: Coriolis Scheduler 0.5.26 Released And POC Accepted
+
+Implementation source `d4805eabc42a2106ad66300e31791e05dc294702` passed 540 unit tests plus the complete local gate and was published by CIXpress Default pipeline `02mop6` (17:07:04Z-17:08:25Z; top-level and all expected steps `SUCCEEDED`) as CI commit `de1da0f8a1272d9500f81d872951c3c20e414b8f`, tag/chart/app/operator `0.5.26`. The shared Argo Application automatically resolved `0.5.26` and remained `Synced/Healthy` with operator `1/1` and zero restarts.
+
+The isolated POC ran in namespace/Application `coriolis-scheduler-validation-20260824`. The initial disposable Application project `coriolis` was rejected by destination policy before workloads or a CR existed; switching only the disposable Application to established project `default` produced `Synced/Healthy`. An ownerless zero-replica scheduler Deployment and its Kubernetes-owned zero-replica ReplicaSet stayed exact at 0/65/130 seconds while CR UID `91219b31-...`, generation/observed `1`, held stable `ResourceCollision`; there were no operator-created runtime resources, retained writes, or marker. Deleting only the collision at `17:37:33Z` auto-recovered without CR or operator changes; bootstrap succeeded at `17:39:53Z`, and scheduler became available at `17:40:03Z`.
+
+The live one-replica `Recreate` scheduler Deployment matched the exact `2603.4` digest and frozen security/configuration contract with no Service, ports, probes, locks, PVC, init container, or resources. Fixed-output scheduler diagnostics and expected empty-worker `NoWorkerServiceError` passed repeatedly. Normal scheduler Pod deletion replaced UID `80431bc1-...` with `a897a2ae-...` in 28 seconds at the same imageID and zero restarts. Normal RabbitMQ Pod deletion recovered in 38 seconds while scheduler and conductor identities remained stable; scheduler RPC reconverged and remained stable.
+
+Normal CR delete/recreate changed UID `91219b31-...` to `cd348d77-...`, preserved five retained ownerless state Secrets and both Bound PVCs exactly with no writes, recreated ephemeral owners under the new UID, converged in 75 seconds, and passed scheduler RPC again. Final conditions remained `Accepted=True`, `Reconciled=True`, `Degraded=False`, `Ready=False/RuntimeNotImplemented`, `Progressing=False/RuntimeNotImplemented`, and `Upgradeable=False`. Normal cleanup removed CR-owned resources in 38 seconds, Application in 12 seconds, namespace in 69 seconds, and both Delete-policy PVs without force, finalizer changes, or individual retained-resource/PV deletion. Final POC scope is absent; shared `argocd/coriolis` is `0.5.26` `Synced/Healthy`, operator `1/1` zero restarts, no CR, and the node is Ready/schedulable. Transfer-cron remains qualification-only and unimplemented; nonempty scheduling, due-transfer execution, Keystone trust, write workflows, HA, and production storage remain unclaimed.
+
+## :material-book-open-page-variant-outline: 2026-08-24: Pre-Release Local Scheduler Controller Slice (History)
 
 Local source now implements a scheduler-only owner-referenced one-replica `Recreate` Deployment at exact qualified image `cr.virtomat.io/virtomat/coriolis/coriolis-scheduler:2603.4@sha256:45bea9e0bab4cac0fdddee6d3eac52006d12cf7de1e798e2949dd9ebc2a73c41`, using direct `/usr/local/bin/coriolis-scheduler --config-file=/etc/coriolis/coriolis.conf`. The Pod runs as UID/GID `42434` with hardened read-only root, read-only projected `/etc/coriolis`, and writable `/tmp` and `/var/log/coriolis`; it has no locks mount, Service, ports, probes, PVC, or resources.
 
@@ -12,7 +22,7 @@ Post-review validator hardening rejects declared application-image ports, volume
 
 This is local, uncommitted, unpublished implementation evidence, not a released artifact or Kubernetes POC. It makes no claim about live Deployment behavior, Pod recovery, garbage collection, or released acceptance. The next checkpoint is review and explicit authorization to commit/publish, followed by an isolated released-artifact scheduler POC. Transfer-cron remains qualification-only and unimplemented, and follows only after that milestone unless priorities change.
 
-## :material-book-open-page-variant-outline: 2026-08-24: Local Scheduler And Transfer-Cron Runtime Qualification
+## :material-book-open-page-variant-outline: 2026-08-24: Scheduler And Transfer-Cron OCI Qualification Checkpoint (History)
 
 Local scheduler and transfer-cron runtime qualification is accepted; this remains qualification-only evidence, not a published, released, or POC slice. The scheduler now also has the separate local controller implementation recorded above, while transfer-cron has no Kubernetes manifest. The tracked validator now qualifies the exact `2603.4` scheduler image `sha256:45bea9e...a73c41` and transfer-cron image `sha256:3a44d3b...2b3ea9c` through their exact direct commands under `/usr/local/bin/<binary> --config-file=/etc/coriolis/coriolis.conf`; source metadata is root/empty user, linux/amd64, and no ports, volumes, or healthcheck. Both run as numeric UID/GID `42434` with read-only root, dropped `ALL`, no-new-privileges, read-only generated `/etc/coriolis`, writable only `/tmp` and `/var/log/coriolis`, on a private internal network with no host ports, no Service/listener, and no locks mount.
 
