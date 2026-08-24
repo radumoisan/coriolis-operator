@@ -62,6 +62,10 @@ Exact immutable manifest digests for the `2603.4` application images under `regi
 | coriolis-web-proxy | `649a4fa9ceb91effdd0f3d782e7ac593d2e099ac93ffe8d1c8b6629eba6be762` |
 | coriolis-worker | `ff30999d6e43709411f197b1b6b80dbce1d7e5498a27f869df93a061626ab2c9` |
 
+### :material-application-edit-outline: Scheduler And Transfer-Cron Runtime Qualification
+
+Qualification-only, as of 2026-08-24: the tracked validator qualifies the exact `2603.4` scheduler image `sha256:45bea9e...a73c41` and transfer-cron image `sha256:3a44d3b...2b3ea9c` under their exact direct commands; both run as numeric UID/GID `42434` with read-only root, dropped `ALL`, no-new-privileges, read-only generated `/etc/coriolis`, writable only `/tmp` and `/var/log/coriolis`, on a private internal network with no host ports and no Service/listener. Post-review hardening rejects declared image ports/volumes/healthchecks and unexpected runtime mount/tmpfs targets; the strengthened rerun passed 85 stages with 0 failures and `SUMMARY runtime passed 305.963`, including complete cleanup. The scheduler now has separate local, uncommitted controller implementation evidence, but neither that implementation nor this OCI qualification is published, released, live, or POC evidence. Transfer-cron remains unimplemented with no Kubernetes manifest. It does not change the frozen digest table above.
+
 ## :material-book-open-page-variant-outline: Kolla And Support Images (`2023.1-ubuntu-jammy`)
 
 Exact immutable manifest digests for support images at tag `2023.1-ubuntu-jammy`:

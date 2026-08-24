@@ -141,6 +141,19 @@ from coriolis_operator.rabbitmq import (
     RabbitMQSettings,
     render_rabbitmq_config,
 )
+from coriolis_operator.scheduler import (
+    SCHEDULER_ARGS,
+    SCHEDULER_COMMAND,
+    SCHEDULER_COMPONENT,
+    SCHEDULER_CONFIG_DIR,
+    SCHEDULER_CONFIG_MAP_KEYS,
+    SCHEDULER_IMAGE,
+    SCHEDULER_IMAGE_PULL_SECRET_NAME,
+    SCHEDULER_LOG_DIR,
+    SCHEDULER_REPLICAS,
+    SCHEDULER_RUN_AS_ID,
+    SCHEDULER_TERMINATION_GRACE_PERIOD_SECONDS,
+)
 
 STATE_CONFIG_MAP_SUFFIX = "-operator-state"
 CONFIG_MAP_NAME_MAX_LENGTH = 253
@@ -162,7 +175,8 @@ NOT_RECONCILED_MESSAGE = "No resources were applied to Kubernetes."
 RECONCILED_MESSAGE = (
     "The foundational appliance resources, dependency Services, MariaDB, RabbitMQ, "
     "Memcached, Keystone, Coriolis-common bootstrap, Coriolis API, Coriolis "
-    "conductor, and controller state marker were reconciled in Kubernetes; runtime "
+    "conductor, Coriolis scheduler, and controller state marker were reconciled in "
+    "Kubernetes; runtime "
     "readiness is not implemented yet."
 )
 UPGRADE_NOT_SUPPORTED_MESSAGE = "The core profile has no supported upgrade path."
@@ -312,6 +326,14 @@ class APIResourcePreflight:
 @dataclass(frozen=True)
 class ConductorResourcePreflight:
     """Pure preflight outcome and desired Coriolis conductor Deployment body."""
+
+    classification: OwnedClassification
+    manifests: tuple[dict[str, Any], ...] = field(repr=False)
+
+
+@dataclass(frozen=True)
+class SchedulerResourcePreflight:
+    """Pure preflight outcome and desired Coriolis scheduler Deployment body."""
 
     classification: OwnedClassification
     manifests: tuple[dict[str, Any], ...] = field(repr=False)
@@ -1497,6 +1519,155 @@ def preflight_conductor_resource(
         classification,
         (
             build_conductor_deployment(
+                appliance_name=appliance_name,
+                namespace=namespace,
+                accepted_version=accepted_version,
+                owner=owner,
+            ),
+        ),
+    )
+
+
+def build_scheduler_deployment(
+    *,
+    appliance_name: str,
+    namespace: str,
+    accepted_version: str,
+    owner: Mapping[str, Any],
+) -> dict[str, Any]:
+    """Build the restricted single-replica direct Coriolis scheduler Deployment."""
+    component = SCHEDULER_COMPONENT
+    resource_name = appliance_resource_name(appliance_name, component)
+    metadata = build_resource_metadata(
+        resource_name=resource_name,
+        namespace=namespace,
+        appliance_name=appliance_name,
+        component=component,
+        accepted_version=accepted_version,
+        owner=owner,
+    )
+    selector = {
+        "coriolis.cloudbase.it/appliance": appliance_identity(appliance_name),
+        "coriolis.cloudbase.it/component": component,
+    }
+    config_map_name = appliance_resource_name(appliance_name, "coriolis-config")
+    config_secret_name = appliance_resource_name(
+        appliance_name, "coriolis-config-secret"
+    )
+    container = {
+        "name": component,
+        "image": SCHEDULER_IMAGE,
+        "command": [SCHEDULER_COMMAND],
+        "args": list(SCHEDULER_ARGS),
+        "env": [
+            {"name": "HOME", "value": "/tmp"},
+            {"name": "PYTHONDONTWRITEBYTECODE", "value": "1"},
+        ],
+        "securityContext": {
+            "runAsNonRoot": True,
+            "readOnlyRootFilesystem": True,
+            "allowPrivilegeEscalation": False,
+            "capabilities": {"drop": ["ALL"]},
+            "seccompProfile": {"type": "RuntimeDefault"},
+        },
+        "volumeMounts": [
+            {"name": "config", "mountPath": SCHEDULER_CONFIG_DIR, "readOnly": True},
+            {"name": "tmp", "mountPath": "/tmp"},
+            {"name": "logs", "mountPath": SCHEDULER_LOG_DIR},
+        ],
+    }
+    return {
+        "apiVersion": "apps/v1",
+        "kind": "Deployment",
+        "metadata": metadata,
+        "spec": {
+            "replicas": SCHEDULER_REPLICAS,
+            "strategy": {"type": "Recreate"},
+            "selector": {"matchLabels": selector},
+            "template": {
+                "metadata": {"labels": dict(metadata["labels"])},
+                "spec": {
+                    "imagePullSecrets": [{"name": SCHEDULER_IMAGE_PULL_SECRET_NAME}],
+                    "securityContext": {
+                        "runAsUser": SCHEDULER_RUN_AS_ID,
+                        "runAsGroup": SCHEDULER_RUN_AS_ID,
+                        "fsGroup": SCHEDULER_RUN_AS_ID,
+                        "fsGroupChangePolicy": "OnRootMismatch",
+                    },
+                    "automountServiceAccountToken": False,
+                    "enableServiceLinks": False,
+                    "terminationGracePeriodSeconds": (
+                        SCHEDULER_TERMINATION_GRACE_PERIOD_SECONDS
+                    ),
+                    "containers": [container],
+                    "volumes": [
+                        {
+                            "name": "config",
+                            "projected": {
+                                "sources": [
+                                    {
+                                        "configMap": {
+                                            "name": config_map_name,
+                                            "items": [
+                                                {
+                                                    "key": key,
+                                                    "path": key,
+                                                    "mode": 0o444,
+                                                }
+                                                for key in SCHEDULER_CONFIG_MAP_KEYS
+                                            ],
+                                        }
+                                    },
+                                    {
+                                        "secret": {
+                                            "name": config_secret_name,
+                                            "items": [
+                                                {
+                                                    "key": "coriolis.conf",
+                                                    "path": "coriolis.conf",
+                                                    "mode": 0o440,
+                                                }
+                                            ],
+                                        }
+                                    },
+                                ]
+                            },
+                        },
+                        {"name": "tmp", "emptyDir": {"medium": "Memory"}},
+                        {"name": "logs", "emptyDir": {}},
+                    ],
+                },
+            },
+        },
+    }
+
+
+def preflight_scheduler_resource(
+    *,
+    appliance_name: str,
+    namespace: str,
+    accepted_version: str,
+    owner: Mapping[str, Any],
+    scheduler_deployment: Any | None,
+) -> SchedulerResourcePreflight:
+    """Classify the scheduler before building its desired Deployment."""
+    component = SCHEDULER_COMPONENT
+    resource_name = appliance_resource_name(appliance_name, component)
+    classification = classify_owned_resource(
+        existing=scheduler_deployment,
+        resource_name=resource_name,
+        namespace=namespace,
+        appliance_name=appliance_name,
+        component=component,
+        accepted_version=accepted_version,
+        owner=owner,
+    )
+    if classification is OwnedClassification.COLLISION:
+        return SchedulerResourcePreflight(classification, ())
+    return SchedulerResourcePreflight(
+        classification,
+        (
+            build_scheduler_deployment(
                 appliance_name=appliance_name,
                 namespace=namespace,
                 accepted_version=accepted_version,

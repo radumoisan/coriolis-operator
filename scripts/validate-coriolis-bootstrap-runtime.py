@@ -38,19 +38,25 @@ Evidence produced:
   6. A disposable exact-digest RabbitMQ and Memcached support pair closes the
      healthy-dependency gap, reusing the operator renderers and direct
      source-proven commands, and is fully cleaned up.
-  7. The pinned conductor runs as the real long-running workload (direct
-     `coriolis-conductor --config-file=/etc/coriolis/coriolis.conf`, entrypoint
-     bypassed) and the exact API binary runs on the same internal network with
-     the generated config. Container configuration is inspected to assert the
-     direct command, exact image, UID/GID, read-only root, cap-drop, and
-     no-new-privileges, internal network, readonly config mount plus writable
-     isolated /tmp, /var/log/coriolis and /opt/coriolis/locks, and no host
-     port. The API's unauthenticated `/v1` gate must return 401, then an
-     authenticated secret-aware verifier proves the API->RabbitMQ RPC->conductor
-     ->MariaDB path for `/v1/{project_id}/endpoints` without emitting any
-     sensitive value. The conductor must remain running over a bounded stability
-     interval, exit cleanly on SIGTERM/`docker stop`, restart and serve RPC
-     again, and recover RPC after a RabbitMQ restart without being recreated.
+7. The pinned conductor runs as the real long-running workload (direct
+      `coriolis-conductor --config-file=/etc/coriolis/coriolis.conf`, entrypoint
+      bypassed) and the exact API binary runs on the same internal network with
+      the generated config. The pinned scheduler and transfer-cron binaries also
+      run as long-running workloads with the same direct-command, hardened,
+      private-network contract and no host ports or locks mounts. Container
+      configuration is inspected to assert the direct command, exact image,
+      UID/GID, read-only root, cap-drop, and no-new-privileges, internal
+      network, readonly config mount plus writable isolated tmpfs, and no host
+      port. The API's unauthenticated `/v1` gate must return 401, then an
+      authenticated secret-aware verifier proves the API->RabbitMQ RPC->conductor
+      ->MariaDB path for `/v1/{project_id}/endpoints` without emitting any
+      sensitive value. An admin-context messaging probe proves the scheduler RPC
+      (including its read of the empty bootstrap MariaDB raising the expected
+      `NoWorkerServiceError`) and the transfer-cron RPC over RabbitMQ. The
+      conductor, scheduler, and transfer-cron must remain running over a bounded
+      stability interval, exit cleanly on SIGTERM/`docker stop`, restart and
+      serve RPC again, and recover RPC after a RabbitMQ restart without being
+      recreated.
 
 This script must never print credentials, DSNs, tokens, headers, bodies, raw
 sensitive logs, or process environments. It prints sanitized PASS/FAIL stage
@@ -146,8 +152,18 @@ KEYSTONE_IMAGE = (
     "cr.virtomat.io/virtomat/coriolis/keystone:2023.1-ubuntu-jammy"
     "@sha256:7c57962762f5e6fdb1a109097e8f3e2e5f6218ad9c09f10a585adb67ed245cf0"
 )
+SCHEDULER_IMAGE = (
+    "cr.virtomat.io/virtomat/coriolis/coriolis-scheduler:2603.4"
+    "@sha256:45bea9e0bab4cac0fdddee6d3eac52006d12cf7de1e798e2949dd9ebc2a73c41"
+)
+TRANSFER_CRON_IMAGE = (
+    "cr.virtomat.io/virtomat/coriolis/coriolis-transfer-cron:2603.4"
+    "@sha256:3a44d3b40ba92dff9217b8e7d6a7ca3e7a202efa2641c771ce9b2a3552b3ea9c"
+)
 
 CONDUCTOR_RUN_AS_ID = 42434
+SCHEDULER_RUN_AS_ID = 42434
+TRANSFER_CRON_RUN_AS_ID = 42434
 KEYSTONE_ID = "42425"
 KOLLA_GROUP = "42400"
 CORIOLIS_SCHEMA_TABLES = ("migrate_version", "endpoint", "service", "region")
@@ -155,12 +171,27 @@ CORIOLIS_SCHEMA_TABLES = ("migrate_version", "endpoint", "service", "region")
 API_ALIAS = "coriolis-api"
 API_VERSION_TAG = "2603.4"
 STABILITY_INTERVAL = 20.0
+# coriolis.cmd.conductor defaults to the host logical CPU worker count, so the
+# conductor's clean SIGTERM shutdown needs a longer grace window than the
+# single-worker scheduler and transfer-cron workloads.
+CONDUCTOR_STOP_TIMEOUT = 30
 
 CONDUCTOR_ENTRYPOINT = "/entrypoint.sh"
 CONDUCTOR_COMMAND = (
     "/usr/local/bin/coriolis-conductor",
     "--config-file=/etc/coriolis/coriolis.conf",
 )
+SCHEDULER_ENTRYPOINT = "/entrypoint.sh"
+SCHEDULER_COMMAND = (
+    "/usr/local/bin/coriolis-scheduler",
+    "--config-file=/etc/coriolis/coriolis.conf",
+)
+TRANSFER_CRON_ENTRYPOINT = "/entrypoint.sh"
+TRANSFER_CRON_COMMAND = (
+    "/usr/local/bin/coriolis-transfer-cron",
+    "--config-file=/etc/coriolis/coriolis.conf",
+)
+MESSAGING_PROBE_FILENAME = "coriolis_messaging_probe.py"
 CONDUCTOR_IMPORTS = (
     "coriolis.cmd.conductor",
     "pymysql",
@@ -328,6 +359,18 @@ class Resources:
     @property
     def conductor_main(self) -> str:
         return f"{PREFIX}-{self.token}-conductor"
+
+    @property
+    def scheduler_main(self) -> str:
+        return f"{PREFIX}-{self.token}-scheduler"
+
+    @property
+    def transfer_cron_main(self) -> str:
+        return f"{PREFIX}-{self.token}-transfer-cron"
+
+    @property
+    def messaging_probe(self) -> str:
+        return f"{PREFIX}-{self.token}-messaging-probe"
 
     @property
     def api_main(self) -> str:
@@ -536,6 +579,46 @@ except Exception:
     fail()
 """
 
+# Authenticated Coriolis admin-context RPC probe over the generated config
+# only. It calls the scheduler diagnostics, then the scheduler's
+# `get_workers_for_specs` and requires the expected `NoWorkerServiceError`
+# (proving the scheduler read the empty bootstrap MariaDB), then the
+# transfer-cron diagnostics (proving that workload's RPC server started after
+# its post-fork conductor schedule load completed against the empty DB). It
+# emits only fixed success/failure markers: never exceptions, diagnostics
+# data, context, config, environment, or credentials.
+
+CORIOLIS_MESSAGING_PROBE = """import sys
+from oslo_config import cfg
+
+def fail():
+    print('CORIOLIS_MESSAGING_FAIL')
+    sys.exit(1)
+
+try:
+    from coriolis import exception
+    from coriolis.context import get_admin_context
+    from coriolis.scheduler.rpc.client import SchedulerClient
+    from coriolis.transfer_cron.rpc.client import TransferCronClient
+
+    cfg.CONF([], project='coriolis',
+             default_config_files=['/etc/coriolis/coriolis.conf'])
+    ctxt = get_admin_context()
+    scheduler = SchedulerClient()
+    scheduler.get_diagnostics(ctxt)
+    try:
+        scheduler.get_workers_for_specs(ctxt)
+    except exception.NoWorkerServiceError:
+        pass
+    else:
+        fail()
+    transfer_cron = TransferCronClient()
+    transfer_cron.get_diagnostics(ctxt)
+    print('coriolis-messaging-ok')
+except Exception:
+    fail()
+"""
+
 
 def create_evidence_files(
     repository_root: Path, mariadb_hostname: str = "mariadb"
@@ -642,6 +725,7 @@ def create_evidence_files(
         for name, content in runtime_config.items():
             _write_private(coriolis / name, content)
         _write_private(coriolis / "coriolis_rpc_probe.py", CORIOLIS_RPC_PROBE)
+        _write_private(coriolis / MESSAGING_PROBE_FILENAME, CORIOLIS_MESSAGING_PROBE)
         _write_private(
             coriolis / "bootstrap.py",
             render_bootstrap_script(
@@ -753,31 +837,67 @@ class Validator:
             ),
         )
 
-    def _verify_conductor_image_contract(self) -> None:
+    def _verify_application_image_contract(
+        self, stage: str, image: str, entrypoint: str, command: Sequence[str]
+    ) -> None:
+        """Assert linux/amd64, an empty/root image User, and the exact image
+        Entrypoint and Cmd for a Coriolis application image."""
         try:
-            result = self.runner(
-                self._docker("image", "inspect", CONDUCTOR_IMAGE), self.timeout
-            )
+            result = self.runner(self._docker("image", "inspect", image), self.timeout)
         except (OSError, subprocess.SubprocessError):
-            raise ValidationFailure("conductor-image-contract") from None
+            raise ValidationFailure(stage) from None
         if result.returncode != 0:
-            raise ValidationFailure("conductor-image-contract")
+            raise ValidationFailure(stage)
         try:
             payload = json.loads(result.stdout)
         except json.JSONDecodeError:
-            raise ValidationFailure("conductor-image-contract") from None
+            raise ValidationFailure(stage) from None
         if len(payload) != 1:
-            raise ValidationFailure("conductor-image-contract")
-        config = payload[0]
-        if config.get("Os") != "linux" or config.get("Architecture") != "amd64":
-            raise ValidationFailure("conductor-image-contract")
-        user = config["Config"].get("User")
+            raise ValidationFailure(stage)
+        image_config = payload[0]
+        if (
+            image_config.get("Os") != "linux"
+            or image_config.get("Architecture") != "amd64"
+        ):
+            raise ValidationFailure(stage)
+        config = image_config.get("Config")
+        if not isinstance(config, dict):
+            raise ValidationFailure(stage)
+        user = config.get("User")
         if user not in (None, "", "root", "0"):
-            raise ValidationFailure("conductor-image-contract")
-        if config["Config"].get("Entrypoint") != [CONDUCTOR_ENTRYPOINT]:
-            raise ValidationFailure("conductor-image-contract")
-        if tuple(config["Config"].get("Cmd") or ()) != CONDUCTOR_COMMAND:
-            raise ValidationFailure("conductor-image-contract")
+            raise ValidationFailure(stage)
+        if config.get("Entrypoint") != [entrypoint]:
+            raise ValidationFailure(stage)
+        if tuple(config.get("Cmd") or ()) != tuple(command):
+            raise ValidationFailure(stage)
+        if any(
+            config.get(field) for field in ("ExposedPorts", "Volumes", "Healthcheck")
+        ):
+            raise ValidationFailure(stage)
+
+    def _verify_conductor_image_contract(self) -> None:
+        self._verify_application_image_contract(
+            "conductor-image-contract",
+            CONDUCTOR_IMAGE,
+            CONDUCTOR_ENTRYPOINT,
+            CONDUCTOR_COMMAND,
+        )
+
+    def _verify_scheduler_image_contract(self) -> None:
+        self._verify_application_image_contract(
+            "scheduler-image-contract",
+            SCHEDULER_IMAGE,
+            SCHEDULER_ENTRYPOINT,
+            SCHEDULER_COMMAND,
+        )
+
+    def _verify_transfer_cron_image_contract(self) -> None:
+        self._verify_application_image_contract(
+            "transfer-cron-image-contract",
+            TRANSFER_CRON_IMAGE,
+            TRANSFER_CRON_ENTRYPOINT,
+            TRANSFER_CRON_COMMAND,
+        )
 
     def _conductor_readonly_probe(self) -> None:
         command = (
@@ -1706,6 +1826,137 @@ class Validator:
             self._docker(*self._api_runtime_arguments(self.resources.api_main)),
         )
 
+    def _scheduler_runtime_arguments(self, container_name: str) -> list[str]:
+        return [
+            "run",
+            "--name",
+            container_name,
+            "--detach",
+            "--network",
+            self.resources.network,
+            "--user",
+            f"{SCHEDULER_RUN_AS_ID}:{SCHEDULER_RUN_AS_ID}",
+            "--read-only",
+            "--cap-drop",
+            "ALL",
+            "--security-opt",
+            "no-new-privileges",
+            "--env",
+            "HOME=/tmp",
+            "--env",
+            "PYTHONDONTWRITEBYTECODE=1",
+            "--tmpfs",
+            "/tmp:rw,noexec,nosuid,size=64m",
+            "--tmpfs",
+            f"{API_LOG_DIR}:rw,noexec,nosuid,size=64m,uid={SCHEDULER_RUN_AS_ID},gid={SCHEDULER_RUN_AS_ID},mode=0700",
+            "--mount",
+            f"type=volume,src={self.resources.coriolis_config_volume},dst={API_CONFIG_DIR},readonly",
+            "--entrypoint",
+            SCHEDULER_COMMAND[0],
+            SCHEDULER_IMAGE,
+            *SCHEDULER_COMMAND[1:],
+        ]
+
+    def _transfer_cron_runtime_arguments(self, container_name: str) -> list[str]:
+        return [
+            "run",
+            "--name",
+            container_name,
+            "--detach",
+            "--network",
+            self.resources.network,
+            "--user",
+            f"{TRANSFER_CRON_RUN_AS_ID}:{TRANSFER_CRON_RUN_AS_ID}",
+            "--read-only",
+            "--cap-drop",
+            "ALL",
+            "--security-opt",
+            "no-new-privileges",
+            "--env",
+            "HOME=/tmp",
+            "--env",
+            "PYTHONDONTWRITEBYTECODE=1",
+            "--tmpfs",
+            "/tmp:rw,noexec,nosuid,size=64m",
+            "--tmpfs",
+            f"{API_LOG_DIR}:rw,noexec,nosuid,size=64m,uid={TRANSFER_CRON_RUN_AS_ID},gid={TRANSFER_CRON_RUN_AS_ID},mode=0700",
+            "--mount",
+            f"type=volume,src={self.resources.coriolis_config_volume},dst={API_CONFIG_DIR},readonly",
+            "--entrypoint",
+            TRANSFER_CRON_COMMAND[0],
+            TRANSFER_CRON_IMAGE,
+            *TRANSFER_CRON_COMMAND[1:],
+        ]
+
+    def _start_scheduler(self) -> None:
+        self._checked(
+            "start-scheduler",
+            self._docker(
+                *self._scheduler_runtime_arguments(self.resources.scheduler_main)
+            ),
+        )
+
+    def _start_transfer_cron(self) -> None:
+        self._checked(
+            "start-transfer-cron",
+            self._docker(
+                *self._transfer_cron_runtime_arguments(
+                    self.resources.transfer_cron_main
+                )
+            ),
+        )
+
+    def _messaging_probe_arguments(self, container_name: str) -> list[str]:
+        return [
+            "run",
+            "--rm",
+            "--name",
+            container_name,
+            "--network",
+            self.resources.network,
+            "--user",
+            f"{CONDUCTOR_RUN_AS_ID}:{CONDUCTOR_RUN_AS_ID}",
+            "--read-only",
+            "--cap-drop",
+            "ALL",
+            "--security-opt",
+            "no-new-privileges",
+            "--workdir",
+            "/tmp",
+            "--env",
+            "HOME=/tmp",
+            "--env",
+            "PYTHONDONTWRITEBYTECODE=1",
+            "--tmpfs",
+            "/tmp:rw,noexec,nosuid,size=64m",
+            "--tmpfs",
+            f"{API_LOG_DIR}:rw,noexec,nosuid,size=64m,uid={CONDUCTOR_RUN_AS_ID},gid={CONDUCTOR_RUN_AS_ID},mode=0700",
+            "--mount",
+            f"type=volume,src={self.resources.coriolis_config_volume},dst={API_CONFIG_DIR},readonly",
+            "--entrypoint",
+            "/bin/sh",
+            CONDUCTOR_IMAGE,
+            "-c",
+            f"set -eu; python3 {API_CONFIG_DIR}/{MESSAGING_PROBE_FILENAME}",
+        ]
+
+    def _poll_messaging_probe(self, stage: str) -> None:
+        deadline = self.clock() + self.timeout
+        while self.clock() < deadline:
+            try:
+                result = self.runner(
+                    self._docker(
+                        *self._messaging_probe_arguments(self.resources.messaging_probe)
+                    ),
+                    self.timeout,
+                )
+            except (OSError, subprocess.SubprocessError):
+                raise ValidationFailure(stage) from None
+            if result.returncode == 0:
+                return
+            self.sleeper(POLL_INTERVAL)
+        raise ValidationFailure(stage)
+
     def _container_running(self, name: str) -> bool:
         try:
             result = self.runner(
@@ -1723,6 +1974,9 @@ class Validator:
         image: str,
         entrypoint: str,
         command: Sequence[str],
+        *,
+        run_as_id: int,
+        writable_paths: Sequence[str],
     ) -> None:
         try:
             result = self.runner(self._docker("inspect", name), self.timeout)
@@ -1741,7 +1995,7 @@ class Validator:
         host_config = container["HostConfig"]
         if config.get("Image") != image:
             raise ValidationFailure(stage)
-        if config.get("User") != f"{CONDUCTOR_RUN_AS_ID}:{CONDUCTOR_RUN_AS_ID}":
+        if config.get("User") != f"{run_as_id}:{run_as_id}":
             raise ValidationFailure(stage)
         if tuple(config.get("Entrypoint") or ()) != (entrypoint,):
             raise ValidationFailure(stage)
@@ -1758,15 +2012,14 @@ class Validator:
         if host_config.get("PortBindings"):
             raise ValidationFailure(stage)
         mounts = host_config.get("Mounts") or []
-        if not any(
-            m.get("Target") == API_CONFIG_DIR and m.get("ReadOnly") is True
-            for m in mounts
+        if len(mounts) != 1 or (
+            mounts[0].get("Target") != API_CONFIG_DIR
+            or mounts[0].get("ReadOnly") is not True
         ):
             raise ValidationFailure(stage)
         tmpfs = host_config.get("Tmpfs") or {}
-        for path in ("/tmp", API_LOG_DIR, API_LOCKS_DIR):
-            if path not in tmpfs:
-                raise ValidationFailure(stage)
+        if set(tmpfs) != set(writable_paths):
+            raise ValidationFailure(stage)
 
     def _gate_api_unauthenticated(self) -> None:
         deadline = self.clock() + self.timeout
@@ -1796,38 +2049,72 @@ class Validator:
             stage, self.resources.rpc_probe, "coriolis_rpc_probe.py"
         )
 
-    def _conductor_stability(self) -> None:
+    def _workload_stability(self) -> None:
+        workloads = (
+            (self.resources.conductor_main, "conductor-stability"),
+            (self.resources.scheduler_main, "scheduler-stability"),
+            (self.resources.transfer_cron_main, "transfer-cron-stability"),
+        )
         deadline = self.clock() + STABILITY_INTERVAL
         while self.clock() < deadline:
-            if not self._container_running(self.resources.conductor_main):
-                raise ValidationFailure("conductor-stability")
+            for name, stage in workloads:
+                if not self._container_running(name):
+                    raise ValidationFailure(stage)
             self.sleeper(POLL_INTERVAL)
-        if not self._container_running(self.resources.conductor_main):
-            raise ValidationFailure("conductor-stability")
+        for name, stage in workloads:
+            if not self._container_running(name):
+                raise ValidationFailure(stage)
 
-    def _stop_conductor_graceful(self) -> None:
+    def _stop_workload_graceful(
+        self, stage: str, name: str, stop_timeout_seconds: int
+    ) -> None:
         self._checked(
-            "stop-conductor-graceful",
-            self._docker("stop", "--time", "15", self.resources.conductor_main),
+            stage,
+            self._docker("stop", "--time", str(stop_timeout_seconds), name),
         )
         try:
             result = self.runner(
-                self._docker(
-                    "inspect",
-                    "--format={{.State.ExitCode}}",
-                    self.resources.conductor_main,
-                ),
+                self._docker("inspect", "--format={{.State.ExitCode}}", name),
                 self.timeout,
             )
         except (OSError, subprocess.SubprocessError):
-            raise ValidationFailure("stop-conductor-graceful") from None
+            raise ValidationFailure(stage) from None
         if result.returncode != 0 or result.stdout.strip() != "0":
-            raise ValidationFailure("stop-conductor-graceful")
+            raise ValidationFailure(stage)
+
+    def _stop_conductor_graceful(self) -> None:
+        self._stop_workload_graceful(
+            "stop-conductor-graceful",
+            self.resources.conductor_main,
+            CONDUCTOR_STOP_TIMEOUT,
+        )
+
+    def _stop_scheduler_graceful(self) -> None:
+        self._stop_workload_graceful(
+            "stop-scheduler-graceful", self.resources.scheduler_main, 15
+        )
+
+    def _stop_transfer_cron_graceful(self) -> None:
+        self._stop_workload_graceful(
+            "stop-transfer-cron-graceful", self.resources.transfer_cron_main, 15
+        )
 
     def _start_conductor_again(self) -> None:
         self._checked(
             "start-conductor-again",
             self._docker("start", self.resources.conductor_main),
+        )
+
+    def _start_scheduler_again(self) -> None:
+        self._checked(
+            "start-scheduler-again",
+            self._docker("start", self.resources.scheduler_main),
+        )
+
+    def _start_transfer_cron_again(self) -> None:
+        self._checked(
+            "start-transfer-cron-again",
+            self._docker("start", self.resources.transfer_cron_main),
         )
 
     def _container_id(self, stage: str, name: str) -> str:
@@ -1847,7 +2134,19 @@ class Validator:
         )
 
     def _rabbitmq_recovery_evidence(self) -> None:
-        before = self._container_id("conductor-identity", self.resources.conductor_main)
+        identities = (
+            (self.resources.conductor_main, "conductor-identity"),
+            (self.resources.scheduler_main, "scheduler-identity"),
+            (self.resources.transfer_cron_main, "transfer-cron-identity"),
+        )
+        recreated_stages = {
+            self.resources.conductor_main: "conductor-recreated-on-rabbitmq-restart",
+            self.resources.scheduler_main: "scheduler-recreated-on-rabbitmq-restart",
+            self.resources.transfer_cron_main: (
+                "transfer-cron-recreated-on-rabbitmq-restart"
+            ),
+        }
+        before = {name: self._container_id(stage, name) for name, stage in identities}
         self._stage("restart-rabbitmq", self._restart_rabbitmq)
         self._stage(
             "gate-rabbitmq-protocol-recovery",
@@ -1861,14 +2160,20 @@ class Validator:
             "gate-conductor-rpc-rabbitmq-recovery",
             lambda: self._gate_conductor_rpc("gate-conductor-rpc-rabbitmq-recovery"),
         )
-        if (
-            self._container_id("conductor-identity", self.resources.conductor_main)
-            != before
-        ):
-            raise ValidationFailure("conductor-recreated-on-rabbitmq-restart")
+        self._stage(
+            "gate-messaging-probe-rabbitmq-recovery",
+            lambda: self._poll_messaging_probe(
+                "gate-messaging-probe-rabbitmq-recovery"
+            ),
+        )
+        for name, stage in identities:
+            if self._container_id(stage, name) != before[name]:
+                raise ValidationFailure(recreated_stages[name])
 
     def _runtime_evidence(self) -> None:
         self._stage("start-conductor", self._start_conductor)
+        self._stage("start-scheduler", self._start_scheduler)
+        self._stage("start-transfer-cron", self._start_transfer_cron)
         self._stage("start-api", self._start_api)
         self._stage(
             "inspect-conductor",
@@ -1878,6 +2183,32 @@ class Validator:
                 CONDUCTOR_IMAGE,
                 CONDUCTOR_COMMAND[0],
                 CONDUCTOR_COMMAND[1:],
+                run_as_id=CONDUCTOR_RUN_AS_ID,
+                writable_paths=("/tmp", API_LOG_DIR, API_LOCKS_DIR),
+            ),
+        )
+        self._stage(
+            "inspect-scheduler",
+            lambda: self._inspect_runtime(
+                "inspect-scheduler",
+                self.resources.scheduler_main,
+                SCHEDULER_IMAGE,
+                SCHEDULER_COMMAND[0],
+                SCHEDULER_COMMAND[1:],
+                run_as_id=SCHEDULER_RUN_AS_ID,
+                writable_paths=("/tmp", API_LOG_DIR),
+            ),
+        )
+        self._stage(
+            "inspect-transfer-cron",
+            lambda: self._inspect_runtime(
+                "inspect-transfer-cron",
+                self.resources.transfer_cron_main,
+                TRANSFER_CRON_IMAGE,
+                TRANSFER_CRON_COMMAND[0],
+                TRANSFER_CRON_COMMAND[1:],
+                run_as_id=TRANSFER_CRON_RUN_AS_ID,
+                writable_paths=("/tmp", API_LOG_DIR),
             ),
         )
         self._stage(
@@ -1888,6 +2219,8 @@ class Validator:
                 API_IMAGE,
                 API_COMMAND,
                 API_ARGS,
+                run_as_id=API_RUN_AS_ID,
+                writable_paths=("/tmp", API_LOG_DIR, API_LOCKS_DIR),
             ),
         )
         self._stage("gate-api-unauthenticated", self._gate_api_unauthenticated)
@@ -1895,18 +2228,37 @@ class Validator:
             "gate-conductor-rpc",
             lambda: self._gate_conductor_rpc("gate-conductor-rpc"),
         )
-        self._stage("conductor-stability", self._conductor_stability)
+        self._stage(
+            "gate-messaging-probe",
+            lambda: self._poll_messaging_probe("gate-messaging-probe"),
+        )
+        self._stage("workload-stability", self._workload_stability)
         self._stage(
             "gate-conductor-rpc-after-stability",
             lambda: self._gate_conductor_rpc("gate-conductor-rpc-after-stability"),
         )
-        self._stage("stop-conductor-graceful", self._stop_conductor_graceful)
-        self._stage("start-conductor-again", self._start_conductor_again)
+        self._stage(
+            "gate-messaging-probe-after-stability",
+            lambda: self._poll_messaging_probe("gate-messaging-probe-after-stability"),
+        )
+        self._shutdown_restart_evidence()
         self._stage(
             "gate-conductor-rpc-after-restart",
             lambda: self._gate_conductor_rpc("gate-conductor-rpc-after-restart"),
         )
+        self._stage(
+            "gate-messaging-probe-after-restart",
+            lambda: self._poll_messaging_probe("gate-messaging-probe-after-restart"),
+        )
         self._rabbitmq_recovery_evidence()
+
+    def _shutdown_restart_evidence(self) -> None:
+        self._stage("stop-transfer-cron-graceful", self._stop_transfer_cron_graceful)
+        self._stage("stop-scheduler-graceful", self._stop_scheduler_graceful)
+        self._stage("stop-conductor-graceful", self._stop_conductor_graceful)
+        self._stage("start-conductor-again", self._start_conductor_again)
+        self._stage("start-scheduler-again", self._start_scheduler_again)
+        self._stage("start-transfer-cron-again", self._start_transfer_cron_again)
 
     def _cleanup_resources(self) -> None:
         resources: list[tuple[str, str]] = [
@@ -1926,8 +2278,11 @@ class Validator:
             ("container", self.resources.memcached_main),
             ("container", self.resources.memcached_probe),
             ("container", self.resources.conductor_main),
+            ("container", self.resources.scheduler_main),
+            ("container", self.resources.transfer_cron_main),
             ("container", self.resources.api_main),
             ("container", self.resources.rpc_probe),
+            ("container", self.resources.messaging_probe),
             ("network", self.resources.network),
             ("volume", self.resources.runtime_volume),
             ("volume", self.resources.data_volume),
@@ -2013,6 +2368,8 @@ class Validator:
         for stage, image in (
             ("conductor-image-available", CONDUCTOR_IMAGE),
             ("api-image-available", API_IMAGE),
+            ("scheduler-image-available", SCHEDULER_IMAGE),
+            ("transfer-cron-image-available", TRANSFER_CRON_IMAGE),
             ("mariadb-image-available", MARIADB_IMAGE),
             ("keystone-image-available", KEYSTONE_IMAGE),
             ("rabbitmq-image-available", RABBITMQ_IMAGE),
@@ -2020,11 +2377,15 @@ class Validator:
         ):
             self._stage(
                 stage,
-                lambda image=image: self._checked(
+                lambda stage=stage, image=image: self._checked(
                     stage, self._docker("image", "pull", image)
                 ),
             )
         self._stage("conductor-image-contract", self._verify_conductor_image_contract)
+        self._stage("scheduler-image-contract", self._verify_scheduler_image_contract)
+        self._stage(
+            "transfer-cron-image-contract", self._verify_transfer_cron_image_contract
+        )
         self._stage("conductor-readonly-probe", self._conductor_readonly_probe)
         self._stage("conductor-live-probe-inspect", self._inspect_conductor_live_probe)
         volume_attrs = (
