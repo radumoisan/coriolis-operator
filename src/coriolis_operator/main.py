@@ -53,6 +53,7 @@ from coriolis_operator.reconcile import (
     preflight_memcached_resource,
     preflight_rabbitmq_resources,
     preflight_scheduler_resource,
+    preflight_transfer_cron_resource,
     rejected_conditions,
     retry_conditions,
 )
@@ -364,6 +365,9 @@ def reconcile_appliance(
         coriolis_api_name = appliance_resource_name(name, "coriolis-api")
         conductor_deployment_name = appliance_resource_name(name, "coriolis-conductor")
         scheduler_deployment_name = appliance_resource_name(name, "coriolis-scheduler")
+        transfer_cron_deployment_name = appliance_resource_name(
+            name, "coriolis-transfer-cron"
+        )
         mariadb_data_pvc_name = appliance_resource_name(name, "mariadb-data")
         mariadb_config_map_name = appliance_resource_name(name, "mariadb-config")
         mariadb_config_secret_name = appliance_resource_name(
@@ -599,6 +603,14 @@ def reconcile_appliance(
     scheduler_deployment_existing = _read_or_absent(
         workloads_api.read_namespaced_deployment,
         name=scheduler_deployment_name,
+        namespace=namespace,
+        generation=generation,
+        accepted_version=accepted_version,
+        status=status,
+    )
+    transfer_cron_deployment_existing = _read_or_absent(
+        workloads_api.read_namespaced_deployment,
+        name=transfer_cron_deployment_name,
         namespace=namespace,
         generation=generation,
         accepted_version=accepted_version,
@@ -1022,6 +1034,33 @@ def reconcile_appliance(
         raise _retry_status(generation, accepted_version, status, "ResourceApplyFailed")
 
     try:
+        transfer_cron_preflight = preflight_transfer_cron_resource(
+            appliance_name=name,
+            namespace=namespace,
+            accepted_version=requested_version,
+            owner=owner,
+            transfer_cron_deployment=transfer_cron_deployment_existing,
+        )
+    except ReconcileRetry:
+        raise
+    except Exception:
+        raise _retry_status(
+            generation, accepted_version, status, "ResourceApplyFailed"
+        ) from None
+    if transfer_cron_preflight.classification is OwnedClassification.COLLISION:
+        return build_status(
+            generation,
+            accepted_version=accepted_version,
+            conditions=collision_conditions(namespace, transfer_cron_deployment_name),
+            prior_conditions=_prior_conditions(status),
+        )
+    if (
+        transfer_cron_preflight.classification is OwnedClassification.MANAGED
+        and _resource_version(transfer_cron_deployment_existing) is None
+    ):
+        raise _retry_status(generation, accepted_version, status, "ResourceApplyFailed")
+
+    try:
         api_preflight = preflight_api_resources(
             appliance_name=name,
             namespace=namespace,
@@ -1080,6 +1119,7 @@ def reconcile_appliance(
     coriolis_api_service_body, coriolis_api_deployment_body = api_preflight.manifests
     (conductor_deployment_body,) = conductor_preflight.manifests
     (scheduler_deployment_body,) = scheduler_preflight.manifests
+    (transfer_cron_deployment_body,) = transfer_cron_preflight.manifests
 
     try:
         config_map_body = build_coriolis_config_map(
@@ -1407,6 +1447,16 @@ def reconcile_appliance(
         kind="deployment",
         body=scheduler_deployment_body,
         existing=scheduler_deployment_existing,
+        category="ResourceApplyFailed",
+        generation=generation,
+        accepted_version=accepted_version,
+        status=status,
+    )
+    _create_or_apply(
+        workloads_api,
+        kind="deployment",
+        body=transfer_cron_deployment_body,
+        existing=transfer_cron_deployment_existing,
         category="ResourceApplyFailed",
         generation=generation,
         accepted_version=accepted_version,

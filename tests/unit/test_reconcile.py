@@ -57,6 +57,7 @@ from coriolis_operator.reconcile import (
     build_scheduler_deployment,
     build_state_config_map,
     build_status,
+    build_transfer_cron_deployment,
     classify_existing_marker,
     classify_owned_resource,
     classify_retained_resource,
@@ -1523,8 +1524,9 @@ def test_build_status_reports_accepted_api_only_slice() -> None:
                 "Reconciled",
                 "The foundational appliance resources, dependency Services, MariaDB, "
                 "RabbitMQ, Memcached, Keystone, Coriolis-common bootstrap, Coriolis "
-                "API, Coriolis conductor, Coriolis scheduler, and controller state "
-                "marker were reconciled in Kubernetes; runtime readiness is not "
+                "API, Coriolis conductor, Coriolis scheduler, Coriolis transfer-cron, "
+                "and controller state marker were reconciled in Kubernetes; runtime "
+                "readiness is not "
                 "implemented yet.",
             ),
             condition(
@@ -3815,6 +3817,7 @@ def test_mariadb_reads_and_writes_follow_the_frozen_cross_api_order() -> None:
         ("read", "deployment", "example-coriolis-api"),
         ("read", "deployment", "example-coriolis-conductor"),
         ("read", "deployment", "example-coriolis-scheduler"),
+        ("read", "deployment", "example-coriolis-transfer-cron"),
         ("read", "configmap", "example-common-bootstrap-v2"),
     ]
     assert [event for event in events if event[0] == "write"] == [
@@ -3843,6 +3846,7 @@ def test_mariadb_reads_and_writes_follow_the_frozen_cross_api_order() -> None:
         ("write", "configmap", "example-common-bootstrap-v2"),
         ("write", "deployment", "example-coriolis-conductor"),
         ("write", "deployment", "example-coriolis-scheduler"),
+        ("write", "deployment", "example-coriolis-transfer-cron"),
         ("write", "service", "example-coriolis-api"),
         ("write", "deployment", "example-coriolis-api"),
         ("write", "configmap", "example-operator-state"),
@@ -4583,6 +4587,7 @@ def test_keystone_reads_all_resources_before_the_first_write() -> None:
         "example-coriolis-api",
         "example-coriolis-conductor",
         "example-coriolis-scheduler",
+        "example-coriolis-transfer-cron",
         "example-common-bootstrap-v2",
     ]
     assert reads.index("example-keystone-database-credentials") > reads.index(
@@ -4721,6 +4726,7 @@ def test_keystone_retained_creation_precedes_mariadb_and_marker_is_last() -> Non
         "example-common-bootstrap-v2",
         "example-coriolis-conductor",
         "example-coriolis-scheduler",
+        "example-coriolis-transfer-cron",
         "example-coriolis-api",
         "example-coriolis-api",
         "example-operator-state",
@@ -5634,6 +5640,117 @@ def test_scheduler_apply_failure_is_sanitized_and_skips_api_and_marker() -> None
     assert_no_marker_write(core_api)
 
 
+def test_transfer_cron_collision_is_mutation_free() -> None:
+    core_api = make_core_api()
+    apps_api = make_apps_api()
+    transfer_cron = build_transfer_cron_deployment(
+        appliance_name="example",
+        namespace="operators",
+        accepted_version="2603.4",
+        owner=OWNER,
+    )
+    transfer_cron["metadata"]["labels"]["app.kubernetes.io/managed-by"] = "other"
+
+    def read_deployment(*, name: str, namespace: str) -> object:
+        assert namespace == "operators"
+        if name == "example-coriolis-transfer-cron":
+            return transfer_cron
+        raise _api_exception(404)
+
+    apps_api.read_namespaced_deployment.side_effect = read_deployment
+    status = reconcile_appliance(
+        spec=valid_spec(), meta=sample_meta(), core_api=core_api, apps_api=apps_api
+    )
+
+    assert status["conditions"][2]["reason"] == "ResourceCollision"
+    assert (
+        "operators/example-coriolis-transfer-cron" in status["conditions"][2]["message"]
+    )
+    assert api_writes(core_api) == []
+    assert api_writes(apps_api) == []
+
+
+def test_managed_transfer_cron_without_resource_version_retries_before_writes() -> None:
+    core_api = make_core_api()
+    apps_api = make_apps_api()
+    transfer_cron = build_transfer_cron_deployment(
+        appliance_name="example",
+        namespace="operators",
+        accepted_version="2603.4",
+        owner=OWNER,
+    )
+
+    def read_deployment(*, name: str, namespace: str) -> object:
+        if name == "example-coriolis-transfer-cron":
+            return transfer_cron
+        raise _api_exception(404)
+
+    apps_api.read_namespaced_deployment.side_effect = read_deployment
+    with pytest.raises(main.ReconcileRetry) as excinfo:
+        reconcile_appliance(
+            spec=valid_spec(), meta=sample_meta(), core_api=core_api, apps_api=apps_api
+        )
+
+    assert excinfo.value.status["conditions"][2]["reason"] == "ResourceApplyFailed"
+    assert api_writes(core_api) == []
+    assert api_writes(apps_api) == []
+
+
+def test_managed_transfer_cron_uses_guarded_ssa() -> None:
+    core_api = make_core_api()
+    apps_api = make_apps_api()
+    transfer_cron = build_transfer_cron_deployment(
+        appliance_name="example",
+        namespace="operators",
+        accepted_version="2603.4",
+        owner=OWNER,
+    )
+    transfer_cron["metadata"]["resourceVersion"] = "42"
+
+    def read_deployment(*, name: str, namespace: str) -> object:
+        if name == "example-coriolis-transfer-cron":
+            return transfer_cron
+        raise _api_exception(404)
+
+    apps_api.read_namespaced_deployment.side_effect = read_deployment
+    reconcile_appliance(
+        spec=valid_spec(), meta=sample_meta(), core_api=core_api, apps_api=apps_api
+    )
+
+    transfer_call = apps_api.patch_namespaced_deployment.call_args_list[-1]
+    assert transfer_call.kwargs["name"] == "example-coriolis-transfer-cron"
+    assert transfer_call.kwargs["body"]["metadata"]["resourceVersion"] == "42"
+    assert transfer_call.kwargs["field_manager"] == "coriolis-operator"
+    assert transfer_call.kwargs["force"] is True
+
+
+def test_transfer_cron_apply_failure_is_sanitized_and_skips_api_and_marker() -> None:
+    core_api = make_core_api()
+    apps_api = make_apps_api()
+
+    def fail_transfer_cron(*, body: dict, **_: object) -> None:
+        if body["metadata"]["name"] == "example-coriolis-transfer-cron":
+            raise client.ApiException(status=409, reason="transfer-cron-apply-sentinel")
+
+    apps_api.create_namespaced_deployment.side_effect = fail_transfer_cron
+    with pytest.raises(main.ReconcileRetry) as excinfo:
+        reconcile_appliance(
+            spec=valid_spec(), meta=sample_meta(), core_api=core_api, apps_api=apps_api
+        )
+
+    assert excinfo.value.status["conditions"][2]["reason"] == "ResourceApplyFailed"
+    assert "transfer-cron-apply-sentinel" not in repr(excinfo.value.status)
+    assert "example-coriolis-api" not in [
+        item.kwargs["body"]["metadata"]["name"]
+        for item in core_api.create_namespaced_service.call_args_list
+    ]
+    assert "example-coriolis-api" not in [
+        item.kwargs["body"]["metadata"]["name"]
+        for item in apps_api.create_namespaced_deployment.call_args_list
+    ]
+    assert_no_marker_write(core_api)
+
+
 def test_bootstrap_active_creates_no_conductor() -> None:
     core_api = make_core_api()
     apps_api = make_apps_api()
@@ -5655,6 +5772,7 @@ def test_bootstrap_active_creates_no_conductor() -> None:
     ]
     assert "example-coriolis-conductor" not in created_deployments
     assert "example-coriolis-scheduler" not in created_deployments
+    assert "example-coriolis-transfer-cron" not in created_deployments
     assert_no_marker_write(core_api)
 
 
@@ -5678,6 +5796,7 @@ def test_bootstrap_failed_creates_no_conductor() -> None:
     ]
     assert "example-coriolis-conductor" not in created_deployments
     assert "example-coriolis-scheduler" not in created_deployments
+    assert "example-coriolis-transfer-cron" not in created_deployments
     assert status["conditions"][2]["reason"] == "BootstrapFailed"
     assert status["conditions"][4]["status"] == "True"
     assert_no_marker_write(core_api)
