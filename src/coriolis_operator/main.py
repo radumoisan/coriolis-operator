@@ -47,6 +47,7 @@ from coriolis_operator.reconcile import (
     preflight_api_resources,
     preflight_common_bootstrap_resources,
     preflight_conductor_resource,
+    preflight_deployer_manager_resource,
     preflight_foundational_resources,
     preflight_keystone_resources,
     preflight_mariadb_resources,
@@ -372,6 +373,9 @@ def reconcile_appliance(
         minion_manager_deployment_name = appliance_resource_name(
             name, "coriolis-minion-manager"
         )
+        deployer_manager_deployment_name = appliance_resource_name(
+            name, "coriolis-deployer-manager"
+        )
         mariadb_data_pvc_name = appliance_resource_name(name, "mariadb-data")
         mariadb_config_map_name = appliance_resource_name(name, "mariadb-config")
         mariadb_config_secret_name = appliance_resource_name(
@@ -623,6 +627,14 @@ def reconcile_appliance(
     minion_manager_deployment_existing = _read_or_absent(
         workloads_api.read_namespaced_deployment,
         name=minion_manager_deployment_name,
+        namespace=namespace,
+        generation=generation,
+        accepted_version=accepted_version,
+        status=status,
+    )
+    deployer_manager_deployment_existing = _read_or_absent(
+        workloads_api.read_namespaced_deployment,
+        name=deployer_manager_deployment_name,
         namespace=namespace,
         generation=generation,
         accepted_version=accepted_version,
@@ -1100,6 +1112,35 @@ def reconcile_appliance(
         raise _retry_status(generation, accepted_version, status, "ResourceApplyFailed")
 
     try:
+        deployer_manager_preflight = preflight_deployer_manager_resource(
+            appliance_name=name,
+            namespace=namespace,
+            accepted_version=requested_version,
+            owner=owner,
+            deployer_manager_deployment=deployer_manager_deployment_existing,
+        )
+    except ReconcileRetry:
+        raise
+    except Exception:
+        raise _retry_status(
+            generation, accepted_version, status, "ResourceApplyFailed"
+        ) from None
+    if deployer_manager_preflight.classification is OwnedClassification.COLLISION:
+        return build_status(
+            generation,
+            accepted_version=accepted_version,
+            conditions=collision_conditions(
+                namespace, deployer_manager_deployment_name
+            ),
+            prior_conditions=_prior_conditions(status),
+        )
+    if (
+        deployer_manager_preflight.classification is OwnedClassification.MANAGED
+        and _resource_version(deployer_manager_deployment_existing) is None
+    ):
+        raise _retry_status(generation, accepted_version, status, "ResourceApplyFailed")
+
+    try:
         api_preflight = preflight_api_resources(
             appliance_name=name,
             namespace=namespace,
@@ -1160,6 +1201,7 @@ def reconcile_appliance(
     (scheduler_deployment_body,) = scheduler_preflight.manifests
     (transfer_cron_deployment_body,) = transfer_cron_preflight.manifests
     (minion_manager_deployment_body,) = minion_manager_preflight.manifests
+    (deployer_manager_deployment_body,) = deployer_manager_preflight.manifests
 
     try:
         config_map_body = build_coriolis_config_map(
@@ -1507,6 +1549,16 @@ def reconcile_appliance(
         kind="deployment",
         body=minion_manager_deployment_body,
         existing=minion_manager_deployment_existing,
+        category="ResourceApplyFailed",
+        generation=generation,
+        accepted_version=accepted_version,
+        status=status,
+    )
+    _create_or_apply(
+        workloads_api,
+        kind="deployment",
+        body=deployer_manager_deployment_body,
+        existing=deployer_manager_deployment_existing,
         category="ResourceApplyFailed",
         generation=generation,
         accepted_version=accepted_version,

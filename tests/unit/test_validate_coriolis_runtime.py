@@ -80,6 +80,10 @@ def test_application_constants_match_frozen_facts() -> None:
         "cr.virtomat.io/virtomat/coriolis/coriolis-minion-manager:2603.4"
         "@sha256:1ea016dd967ce249a45cf9937701a45880f3b42f8146a93d1f5eb4f1d84e1fb9"
     )
+    assert runtime.DEPLOYER_MANAGER_IMAGE == (
+        "cr.virtomat.io/virtomat/coriolis/coriolis-deployer-manager:2603.4"
+        "@sha256:a2a7091daf8e172b96fa0b48d19ffad285d7bfaad42fc7e8cd44a688f06f36aa"
+    )
     assert runtime.SCHEDULER_ENTRYPOINT == "/entrypoint.sh"
     assert runtime.TRANSFER_CRON_ENTRYPOINT == "/entrypoint.sh"
     assert runtime.MINION_MANAGER_ENTRYPOINT == "/entrypoint.sh"
@@ -95,15 +99,23 @@ def test_application_constants_match_frozen_facts() -> None:
         "/usr/local/bin/coriolis-minion-manager",
         "--config-file=/etc/coriolis/coriolis.conf",
     )
+    assert (
+        runtime.DEPLOYER_MANAGER_COMMAND == "/usr/local/bin/coriolis-deployer-manager"
+    )
+    assert runtime.DEPLOYER_MANAGER_ARGS == (
+        "--config-file=/etc/coriolis/coriolis.conf",
+    )
+    assert runtime.DEPLOYER_MANAGER_LOG_DIR == "/var/log/coriolis"
     assert runtime.SCHEDULER_RUN_AS_ID == 42434
     assert runtime.TRANSFER_CRON_RUN_AS_ID == 42434
     assert runtime.MINION_MANAGER_RUN_AS_ID == 42434
+    assert runtime.DEPLOYER_MANAGER_RUN_AS_ID == 42434
     assert runtime.MESSAGING_PROBE_FILENAME == "coriolis_messaging_probe.py"
 
 
 def _application_image_payload(
     *,
-    entrypoint: str = runtime.SCHEDULER_ENTRYPOINT,
+    entrypoint: str | None = runtime.SCHEDULER_ENTRYPOINT,
     command: tuple[str, ...] = runtime.SCHEDULER_COMMAND,
     **metadata: object,
 ) -> str:
@@ -114,7 +126,7 @@ def _application_image_payload(
                 "Architecture": "amd64",
                 "Config": {
                     "User": "",
-                    "Entrypoint": [entrypoint],
+                    "Entrypoint": [entrypoint] if entrypoint is not None else None,
                     "Cmd": list(command),
                     **metadata,
                 },
@@ -162,6 +174,26 @@ def test_minion_manager_image_contract_uses_frozen_metadata(tmp_path: Path) -> N
     runtime.Validator(
         repository_root=tmp_path, timeout=1, runner=runner
     )._verify_minion_manager_image_contract()
+
+
+def test_deployer_manager_image_contract_uses_frozen_metadata(tmp_path: Path) -> None:
+    def runner(command: object, timeout: int) -> subprocess.CompletedProcess[str]:
+        return subprocess.CompletedProcess(
+            command,
+            0,
+            _application_image_payload(
+                entrypoint=runtime.DEPLOYER_MANAGER_ENTRYPOINT,
+                command=runtime.DEPLOYER_MANAGER_IMAGE_COMMAND,
+                ExposedPorts=None,
+                Volumes=None,
+                Healthcheck=None,
+            ),
+            "",
+        )
+
+    runtime.Validator(
+        repository_root=tmp_path, timeout=1, runner=runner
+    )._verify_deployer_manager_image_contract()
 
 
 @pytest.mark.parametrize(
@@ -247,6 +279,7 @@ def test_new_workload_resource_names_are_unique() -> None:
         resources.scheduler_main,
         resources.transfer_cron_main,
         resources.minion_manager_main,
+        resources.deployer_manager_main,
         resources.api_main,
         resources.messaging_probe,
         resources.rpc_probe,
@@ -269,6 +302,7 @@ def test_shutdown_restarts_workloads_in_safe_order(
 
     for method in (
         "_stop_minion_manager_graceful",
+        "_stop_deployer_manager_graceful",
         "_stop_transfer_cron_graceful",
         "_stop_scheduler_graceful",
         "_stop_conductor_graceful",
@@ -276,6 +310,7 @@ def test_shutdown_restarts_workloads_in_safe_order(
         "_start_scheduler_again",
         "_start_transfer_cron_again",
         "_start_minion_manager_again",
+        "_start_deployer_manager_again",
     ):
         monkeypatch.setattr(validator, method, lambda: None)
     monkeypatch.setattr(validator, "_stage", record_stage)
@@ -283,6 +318,7 @@ def test_shutdown_restarts_workloads_in_safe_order(
     validator._shutdown_restart_evidence()
 
     assert stages == [
+        "stop-deployer-manager-graceful",
         "stop-minion-manager-graceful",
         "stop-transfer-cron-graceful",
         "stop-scheduler-graceful",
@@ -291,10 +327,11 @@ def test_shutdown_restarts_workloads_in_safe_order(
         "start-scheduler-again",
         "start-transfer-cron-again",
         "start-minion-manager-again",
+        "start-deployer-manager-again",
     ]
 
 
-def test_stop_graceful_timeouts_15_15_15_30_and_requires_exit_zero(
+def test_stop_graceful_timeouts_15_15_15_15_30_and_requires_exit_zero(
     tmp_path: Path,
 ) -> None:
     captured: list[tuple[str, ...]] = []
@@ -309,6 +346,7 @@ def test_stop_graceful_timeouts_15_15_15_30_and_requires_exit_zero(
     validator = runtime.Validator(repository_root=tmp_path, timeout=1, runner=runner)
     validator._stop_transfer_cron_graceful()
     validator._stop_minion_manager_graceful()
+    validator._stop_deployer_manager_graceful()
     validator._stop_scheduler_graceful()
     validator._stop_conductor_graceful()
 
@@ -317,7 +355,7 @@ def test_stop_graceful_timeouts_15_15_15_30_and_requires_exit_zero(
         for command in captured
         if len(command) >= 2 and command[:2] == ("docker", "stop")
     ]
-    assert len(stop_commands) == 4
+    assert len(stop_commands) == 5
     by_name = {
         command[command.index("--time") + 2]: command[command.index("--time") + 1]
         for command in stop_commands
@@ -326,11 +364,12 @@ def test_stop_graceful_timeouts_15_15_15_30_and_requires_exit_zero(
     assert by_name[validator.resources.minion_manager_main] == "15"
     assert by_name[validator.resources.scheduler_main] == "15"
     assert by_name[validator.resources.conductor_main] == "30"
+    assert by_name[validator.resources.deployer_manager_main] == "15"
 
     exit_checks = [
         command for command in captured if "--format={{.State.ExitCode}}" in command
     ]
-    assert len(exit_checks) == 4
+    assert len(exit_checks) == 5
     assert all(
         validator.runner(command, 1).stdout.strip() == "0" for command in exit_checks
     )
@@ -420,6 +459,38 @@ def test_minion_manager_runtime_arguments_harden_no_ports_and_no_locks(
     assert args[args.index("--entrypoint") + 1] == runtime.MINION_MANAGER_COMMAND[0]
     assert args[args.index(runtime.MINION_MANAGER_IMAGE) + 1 :] == list(
         runtime.MINION_MANAGER_COMMAND[1:]
+    )
+
+
+def test_deployer_manager_runtime_arguments_allow_tmp_and_log_writes(
+    tmp_path: Path,
+) -> None:
+    validator = _validator(tmp_path)
+    args = validator._deployer_manager_runtime_arguments("oc-deployer-manager")
+
+    rendered = " ".join(args)
+    assert args[args.index("--user") + 1] == "42434:42434"
+    assert "--detach" in args
+    assert "--read-only" in args
+    assert args[args.index("--cap-drop") + 1] == "ALL"
+    assert "no-new-privileges" in args
+    assert "--network-alias" not in args
+    assert "type=bind" not in rendered
+    assert runtime.API_LOCKS_DIR not in rendered
+    assert "-p" not in args and "--publish" not in args
+    assert (
+        f"type=volume,src={validator.resources.coriolis_config_volume},"
+        f"dst={runtime.DEPLOYER_MANAGER_CONFIG_DIR},readonly"
+    ) in rendered
+    assert args.count("--tmpfs") == 2
+    assert "/tmp:rw,noexec,nosuid,size=64m" in rendered
+    assert (
+        f"{runtime.DEPLOYER_MANAGER_LOG_DIR}:rw,noexec,nosuid,size=64m,"
+        "uid=42434,gid=42434,mode=0700"
+    ) in rendered
+    assert args[args.index("--entrypoint") + 1] == runtime.DEPLOYER_MANAGER_COMMAND
+    assert args[args.index(runtime.DEPLOYER_MANAGER_IMAGE) + 1 :] == list(
+        runtime.DEPLOYER_MANAGER_ARGS
     )
 
 
