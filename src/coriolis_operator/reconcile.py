@@ -121,6 +121,19 @@ from coriolis_operator.memcached import (
     MEMCACHED_RUN_AS_ID,
     MEMCACHED_TERMINATION_GRACE_PERIOD_SECONDS,
 )
+from coriolis_operator.minion_manager import (
+    MINION_MANAGER_ARGS,
+    MINION_MANAGER_COMMAND,
+    MINION_MANAGER_COMPONENT,
+    MINION_MANAGER_CONFIG_DIR,
+    MINION_MANAGER_CONFIG_MAP_KEYS,
+    MINION_MANAGER_IMAGE,
+    MINION_MANAGER_IMAGE_PULL_SECRET_NAME,
+    MINION_MANAGER_LOG_DIR,
+    MINION_MANAGER_REPLICAS,
+    MINION_MANAGER_RUN_AS_ID,
+    MINION_MANAGER_TERMINATION_GRACE_PERIOD_SECONDS,
+)
 from coriolis_operator.rabbitmq import (
     RABBITMQ_CONFIG_DIR,
     RABBITMQ_CONFIG_KEYS,
@@ -188,8 +201,8 @@ NOT_RECONCILED_MESSAGE = "No resources were applied to Kubernetes."
 RECONCILED_MESSAGE = (
     "The foundational appliance resources, dependency Services, MariaDB, RabbitMQ, "
     "Memcached, Keystone, Coriolis-common bootstrap, Coriolis API, Coriolis "
-    "conductor, Coriolis scheduler, Coriolis transfer-cron, and controller state "
-    "marker were reconciled in Kubernetes; runtime "
+    "conductor, Coriolis scheduler, Coriolis transfer-cron, Coriolis minion-manager, "
+    "and controller state marker were reconciled in Kubernetes; runtime "
     "readiness is not implemented yet."
 )
 UPGRADE_NOT_SUPPORTED_MESSAGE = "The core profile has no supported upgrade path."
@@ -355,6 +368,14 @@ class SchedulerResourcePreflight:
 @dataclass(frozen=True)
 class TransferCronResourcePreflight:
     """Pure preflight outcome and desired Coriolis transfer-cron Deployment body."""
+
+    classification: OwnedClassification
+    manifests: tuple[dict[str, Any], ...] = field(repr=False)
+
+
+@dataclass(frozen=True)
+class MinionManagerResourcePreflight:
+    """Pure preflight outcome and desired Coriolis minion-manager Deployment."""
 
     classification: OwnedClassification
     manifests: tuple[dict[str, Any], ...] = field(repr=False)
@@ -1836,6 +1857,159 @@ def preflight_transfer_cron_resource(
         classification,
         (
             build_transfer_cron_deployment(
+                appliance_name=appliance_name,
+                namespace=namespace,
+                accepted_version=accepted_version,
+                owner=owner,
+            ),
+        ),
+    )
+
+
+def build_minion_manager_deployment(
+    *,
+    appliance_name: str,
+    namespace: str,
+    accepted_version: str,
+    owner: Mapping[str, Any],
+) -> dict[str, Any]:
+    """Build the restricted single-replica Coriolis minion-manager Deployment."""
+    component = MINION_MANAGER_COMPONENT
+    resource_name = appliance_resource_name(appliance_name, component)
+    metadata = build_resource_metadata(
+        resource_name=resource_name,
+        namespace=namespace,
+        appliance_name=appliance_name,
+        component=component,
+        accepted_version=accepted_version,
+        owner=owner,
+    )
+    selector = {
+        "coriolis.cloudbase.it/appliance": appliance_identity(appliance_name),
+        "coriolis.cloudbase.it/component": component,
+    }
+    config_map_name = appliance_resource_name(appliance_name, "coriolis-config")
+    config_secret_name = appliance_resource_name(
+        appliance_name, "coriolis-config-secret"
+    )
+    container = {
+        "name": component,
+        "image": MINION_MANAGER_IMAGE,
+        "command": [MINION_MANAGER_COMMAND],
+        "args": list(MINION_MANAGER_ARGS),
+        "env": [
+            {"name": "HOME", "value": "/tmp"},
+            {"name": "PYTHONDONTWRITEBYTECODE", "value": "1"},
+        ],
+        "securityContext": {
+            "runAsNonRoot": True,
+            "readOnlyRootFilesystem": True,
+            "allowPrivilegeEscalation": False,
+            "capabilities": {"drop": ["ALL"]},
+            "seccompProfile": {"type": "RuntimeDefault"},
+        },
+        "volumeMounts": [
+            {
+                "name": "config",
+                "mountPath": MINION_MANAGER_CONFIG_DIR,
+                "readOnly": True,
+            },
+            {"name": "tmp", "mountPath": "/tmp"},
+            {"name": "logs", "mountPath": MINION_MANAGER_LOG_DIR},
+        ],
+    }
+    return {
+        "apiVersion": "apps/v1",
+        "kind": "Deployment",
+        "metadata": metadata,
+        "spec": {
+            "replicas": MINION_MANAGER_REPLICAS,
+            "strategy": {"type": "Recreate"},
+            "selector": {"matchLabels": selector},
+            "template": {
+                "metadata": {"labels": dict(metadata["labels"])},
+                "spec": {
+                    "imagePullSecrets": [
+                        {"name": MINION_MANAGER_IMAGE_PULL_SECRET_NAME}
+                    ],
+                    "securityContext": {
+                        "runAsUser": MINION_MANAGER_RUN_AS_ID,
+                        "runAsGroup": MINION_MANAGER_RUN_AS_ID,
+                        "fsGroup": MINION_MANAGER_RUN_AS_ID,
+                        "fsGroupChangePolicy": "OnRootMismatch",
+                    },
+                    "automountServiceAccountToken": False,
+                    "enableServiceLinks": False,
+                    "terminationGracePeriodSeconds": (
+                        MINION_MANAGER_TERMINATION_GRACE_PERIOD_SECONDS
+                    ),
+                    "containers": [container],
+                    "volumes": [
+                        {
+                            "name": "config",
+                            "projected": {
+                                "sources": [
+                                    {
+                                        "configMap": {
+                                            "name": config_map_name,
+                                            "items": [
+                                                {"key": key, "path": key, "mode": 0o444}
+                                                for key in (
+                                                    MINION_MANAGER_CONFIG_MAP_KEYS
+                                                )
+                                            ],
+                                        }
+                                    },
+                                    {
+                                        "secret": {
+                                            "name": config_secret_name,
+                                            "items": [
+                                                {
+                                                    "key": "coriolis.conf",
+                                                    "path": "coriolis.conf",
+                                                    "mode": 0o440,
+                                                }
+                                            ],
+                                        }
+                                    },
+                                ]
+                            },
+                        },
+                        {"name": "tmp", "emptyDir": {"medium": "Memory"}},
+                        {"name": "logs", "emptyDir": {}},
+                    ],
+                },
+            },
+        },
+    }
+
+
+def preflight_minion_manager_resource(
+    *,
+    appliance_name: str,
+    namespace: str,
+    accepted_version: str,
+    owner: Mapping[str, Any],
+    minion_manager_deployment: Any | None,
+) -> MinionManagerResourcePreflight:
+    """Classify minion-manager before building its desired Deployment."""
+    component = MINION_MANAGER_COMPONENT
+    resource_name = appliance_resource_name(appliance_name, component)
+    classification = classify_owned_resource(
+        existing=minion_manager_deployment,
+        resource_name=resource_name,
+        namespace=namespace,
+        appliance_name=appliance_name,
+        component=component,
+        accepted_version=accepted_version,
+        owner=owner,
+    )
+    if classification is OwnedClassification.COLLISION:
+        return MinionManagerResourcePreflight(classification, ())
+    return MinionManagerResourcePreflight(
+        classification,
+        (
+            build_minion_manager_deployment(
                 appliance_name=appliance_name,
                 namespace=namespace,
                 accepted_version=accepted_version,

@@ -41,9 +41,10 @@ Evidence produced:
 7. The pinned conductor runs as the real long-running workload (direct
       `coriolis-conductor --config-file=/etc/coriolis/coriolis.conf`, entrypoint
       bypassed) and the exact API binary runs on the same internal network with
-      the generated config. The pinned scheduler and transfer-cron binaries also
-      run as long-running workloads with the same direct-command, hardened,
-      private-network contract and no host ports or locks mounts. Container
+      the generated config. The pinned scheduler, transfer-cron, and
+      minion-manager binaries also run as long-running workloads with the same
+      direct-command, hardened, private-network contract and no host ports or
+      locks mounts. Container
       configuration is inspected to assert the direct command, exact image,
       UID/GID, read-only root, cap-drop, and no-new-privileges, internal
       network, readonly config mount plus writable isolated tmpfs, and no host
@@ -52,11 +53,12 @@ Evidence produced:
       ->MariaDB path for `/v1/{project_id}/endpoints` without emitting any
       sensitive value. An admin-context messaging probe proves the scheduler RPC
       (including its read of the empty bootstrap MariaDB raising the expected
-      `NoWorkerServiceError`) and the transfer-cron RPC over RabbitMQ. The
-      conductor, scheduler, and transfer-cron must remain running over a bounded
-      stability interval, exit cleanly on SIGTERM/`docker stop`, restart and
-      serve RPC again, and recover RPC after a RabbitMQ restart without being
-      recreated.
+      `NoWorkerServiceError`), the transfer-cron RPC, and minion-manager
+      diagnostics plus its empty-pool MariaDB read over RabbitMQ. The conductor,
+      scheduler, transfer-cron, and minion-manager must remain running over a
+      bounded stability interval, exit cleanly on SIGTERM/`docker stop`, restart
+      and serve RPC again, and recover RPC after a RabbitMQ restart without
+      being recreated.
 
 This script must never print credentials, DSNs, tokens, headers, bodies, raw
 sensitive logs, or process environments. It prints sanitized PASS/FAIL stage
@@ -160,10 +162,15 @@ TRANSFER_CRON_IMAGE = (
     "cr.virtomat.io/virtomat/coriolis/coriolis-transfer-cron:2603.4"
     "@sha256:3a44d3b40ba92dff9217b8e7d6a7ca3e7a202efa2641c771ce9b2a3552b3ea9c"
 )
+MINION_MANAGER_IMAGE = (
+    "cr.virtomat.io/virtomat/coriolis/coriolis-minion-manager:2603.4"
+    "@sha256:1ea016dd967ce249a45cf9937701a45880f3b42f8146a93d1f5eb4f1d84e1fb9"
+)
 
 CONDUCTOR_RUN_AS_ID = 42434
 SCHEDULER_RUN_AS_ID = 42434
 TRANSFER_CRON_RUN_AS_ID = 42434
+MINION_MANAGER_RUN_AS_ID = 42434
 KEYSTONE_ID = "42425"
 KOLLA_GROUP = "42400"
 CORIOLIS_SCHEMA_TABLES = ("migrate_version", "endpoint", "service", "region")
@@ -173,7 +180,7 @@ API_VERSION_TAG = "2603.4"
 STABILITY_INTERVAL = 20.0
 # coriolis.cmd.conductor defaults to the host logical CPU worker count, so the
 # conductor's clean SIGTERM shutdown needs a longer grace window than the
-# single-worker scheduler and transfer-cron workloads.
+# single-worker scheduler, transfer-cron, and minion-manager workloads.
 CONDUCTOR_STOP_TIMEOUT = 30
 
 CONDUCTOR_ENTRYPOINT = "/entrypoint.sh"
@@ -189,6 +196,11 @@ SCHEDULER_COMMAND = (
 TRANSFER_CRON_ENTRYPOINT = "/entrypoint.sh"
 TRANSFER_CRON_COMMAND = (
     "/usr/local/bin/coriolis-transfer-cron",
+    "--config-file=/etc/coriolis/coriolis.conf",
+)
+MINION_MANAGER_ENTRYPOINT = "/entrypoint.sh"
+MINION_MANAGER_COMMAND = (
+    "/usr/local/bin/coriolis-minion-manager",
     "--config-file=/etc/coriolis/coriolis.conf",
 )
 MESSAGING_PROBE_FILENAME = "coriolis_messaging_probe.py"
@@ -367,6 +379,10 @@ class Resources:
     @property
     def transfer_cron_main(self) -> str:
         return f"{PREFIX}-{self.token}-transfer-cron"
+
+    @property
+    def minion_manager_main(self) -> str:
+        return f"{PREFIX}-{self.token}-minion-manager"
 
     @property
     def messaging_probe(self) -> str:
@@ -584,8 +600,10 @@ except Exception:
 # `get_workers_for_specs` and requires the expected `NoWorkerServiceError`
 # (proving the scheduler read the empty bootstrap MariaDB), then the
 # transfer-cron diagnostics (proving that workload's RPC server started after
-# its post-fork conductor schedule load completed against the empty DB). It
-# emits only fixed success/failure markers: never exceptions, diagnostics
+# its post-fork conductor schedule load completed against the empty DB), then
+# minion-manager diagnostics and an empty-pool read (proving its RPC and direct
+# MariaDB path without invoking refresh, provider, trust, or write operations).
+# It emits only fixed success/failure markers: never exceptions, diagnostics
 # data, context, config, environment, or credentials.
 
 CORIOLIS_MESSAGING_PROBE = """import sys
@@ -598,6 +616,7 @@ def fail():
 try:
     from coriolis import exception
     from coriolis.context import get_admin_context
+    from coriolis.minion_manager.rpc.client import MinionManagerClient
     from coriolis.scheduler.rpc.client import SchedulerClient
     from coriolis.transfer_cron.rpc.client import TransferCronClient
 
@@ -614,6 +633,10 @@ try:
         fail()
     transfer_cron = TransferCronClient()
     transfer_cron.get_diagnostics(ctxt)
+    minion_manager = MinionManagerClient()
+    minion_manager.get_diagnostics(ctxt)
+    if minion_manager.get_minion_pools(ctxt) != []:
+        fail()
     print('coriolis-messaging-ok')
 except Exception:
     fail()
@@ -897,6 +920,14 @@ class Validator:
             TRANSFER_CRON_IMAGE,
             TRANSFER_CRON_ENTRYPOINT,
             TRANSFER_CRON_COMMAND,
+        )
+
+    def _verify_minion_manager_image_contract(self) -> None:
+        self._verify_application_image_contract(
+            "minion-manager-image-contract",
+            MINION_MANAGER_IMAGE,
+            MINION_MANAGER_ENTRYPOINT,
+            MINION_MANAGER_COMMAND,
         )
 
     def _conductor_readonly_probe(self) -> None:
@@ -1888,6 +1919,37 @@ class Validator:
             *TRANSFER_CRON_COMMAND[1:],
         ]
 
+    def _minion_manager_runtime_arguments(self, container_name: str) -> list[str]:
+        return [
+            "run",
+            "--name",
+            container_name,
+            "--detach",
+            "--network",
+            self.resources.network,
+            "--user",
+            f"{MINION_MANAGER_RUN_AS_ID}:{MINION_MANAGER_RUN_AS_ID}",
+            "--read-only",
+            "--cap-drop",
+            "ALL",
+            "--security-opt",
+            "no-new-privileges",
+            "--env",
+            "HOME=/tmp",
+            "--env",
+            "PYTHONDONTWRITEBYTECODE=1",
+            "--tmpfs",
+            "/tmp:rw,noexec,nosuid,size=64m",
+            "--tmpfs",
+            f"{API_LOG_DIR}:rw,noexec,nosuid,size=64m,uid={MINION_MANAGER_RUN_AS_ID},gid={MINION_MANAGER_RUN_AS_ID},mode=0700",
+            "--mount",
+            f"type=volume,src={self.resources.coriolis_config_volume},dst={API_CONFIG_DIR},readonly",
+            "--entrypoint",
+            MINION_MANAGER_COMMAND[0],
+            MINION_MANAGER_IMAGE,
+            *MINION_MANAGER_COMMAND[1:],
+        ]
+
     def _start_scheduler(self) -> None:
         self._checked(
             "start-scheduler",
@@ -1902,6 +1964,16 @@ class Validator:
             self._docker(
                 *self._transfer_cron_runtime_arguments(
                     self.resources.transfer_cron_main
+                )
+            ),
+        )
+
+    def _start_minion_manager(self) -> None:
+        self._checked(
+            "start-minion-manager",
+            self._docker(
+                *self._minion_manager_runtime_arguments(
+                    self.resources.minion_manager_main
                 )
             ),
         )
@@ -2054,6 +2126,7 @@ class Validator:
             (self.resources.conductor_main, "conductor-stability"),
             (self.resources.scheduler_main, "scheduler-stability"),
             (self.resources.transfer_cron_main, "transfer-cron-stability"),
+            (self.resources.minion_manager_main, "minion-manager-stability"),
         )
         deadline = self.clock() + STABILITY_INTERVAL
         while self.clock() < deadline:
@@ -2099,6 +2172,11 @@ class Validator:
             "stop-transfer-cron-graceful", self.resources.transfer_cron_main, 15
         )
 
+    def _stop_minion_manager_graceful(self) -> None:
+        self._stop_workload_graceful(
+            "stop-minion-manager-graceful", self.resources.minion_manager_main, 15
+        )
+
     def _start_conductor_again(self) -> None:
         self._checked(
             "start-conductor-again",
@@ -2115,6 +2193,12 @@ class Validator:
         self._checked(
             "start-transfer-cron-again",
             self._docker("start", self.resources.transfer_cron_main),
+        )
+
+    def _start_minion_manager_again(self) -> None:
+        self._checked(
+            "start-minion-manager-again",
+            self._docker("start", self.resources.minion_manager_main),
         )
 
     def _container_id(self, stage: str, name: str) -> str:
@@ -2138,12 +2222,16 @@ class Validator:
             (self.resources.conductor_main, "conductor-identity"),
             (self.resources.scheduler_main, "scheduler-identity"),
             (self.resources.transfer_cron_main, "transfer-cron-identity"),
+            (self.resources.minion_manager_main, "minion-manager-identity"),
         )
         recreated_stages = {
             self.resources.conductor_main: "conductor-recreated-on-rabbitmq-restart",
             self.resources.scheduler_main: "scheduler-recreated-on-rabbitmq-restart",
             self.resources.transfer_cron_main: (
                 "transfer-cron-recreated-on-rabbitmq-restart"
+            ),
+            self.resources.minion_manager_main: (
+                "minion-manager-recreated-on-rabbitmq-restart"
             ),
         }
         before = {name: self._container_id(stage, name) for name, stage in identities}
@@ -2174,6 +2262,7 @@ class Validator:
         self._stage("start-conductor", self._start_conductor)
         self._stage("start-scheduler", self._start_scheduler)
         self._stage("start-transfer-cron", self._start_transfer_cron)
+        self._stage("start-minion-manager", self._start_minion_manager)
         self._stage("start-api", self._start_api)
         self._stage(
             "inspect-conductor",
@@ -2208,6 +2297,18 @@ class Validator:
                 TRANSFER_CRON_COMMAND[0],
                 TRANSFER_CRON_COMMAND[1:],
                 run_as_id=TRANSFER_CRON_RUN_AS_ID,
+                writable_paths=("/tmp", API_LOG_DIR),
+            ),
+        )
+        self._stage(
+            "inspect-minion-manager",
+            lambda: self._inspect_runtime(
+                "inspect-minion-manager",
+                self.resources.minion_manager_main,
+                MINION_MANAGER_IMAGE,
+                MINION_MANAGER_COMMAND[0],
+                MINION_MANAGER_COMMAND[1:],
+                run_as_id=MINION_MANAGER_RUN_AS_ID,
                 writable_paths=("/tmp", API_LOG_DIR),
             ),
         )
@@ -2253,12 +2354,14 @@ class Validator:
         self._rabbitmq_recovery_evidence()
 
     def _shutdown_restart_evidence(self) -> None:
+        self._stage("stop-minion-manager-graceful", self._stop_minion_manager_graceful)
         self._stage("stop-transfer-cron-graceful", self._stop_transfer_cron_graceful)
         self._stage("stop-scheduler-graceful", self._stop_scheduler_graceful)
         self._stage("stop-conductor-graceful", self._stop_conductor_graceful)
         self._stage("start-conductor-again", self._start_conductor_again)
         self._stage("start-scheduler-again", self._start_scheduler_again)
         self._stage("start-transfer-cron-again", self._start_transfer_cron_again)
+        self._stage("start-minion-manager-again", self._start_minion_manager_again)
 
     def _cleanup_resources(self) -> None:
         resources: list[tuple[str, str]] = [
@@ -2280,6 +2383,7 @@ class Validator:
             ("container", self.resources.conductor_main),
             ("container", self.resources.scheduler_main),
             ("container", self.resources.transfer_cron_main),
+            ("container", self.resources.minion_manager_main),
             ("container", self.resources.api_main),
             ("container", self.resources.rpc_probe),
             ("container", self.resources.messaging_probe),
@@ -2370,6 +2474,7 @@ class Validator:
             ("api-image-available", API_IMAGE),
             ("scheduler-image-available", SCHEDULER_IMAGE),
             ("transfer-cron-image-available", TRANSFER_CRON_IMAGE),
+            ("minion-manager-image-available", MINION_MANAGER_IMAGE),
             ("mariadb-image-available", MARIADB_IMAGE),
             ("keystone-image-available", KEYSTONE_IMAGE),
             ("rabbitmq-image-available", RABBITMQ_IMAGE),
@@ -2385,6 +2490,9 @@ class Validator:
         self._stage("scheduler-image-contract", self._verify_scheduler_image_contract)
         self._stage(
             "transfer-cron-image-contract", self._verify_transfer_cron_image_contract
+        )
+        self._stage(
+            "minion-manager-image-contract", self._verify_minion_manager_image_contract
         )
         self._stage("conductor-readonly-probe", self._conductor_readonly_probe)
         self._stage("conductor-live-probe-inspect", self._inspect_conductor_live_probe)
