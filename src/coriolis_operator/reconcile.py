@@ -231,7 +231,10 @@ DNS_LABEL_RE = re.compile(r"[a-z0-9](?:[-a-z0-9]*[a-z0-9])?")
 SUPPORTED_PROFILE = "core"
 SUPPORTED_INITIAL_VERSION = "2603.4"
 
-RUNTIME_NOT_IMPLEMENTED_MESSAGE = "The appliance runtime is not implemented yet."
+RUNTIME_STARTING_MESSAGE = "The appliance runtime is starting."
+RUNTIME_READY_MESSAGE = "The appliance runtime is ready."
+RUNTIME_HEALTH_CHECK_FAILED_MESSAGE = "Runtime health checks failed."
+RUNTIME_OBSERVATION_FAILED_MESSAGE = "Runtime observation failed."
 NOT_DEGRADED_MESSAGE = "The appliance is not degraded."
 NOT_RECONCILED_MESSAGE = "No resources were applied to Kubernetes."
 RECONCILED_MESSAGE = (
@@ -240,8 +243,7 @@ RECONCILED_MESSAGE = (
     "conductor, Coriolis scheduler, Coriolis transfer-cron, Coriolis minion-manager, "
     "Coriolis deployer-manager, Coriolis worker, Coriolis web, Coriolis web Ingress, "
     "Keystone Ingress, Coriolis API Ingress, and controller state marker were "
-    "reconciled in Kubernetes; runtime "
-    "readiness is not implemented yet."
+    "reconciled in Kubernetes; runtime readiness is observed separately."
 )
 UPGRADE_NOT_SUPPORTED_MESSAGE = "The core profile has no supported upgrade path."
 INVALID_RUNTIME_CONFIGURATION_MESSAGE = (
@@ -324,7 +326,7 @@ def retry_conditions(category: str) -> list[Condition]:
         ),
         ("Progressing", "True", "Retrying", message),
         ("Reconciled", "False", category, message),
-        ("Ready", "False", "RuntimeNotImplemented", RUNTIME_NOT_IMPLEMENTED_MESSAGE),
+        ("Ready", "False", category, message),
         ("Degraded", "True", category, message),
         ("Upgradeable", "False", "UpgradeNotSupported", UPGRADE_NOT_SUPPORTED_MESSAGE),
     ]
@@ -336,6 +338,15 @@ class RetainedClassification(Enum):
     ABSENT = "absent"
     REUSE = "reuse"
     COLLISION = "collision"
+
+
+class RuntimeReadinessState(Enum):
+    """The current runtime-readiness outcome."""
+
+    STARTING = "starting"
+    READY = "ready"
+    HEALTH_CHECK_FAILED = "health_check_failed"
+    OBSERVATION_FAILED = "observation_failed"
 
 
 class OwnedClassification(Enum):
@@ -859,6 +870,146 @@ def _field(obj: Any, name: str) -> Any:
     if value is None:
         value = getattr(obj, _snake_case(name), None)
     return value
+
+
+def _is_positive_int(value: Any) -> bool:
+    return isinstance(value, int) and not isinstance(value, bool) and value > 0
+
+
+def _is_exactly_one(value: Any) -> bool:
+    return isinstance(value, int) and not isinstance(value, bool) and value == 1
+
+
+def _is_absent_or_zero(value: Any) -> bool:
+    return value is None or (
+        isinstance(value, int) and not isinstance(value, bool) and value == 0
+    )
+
+
+def _resources_are_sequence(resources: Any) -> bool:
+    return isinstance(resources, Sequence) and not isinstance(
+        resources, (str, bytes, bytearray)
+    )
+
+
+def _bootstrap_job_ready(job: Any) -> bool:
+    if job is None:
+        return False
+    status = _field(job, "status")
+    return (
+        _is_positive_int(_field(status, "succeeded"))
+        and _is_absent_or_zero(_field(status, "active"))
+        and _is_absent_or_zero(_field(status, "failed"))
+    )
+
+
+def _pvc_ready(pvc: Any) -> bool:
+    return pvc is not None and _field(_field(pvc, "status"), "phase") == "Bound"
+
+
+def _workload_generation_ready(workload: Any) -> bool:
+    metadata = _field(workload, "metadata")
+    status = _field(workload, "status")
+    generation = _field(metadata, "generation")
+    observed_generation = _field(status, "observedGeneration")
+    return (
+        _is_positive_int(generation)
+        and _is_positive_int(observed_generation)
+        and observed_generation == generation
+    )
+
+
+def _deployment_ready(deployment: Any) -> bool:
+    if deployment is None:
+        return False
+    spec = _field(deployment, "spec")
+    status = _field(deployment, "status")
+    return (
+        _is_exactly_one(_field(spec, "replicas"))
+        and _workload_generation_ready(deployment)
+        and all(
+            _is_exactly_one(_field(status, field_name))
+            for field_name in (
+                "replicas",
+                "updatedReplicas",
+                "readyReplicas",
+                "availableReplicas",
+            )
+        )
+        and _is_absent_or_zero(_field(status, "unavailableReplicas"))
+    )
+
+
+def _stateful_set_ready(stateful_set: Any) -> bool:
+    if stateful_set is None:
+        return False
+    spec = _field(stateful_set, "spec")
+    status = _field(stateful_set, "status")
+    current_revision = _field(status, "currentRevision")
+    update_revision = _field(status, "updateRevision")
+    return (
+        _is_exactly_one(_field(spec, "replicas"))
+        and _workload_generation_ready(stateful_set)
+        and all(
+            _is_exactly_one(_field(status, field_name))
+            for field_name in (
+                "currentReplicas",
+                "updatedReplicas",
+                "readyReplicas",
+                "availableReplicas",
+            )
+        )
+        and _is_absent_or_zero(_field(status, "unavailableReplicas"))
+        and isinstance(current_revision, str)
+        and bool(current_revision)
+        and current_revision == update_revision
+    )
+
+
+def runtime_resources_ready(
+    *,
+    bootstrap_job: Any,
+    pvcs: Sequence[Any],
+    deployments: Sequence[Any],
+    stateful_sets: Sequence[Any],
+    services: Sequence[Any],
+) -> bool:
+    """Return whether observed runtime resources meet the exact readiness contract."""
+    collections = (pvcs, deployments, stateful_sets, services)
+    return (
+        all(_resources_are_sequence(resources) for resources in collections)
+        and all(resources for resources in collections)
+        and _bootstrap_job_ready(bootstrap_job)
+        and all(_pvc_ready(pvc) for pvc in pvcs)
+        and all(_deployment_ready(deployment) for deployment in deployments)
+        and all(_stateful_set_ready(stateful_set) for stateful_set in stateful_sets)
+        and all(service is not None for service in services)
+    )
+
+
+def evaluate_runtime_readiness(
+    *,
+    bootstrap_job: Any,
+    pvcs: Sequence[Any],
+    deployments: Sequence[Any],
+    stateful_sets: Sequence[Any],
+    services: Sequence[Any],
+    health_checks_passed: bool | None,
+) -> RuntimeReadinessState:
+    """Evaluate observed resources and the completed runtime health-check result."""
+    if not runtime_resources_ready(
+        bootstrap_job=bootstrap_job,
+        pvcs=pvcs,
+        deployments=deployments,
+        stateful_sets=stateful_sets,
+        services=services,
+    ):
+        return RuntimeReadinessState.STARTING
+    if health_checks_passed is True:
+        return RuntimeReadinessState.READY
+    if health_checks_passed is False:
+        return RuntimeReadinessState.HEALTH_CHECK_FAILED
+    return RuntimeReadinessState.STARTING
 
 
 def validated_retained_secret_values(
@@ -4234,7 +4385,7 @@ def collision_conditions(namespace: str, name: str) -> list[Condition]:
         ),
         ("Progressing", "False", "ResourceCollision", message),
         ("Reconciled", "False", "ResourceCollision", message),
-        ("Ready", "False", "RuntimeNotImplemented", RUNTIME_NOT_IMPLEMENTED_MESSAGE),
+        ("Ready", "False", "ResourceCollision", message),
         ("Degraded", "True", "ResourceCollision", message),
         (
             "Upgradeable",
@@ -4257,7 +4408,7 @@ def invalid_runtime_configuration_conditions() -> list[Condition]:
         ),
         ("Progressing", "False", reason, INVALID_RUNTIME_CONFIGURATION_MESSAGE),
         ("Reconciled", "False", reason, INVALID_RUNTIME_CONFIGURATION_MESSAGE),
-        ("Ready", "False", "RuntimeNotImplemented", RUNTIME_NOT_IMPLEMENTED_MESSAGE),
+        ("Ready", "False", reason, INVALID_RUNTIME_CONFIGURATION_MESSAGE),
         ("Degraded", "True", reason, INVALID_RUNTIME_CONFIGURATION_MESSAGE),
         (
             "Upgradeable",
@@ -4270,6 +4421,67 @@ def invalid_runtime_configuration_conditions() -> list[Condition]:
 
 def accepted_conditions() -> list[Condition]:
     """Conditions for a valid foundational-resource reconcile."""
+    return runtime_readiness_conditions(RuntimeReadinessState.STARTING)
+
+
+def runtime_readiness_conditions(state: RuntimeReadinessState) -> list[Condition]:
+    """Return fixed, value-safe conditions for a runtime-readiness state."""
+    state_conditions = {
+        RuntimeReadinessState.STARTING: (
+            ("Progressing", "True", "RuntimeStarting", RUNTIME_STARTING_MESSAGE),
+            ("Ready", "False", "RuntimeStarting", RUNTIME_STARTING_MESSAGE),
+            ("Degraded", "False", "NotDegraded", NOT_DEGRADED_MESSAGE),
+        ),
+        RuntimeReadinessState.READY: (
+            ("Progressing", "False", "RuntimeReady", RUNTIME_READY_MESSAGE),
+            ("Ready", "True", "RuntimeReady", RUNTIME_READY_MESSAGE),
+            ("Degraded", "False", "NotDegraded", NOT_DEGRADED_MESSAGE),
+        ),
+        RuntimeReadinessState.HEALTH_CHECK_FAILED: (
+            (
+                "Progressing",
+                "False",
+                "RuntimeHealthCheckFailed",
+                RUNTIME_HEALTH_CHECK_FAILED_MESSAGE,
+            ),
+            (
+                "Ready",
+                "False",
+                "RuntimeHealthCheckFailed",
+                RUNTIME_HEALTH_CHECK_FAILED_MESSAGE,
+            ),
+            (
+                "Degraded",
+                "True",
+                "RuntimeHealthCheckFailed",
+                RUNTIME_HEALTH_CHECK_FAILED_MESSAGE,
+            ),
+        ),
+        RuntimeReadinessState.OBSERVATION_FAILED: (
+            (
+                "Progressing",
+                "False",
+                "RuntimeObservationFailed",
+                RUNTIME_OBSERVATION_FAILED_MESSAGE,
+            ),
+            (
+                "Ready",
+                "False",
+                "RuntimeObservationFailed",
+                RUNTIME_OBSERVATION_FAILED_MESSAGE,
+            ),
+            (
+                "Degraded",
+                "True",
+                "RuntimeObservationFailed",
+                RUNTIME_OBSERVATION_FAILED_MESSAGE,
+            ),
+        ),
+    }
+    try:
+        progressing, ready, degraded = state_conditions[state]
+    except KeyError:
+        raise ValueError("invalid runtime readiness state") from None
     return [
         (
             "Accepted",
@@ -4277,15 +4489,10 @@ def accepted_conditions() -> list[Condition]:
             "Accepted",
             "The requested profile and version are supported.",
         ),
-        (
-            "Progressing",
-            "False",
-            "RuntimeNotImplemented",
-            RUNTIME_NOT_IMPLEMENTED_MESSAGE,
-        ),
+        progressing,
         ("Reconciled", "True", "Reconciled", RECONCILED_MESSAGE),
-        ("Ready", "False", "RuntimeNotImplemented", RUNTIME_NOT_IMPLEMENTED_MESSAGE),
-        ("Degraded", "False", "NotDegraded", NOT_DEGRADED_MESSAGE),
+        ready,
+        degraded,
         ("Upgradeable", "False", "UpgradeNotSupported", UPGRADE_NOT_SUPPORTED_MESSAGE),
     ]
 
@@ -4294,14 +4501,9 @@ def rejected_conditions(reason: str, message: str) -> list[Condition]:
     """Conditions for an initial acceptance rejection (profile or version)."""
     return [
         ("Accepted", "False", reason, message),
-        (
-            "Progressing",
-            "False",
-            "RuntimeNotImplemented",
-            RUNTIME_NOT_IMPLEMENTED_MESSAGE,
-        ),
+        ("Progressing", "False", reason, message),
         ("Reconciled", "False", "NotReconciled", NOT_RECONCILED_MESSAGE),
-        ("Ready", "False", "RuntimeNotImplemented", RUNTIME_NOT_IMPLEMENTED_MESSAGE),
+        ("Ready", "False", reason, message),
         ("Degraded", "False", "NotDegraded", NOT_DEGRADED_MESSAGE),
         ("Upgradeable", "False", "UpgradeNotSupported", UPGRADE_NOT_SUPPORTED_MESSAGE),
     ]
@@ -4317,14 +4519,9 @@ def blocked_conditions(
     )
     return [
         ("Accepted", "False", "VersionChangeRejected", version_change_message),
-        (
-            "Progressing",
-            "False",
-            "RuntimeNotImplemented",
-            RUNTIME_NOT_IMPLEMENTED_MESSAGE,
-        ),
+        ("Progressing", "False", "VersionChangeRejected", version_change_message),
         ("Reconciled", "False", "NotReconciled", NOT_RECONCILED_MESSAGE),
-        ("Ready", "False", "RuntimeNotImplemented", RUNTIME_NOT_IMPLEMENTED_MESSAGE),
+        ("Ready", "False", "VersionChangeRejected", version_change_message),
         ("Degraded", "False", "NotDegraded", NOT_DEGRADED_MESSAGE),
         (
             "Upgradeable",
@@ -4439,7 +4636,7 @@ def bootstrap_running_conditions() -> list[Condition]:
         ),
         ("Progressing", "True", "BootstrapRunning", BOOTSTRAP_RUNNING_MESSAGE),
         ("Reconciled", "False", "BootstrapRunning", BOOTSTRAP_RUNNING_MESSAGE),
-        ("Ready", "False", "RuntimeNotImplemented", RUNTIME_NOT_IMPLEMENTED_MESSAGE),
+        ("Ready", "False", "BootstrapRunning", BOOTSTRAP_RUNNING_MESSAGE),
         ("Degraded", "False", "NotDegraded", NOT_DEGRADED_MESSAGE),
         (
             "Upgradeable",
@@ -4461,7 +4658,7 @@ def bootstrap_failed_conditions() -> list[Condition]:
         ),
         ("Progressing", "False", "BootstrapFailed", BOOTSTRAP_FAILED_MESSAGE),
         ("Reconciled", "False", "BootstrapFailed", BOOTSTRAP_FAILED_MESSAGE),
-        ("Ready", "False", "RuntimeNotImplemented", RUNTIME_NOT_IMPLEMENTED_MESSAGE),
+        ("Ready", "False", "BootstrapFailed", BOOTSTRAP_FAILED_MESSAGE),
         ("Degraded", "True", "BootstrapFailed", BOOTSTRAP_FAILED_MESSAGE),
         (
             "Upgradeable",

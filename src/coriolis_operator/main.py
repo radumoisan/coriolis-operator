@@ -1,10 +1,14 @@
 """Kopf entrypoint and CoriolisAppliance reconciliation handlers."""
 
 import asyncio
+import json
 import logging
 import os
 from collections.abc import Mapping
 from typing import Any
+from urllib.error import HTTPError
+from urllib.parse import quote
+from urllib.request import Request, urlopen
 
 import kopf
 from kubernetes import client  # type: ignore[import-untyped]
@@ -22,12 +26,14 @@ from coriolis_operator.mariadb import (
 )
 from coriolis_operator.rabbitmq import resolve_rabbitmq_settings
 from coriolis_operator.reconcile import (
+    CORIOLIS_CREDENTIALS_KEYS,
     DEPENDENCY_SERVICES,
     MARKER_COLLISION,
     SUPPORTED_INITIAL_VERSION,
     SUPPORTED_PROFILE,
     OwnedClassification,
     RetainedClassification,
+    RuntimeReadinessState,
     accepted_conditions,
     appliance_resource_name,
     blocked_conditions,
@@ -43,6 +49,7 @@ from coriolis_operator.reconcile import (
     classify_existing_marker,
     classify_owned_resource,
     collision_conditions,
+    evaluate_runtime_readiness,
     invalid_runtime_configuration_conditions,
     kubernetes_coriolis_render_inputs,
     preflight_api_resources,
@@ -62,6 +69,9 @@ from coriolis_operator.reconcile import (
     preflight_worker_resource,
     rejected_conditions,
     retry_conditions,
+    runtime_readiness_conditions,
+    runtime_resources_ready,
+    validated_retained_secret_values,
 )
 
 GROUP = "coriolis.cloudbase.it"
@@ -71,6 +81,12 @@ WATCH_NAMESPACE = os.environ.get("WATCH_NAMESPACE") or None
 LIVENESS_ENDPOINT = os.environ.get("LIVENESS_ENDPOINT", "http://0.0.0.0:8080/healthz")
 FIELD_MANAGER = "coriolis-operator"
 STATE_CREDENTIALS_RETENTION = "state-credentials"
+_READINESS_HTTP_TIMEOUT_SECONDS = 5
+_READINESS_HTTP_MAX_BODY_BYTES = 64 * 1024
+
+
+class _ReadinessObservationFailed(Exception):
+    """Signal a value-safe Kubernetes observation failure."""
 
 
 class ReconcileRetry(Exception):
@@ -122,6 +138,335 @@ def _changed_computed_status(
         if key in {"acceptedVersion", "observedGeneration", "conditions"}
         and prior_status.get(key) != value
     }
+
+
+def _read_for_runtime_readiness(read: Any, *, name: str, namespace: str) -> Any | None:
+    """Read one readiness resource without turning observation into reconciliation."""
+    try:
+        return read(name=name, namespace=namespace)
+    except client.ApiException as exc:
+        if exc.status == 404:
+            return None
+        raise _ReadinessObservationFailed from None
+    except Exception:
+        raise _ReadinessObservationFailed from None
+
+
+def _read_bounded_json(response: Any) -> Any | None:
+    """Decode a small JSON response without retaining or reporting its body."""
+    try:
+        body = response.read(_READINESS_HTTP_MAX_BODY_BYTES + 1)
+        if not isinstance(body, bytes) or len(body) > _READINESS_HTTP_MAX_BODY_BYTES:
+            return None
+        return json.loads(body.decode("utf-8"))
+    except Exception:
+        return None
+
+
+def _response_status(response: Any) -> int | None:
+    status = getattr(response, "status", None)
+    if isinstance(status, int):
+        return status
+    try:
+        status = response.getcode()
+    except Exception:
+        return None
+    return status if isinstance(status, int) else None
+
+
+def _response_header(response: Any, name: str) -> str | None:
+    try:
+        headers = response.headers
+        value = headers.get(name) if headers is not None else None
+    except Exception:
+        return None
+    return value if isinstance(value, str) else None
+
+
+def _close_readiness_response(response: Any) -> None:
+    """Close an opened HTTP response without changing the health result."""
+    try:
+        response.close()
+    except Exception:
+        pass
+
+
+def _open_readiness_response(opener: Any, request: Request) -> Any:
+    """Return an HTTP error response so its status and resources are handled safely."""
+    try:
+        return opener(request, timeout=_READINESS_HTTP_TIMEOUT_SECONDS)
+    except HTTPError as response:
+        return response
+
+
+def _runtime_health_checks(
+    *,
+    namespace: str,
+    web_service: str,
+    keystone_service: str,
+    coriolis_api_service: str,
+    coriolis_keystone_password: str,
+    opener: Any = urlopen,
+) -> bool:
+    """Verify internal runtime readiness without logging observed data."""
+    web_origin = f"http://{web_service}.{namespace}.svc:3000"
+    keystone_origin = f"http://{keystone_service}.{namespace}.svc:5000"
+    coriolis_origin = f"http://{coriolis_api_service}.{namespace}.svc:7667"
+    expected_services_urls = {
+        "keystone": "/identity",
+        "barbican": "/barbican",
+        "coriolis": "/coriolis",
+        "coriolisLogs": "/logs",
+        "coriolisLogStreamBaseUrl": "",
+        "coriolisLicensing": "/licensing",
+        "metalhub": "/metal-hub",
+    }
+    try:
+        web_response = _open_readiness_response(
+            opener, Request(f"{web_origin}/", method="GET")
+        )
+        try:
+            if _response_status(web_response) != 200:
+                return False
+        finally:
+            _close_readiness_response(web_response)
+        config_response = _open_readiness_response(
+            opener, Request(f"{web_origin}/api/config", method="GET")
+        )
+        try:
+            if _response_status(config_response) != 200:
+                return False
+            config_payload = _read_bounded_json(config_response)
+        finally:
+            _close_readiness_response(config_response)
+        if not isinstance(config_payload, Mapping):
+            return False
+        config = config_payload.get("config")
+        if not isinstance(config, Mapping):
+            return False
+        services_urls = config.get("servicesUrls")
+        if services_urls != expected_services_urls:
+            return False
+        if not isinstance(config_payload.get("isFirstLaunch"), bool):
+            return False
+
+        auth_payload = {
+            "auth": {
+                "identity": {
+                    "methods": ["password"],
+                    "password": {
+                        "user": {
+                            "name": "coriolis",
+                            "domain": {"name": "Default"},
+                            "password": coriolis_keystone_password,
+                        }
+                    },
+                },
+                "scope": {
+                    "project": {
+                        "name": "service",
+                        "domain": {"name": "Default"},
+                    }
+                },
+            }
+        }
+        auth_request = Request(
+            f"{keystone_origin}/v3/auth/tokens",
+            data=json.dumps(auth_payload, separators=(",", ":")).encode("utf-8"),
+            headers={"Content-Type": "application/json", "Accept": "application/json"},
+            method="POST",
+        )
+        auth_response = _open_readiness_response(opener, auth_request)
+        try:
+            if _response_status(auth_response) != 201:
+                return False
+            token = _response_header(auth_response, "X-Subject-Token")
+            auth_result = _read_bounded_json(auth_response)
+        finally:
+            _close_readiness_response(auth_response)
+        if not token or not isinstance(auth_result, Mapping):
+            return False
+        token_result = auth_result.get("token")
+        project = (
+            token_result.get("project") if isinstance(token_result, Mapping) else None
+        )
+        project_id = project.get("id") if isinstance(project, Mapping) else None
+        if not isinstance(project_id, str) or not project_id:
+            return False
+
+        endpoints_request = Request(
+            f"{coriolis_origin}/v1/{quote(project_id, safe='')}/endpoints",
+            headers={"X-Auth-Token": token, "Accept": "application/json"},
+            method="GET",
+        )
+        endpoints_response = _open_readiness_response(opener, endpoints_request)
+        try:
+            if _response_status(endpoints_response) != 200:
+                return False
+            endpoints_result = _read_bounded_json(endpoints_response)
+        finally:
+            _close_readiness_response(endpoints_response)
+        return isinstance(endpoints_result, Mapping) and isinstance(
+            endpoints_result.get("endpoints"), list
+        )
+    except Exception:
+        return False
+
+
+def observe_runtime_readiness(
+    *,
+    meta: Mapping[str, Any],
+    status: Mapping[str, Any] | None = None,
+    core_api: client.CoreV1Api | None = None,
+    apps_api: client.AppsV1Api | None = None,
+    batch_api: client.BatchV1Api | None = None,
+    opener: Any = urlopen,
+) -> dict[str, Any]:
+    """Observe runtime readiness through exact Kubernetes reads and internal HTTP."""
+    name = str(meta["name"])
+    namespace = str(meta["namespace"])
+    generation = int(meta["generation"])
+    accepted_version = _accepted_version(status)
+    try:
+        api = core_api if core_api is not None else client.CoreV1Api()
+        workloads_api = apps_api if apps_api is not None else client.AppsV1Api()
+        jobs_api = batch_api if batch_api is not None else client.BatchV1Api()
+        bootstrap_job = _read_for_runtime_readiness(
+            jobs_api.read_namespaced_job,
+            name=appliance_resource_name(name, BOOTSTRAP_COMPONENT),
+            namespace=namespace,
+        )
+        pvcs = tuple(
+            _read_for_runtime_readiness(
+                api.read_namespaced_persistent_volume_claim,
+                name=appliance_resource_name(name, component),
+                namespace=namespace,
+            )
+            for component in ("mariadb-data", "rabbitmq-data")
+        )
+        stateful_sets = tuple(
+            _read_for_runtime_readiness(
+                workloads_api.read_namespaced_stateful_set,
+                name=appliance_resource_name(name, component),
+                namespace=namespace,
+            )
+            for component in ("mariadb", "rabbitmq")
+        )
+        deployment_components = (
+            "memcached",
+            "keystone",
+            "coriolis-conductor",
+            "coriolis-scheduler",
+            "coriolis-transfer-cron",
+            "coriolis-minion-manager",
+            "coriolis-deployer-manager",
+            "coriolis-worker",
+            "coriolis-api",
+            "coriolis-web",
+        )
+        deployments = tuple(
+            _read_for_runtime_readiness(
+                workloads_api.read_namespaced_deployment,
+                name=appliance_resource_name(name, component),
+                namespace=namespace,
+            )
+            for component in deployment_components
+        )
+        service_components = tuple(
+            component for component, _ in DEPENDENCY_SERVICES
+        ) + ("coriolis-api", "coriolis-web")
+        services = tuple(
+            _read_for_runtime_readiness(
+                api.read_namespaced_service,
+                name=appliance_resource_name(name, component),
+                namespace=namespace,
+            )
+            for component in service_components
+        )
+    except _ReadinessObservationFailed:
+        readiness_state = RuntimeReadinessState.OBSERVATION_FAILED
+    except Exception:
+        readiness_state = RuntimeReadinessState.OBSERVATION_FAILED
+    else:
+        resources_ready = runtime_resources_ready(
+            bootstrap_job=bootstrap_job,
+            pvcs=pvcs,
+            deployments=deployments,
+            stateful_sets=stateful_sets,
+            services=services,
+        )
+        if not resources_ready:
+            readiness_state = RuntimeReadinessState.STARTING
+        else:
+            try:
+                credentials_secret = _read_for_runtime_readiness(
+                    api.read_namespaced_secret,
+                    name=appliance_resource_name(name, "coriolis-credentials"),
+                    namespace=namespace,
+                )
+                if credentials_secret is None:
+                    raise _ReadinessObservationFailed
+                credentials = validated_retained_secret_values(
+                    existing=credentials_secret,
+                    expected_keys=CORIOLIS_CREDENTIALS_KEYS,
+                )
+            except Exception:
+                readiness_state = RuntimeReadinessState.OBSERVATION_FAILED
+            else:
+                health_checks_passed = _runtime_health_checks(
+                    namespace=namespace,
+                    web_service=appliance_resource_name(name, "coriolis-web"),
+                    keystone_service=appliance_resource_name(name, "keystone"),
+                    coriolis_api_service=appliance_resource_name(name, "coriolis-api"),
+                    coriolis_keystone_password=credentials[
+                        "coriolis_keystone_password"
+                    ],
+                    opener=opener,
+                )
+                readiness_state = evaluate_runtime_readiness(
+                    bootstrap_job=bootstrap_job,
+                    pvcs=pvcs,
+                    deployments=deployments,
+                    stateful_sets=stateful_sets,
+                    services=services,
+                    health_checks_passed=health_checks_passed,
+                )
+    return build_status(
+        generation,
+        accepted_version=accepted_version,
+        conditions=runtime_readiness_conditions(readiness_state),
+        prior_conditions=_prior_conditions(status),
+    )
+
+
+def _is_reconciled_for_runtime_observation(
+    status: Mapping[str, Any] | None,
+    current_generation: int,
+) -> bool:
+    """Return whether reconciliation completed successfully for the current runtime."""
+    if not isinstance(status, Mapping):
+        return False
+    if status.get("acceptedVersion") != SUPPORTED_INITIAL_VERSION:
+        return False
+    observed_generation = status.get("observedGeneration")
+    if (
+        isinstance(observed_generation, bool)
+        or not isinstance(observed_generation, int)
+        or observed_generation != current_generation
+    ):
+        return False
+    if not isinstance(status.get("conditions"), list):
+        return False
+    conditions = status["conditions"]
+    return all(
+        any(
+            isinstance(condition, Mapping)
+            and condition.get("type") == condition_type
+            and condition.get("status") == "True"
+            for condition in conditions
+        )
+        for condition_type in ("Accepted", "Reconciled")
+    )
 
 
 def _reject(
@@ -1944,6 +2289,27 @@ def retry_resource_collision(
     """Retry only stable collisions, so removed conflicts converge without a watch."""
     if _has_resource_collision(status) or retry > 0:
         _handle_reconcile(spec, meta, patch, status, **kwargs)
+
+
+@kopf.timer(GROUP, VERSION, PLURAL, initial_delay=15, interval=30)
+def observe_appliance_runtime_readiness(
+    spec: Mapping[str, Any],
+    meta: Mapping[str, Any],
+    patch: kopf.Patch,
+    status: Mapping[str, Any] | None = None,
+    **_: Any,
+) -> None:
+    """Publish continuous runtime readiness without reconciling child resources."""
+    del spec
+    generation = meta.get("generation")
+    if isinstance(generation, bool) or not isinstance(generation, int):
+        return
+    if not _is_reconciled_for_runtime_observation(status, generation):
+        return
+    observed_status = observe_runtime_readiness(meta=meta, status=status)
+    changed_status = _changed_computed_status(observed_status, status)
+    if changed_status:
+        patch.status.update(changed_status)
 
 
 def main() -> None:

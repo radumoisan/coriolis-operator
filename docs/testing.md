@@ -2,6 +2,15 @@
 
 Validate the work relevant to each change.
 
+## :material-book-open-page-variant-outline: Local Core Runtime Readiness Validation
+
+- Local source on published base `7c5f269` is uncommitted, unpublished, unreleased, and not POC-validated. No MkDocs, CIXpress, CI release, Kubernetes POC, or cluster operation ran; no chart/app/image version, RBAC, CRD, or Helm behavior changed.
+- Final validation passed: 701 unit tests in 22.34s; 53 focused readiness cases; Ruff lint; Ruff formatting of 70 files; strict mypy over 18 source files; Helm lint (1 chart/0 failures) and template; `git diff --check`; local Docker image `72030356d429` built then removed.
+- Coverage establishes `RuntimeStarting`, `RuntimeReady`, `RuntimeHealthCheckFailed`, and `RuntimeObservationFailed` status paths with preserved transition timestamps and `Reconciled=True` for runtime-health outcomes. It covers the pure structural gate: successful inactive/unfailed bootstrap, both Bound PVCs, matching StatefulSet revisions plus exact generation/one-replica health for MariaDB/RabbitMQ StatefulSets and ten Deployments, and all six mandatory Services.
+- Coverage establishes the dedicated 15s/30s observer as gated by accepted/reconciled status at the current generation and exact supported acceptedVersion, using exact child `get` plus CR-status patch only. It does not reconcile or create, patch, delete, list, or watch children. The existing 60s collision-only timer remains the only timer that invokes `_handle_reconcile`; broad periodic drift self-healing is not tested or claimed.
+- Internal checks are constrained to same-namespace Service-FQDN HTTP, 5s/request, and 64KiB bodies: web root/config, Keystone scoped password token, and authenticated read-only Coriolis endpoints. Diagnostics and status keep credentials, tokens, bodies, headers, and raw exceptions out of output. EndpointSlice, Ingress, public TLS, browser, and provider-write behavior are excluded.
+- POC remains pending an explicitly approved cluster and a CI-released artifact. Intended acceptance is starting-to-ready, exact internal health checks, API Deployment scale-to-zero remaining unrepaired while Ready becomes false, manual restoration to Ready true, retained no-write CR recreation, and normal cleanup. No POC context, namespace, or version is selected. `Ready=True` would show selected single-replica internal-core health only, not production readiness, HA, storage, backup/restore, external route, or workflow acceptance.
+
 ## :material-book-open-page-variant-outline: Accepted Logical-Origin Ingress 0.5.35 POC
 
 - Source `016a25744a7c946a02fa6d89e38fa39e24e32146` passed the local gate (640 tests in 17.84s plus existing checks and image `bada188f716e`) and CIXpress pipeline `4srgi9` (`12:30:18Z`-`12:31:50Z`), with all expected steps `SUCCEEDED`. Release `a9a594bcdcdc5532e7b676067d55edb9566d81a4` synchronized version `0.5.35`; the accepted operator digest is `sha256:43e5787aa6bb96bbffc895fc792727afd85be5aa4aeae7fbcde0cb2386257a4f`.

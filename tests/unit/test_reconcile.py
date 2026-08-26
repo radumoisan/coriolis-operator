@@ -1,9 +1,12 @@
 import base64
 import copy
 import hashlib
+import json
 import re
 from datetime import UTC, datetime
+from types import SimpleNamespace
 from unittest.mock import ANY, MagicMock, call
+from urllib.error import HTTPError
 
 import kopf
 import pytest
@@ -38,10 +41,12 @@ from coriolis_operator.reconcile import (
     SUPPORTED_PROFILE,
     OwnedClassification,
     RetainedClassification,
+    RuntimeReadinessState,
     accepted_conditions,
     appliance_identity,
     appliance_resource_name,
     blocked_conditions,
+    bootstrap_failed_conditions,
     bootstrap_running_conditions,
     build_api_deployment,
     build_api_ingress,
@@ -71,6 +76,7 @@ from coriolis_operator.reconcile import (
     classify_owned_resource,
     classify_retained_resource,
     collision_conditions,
+    evaluate_runtime_readiness,
     generate_coriolis_credentials,
     generate_infrastructure_credentials,
     invalid_runtime_configuration_conditions,
@@ -80,6 +86,9 @@ from coriolis_operator.reconcile import (
     preflight_mariadb_resources,
     preflight_rabbitmq_resources,
     rejected_conditions,
+    retry_conditions,
+    runtime_readiness_conditions,
+    runtime_resources_ready,
     state_config_map_name,
     validated_retained_secret_values,
 )
@@ -1568,9 +1577,9 @@ def test_build_status_reports_accepted_api_only_slice() -> None:
             ),
             condition(
                 "Progressing",
-                "False",
-                "RuntimeNotImplemented",
-                "The appliance runtime is not implemented yet.",
+                "True",
+                "RuntimeStarting",
+                "The appliance runtime is starting.",
             ),
             condition(
                 "Reconciled",
@@ -1582,15 +1591,13 @@ def test_build_status_reports_accepted_api_only_slice() -> None:
                 "Coriolis minion-manager, Coriolis deployer-manager, Coriolis worker, "
                 "Coriolis web, Coriolis web Ingress, Keystone Ingress, Coriolis API "
                 "Ingress, and controller state marker were reconciled in "
-                "Kubernetes; runtime "
-                "readiness is not "
-                "implemented yet.",
+                "Kubernetes; runtime readiness is observed separately.",
             ),
             condition(
                 "Ready",
                 "False",
-                "RuntimeNotImplemented",
-                "The appliance runtime is not implemented yet.",
+                "RuntimeStarting",
+                "The appliance runtime is starting.",
             ),
             condition(
                 "Degraded",
@@ -1629,7 +1636,7 @@ def test_status_preserves_transition_time_when_condition_status_is_unchanged() -
         }
         for condition_type, status_value in [
             ("Accepted", "True"),
-            ("Progressing", "False"),
+            ("Progressing", "True"),
             ("Reconciled", "True"),
             ("Ready", "False"),
             ("Degraded", "False"),
@@ -1805,7 +1812,7 @@ def test_reconcile_appliance_server_side_applies_state_and_returns_status() -> N
     ]
     assert condition_statuses == [
         "True",
-        "False",
+        "True",
         "True",
         "False",
         "False",
@@ -1864,9 +1871,9 @@ def test_reconcile_rejects_unsupported_profile_without_instantiation(
     assert conditions["Reconciled"]["status"] == "False"
     assert conditions["Reconciled"]["reason"] == "NotReconciled"
     assert conditions["Ready"]["status"] == "False"
-    assert conditions["Ready"]["reason"] == "RuntimeNotImplemented"
+    assert conditions["Ready"]["reason"] == "UnsupportedProfile"
     assert conditions["Progressing"]["status"] == "False"
-    assert conditions["Progressing"]["reason"] == "RuntimeNotImplemented"
+    assert conditions["Progressing"]["reason"] == "UnsupportedProfile"
     assert conditions["Degraded"]["status"] == "False"
     assert conditions["Upgradeable"]["status"] == "False"
     assert conditions["Upgradeable"]["reason"] == "UpgradeNotSupported"
@@ -1961,7 +1968,7 @@ def test_reconcile_blocks_version_change_without_instantiation(
     assert conditions["Reconciled"]["status"] == "False"
     assert conditions["Reconciled"]["reason"] == "NotReconciled"
     assert conditions["Ready"]["status"] == "False"
-    assert conditions["Ready"]["reason"] == "RuntimeNotImplemented"
+    assert conditions["Ready"]["reason"] == "VersionChangeRejected"
     assert conditions["Progressing"]["status"] == "False"
     assert conditions["Degraded"]["status"] == "False"
 
@@ -1986,7 +1993,7 @@ def test_reconcile_with_accepted_version_matching_requested_applies_normally() -
     conditions = {item["type"]: item["status"] for item in status["conditions"]}
     assert conditions == {
         "Accepted": "True",
-        "Progressing": "False",
+        "Progressing": "True",
         "Reconciled": "True",
         "Ready": "False",
         "Degraded": "False",
@@ -2434,7 +2441,7 @@ def test_reconcile_collision_blocks_and_never_patches(mutate) -> None:
     assert statuses["Reconciled"]["status"] == "False"
     assert statuses["Reconciled"]["reason"] == "ResourceCollision"
     assert statuses["Ready"]["status"] == "False"
-    assert statuses["Ready"]["reason"] == "RuntimeNotImplemented"
+    assert statuses["Ready"]["reason"] == "ResourceCollision"
     assert statuses["Degraded"]["status"] == "True"
     assert statuses["Degraded"]["reason"] == "ResourceCollision"
     assert statuses["Upgradeable"]["status"] == "False"
@@ -2568,8 +2575,8 @@ def test_collision_conditions_are_deterministic_and_identify_marker() -> None:
     assert conditions[3] == (
         "Ready",
         "False",
-        "RuntimeNotImplemented",
-        "The appliance runtime is not implemented yet.",
+        "ResourceCollision",
+        message,
     )
     assert conditions[4] == ("Degraded", "True", "ResourceCollision", message)
 
@@ -3399,7 +3406,7 @@ def test_retry_status_has_the_frozen_condition_contract() -> None:
         ("Accepted", "True", "Accepted"),
         ("Progressing", "True", "Retrying"),
         ("Reconciled", "False", "ResourceReadFailed"),
-        ("Ready", "False", "RuntimeNotImplemented"),
+        ("Ready", "False", "ResourceReadFailed"),
         ("Degraded", "True", "ResourceReadFailed"),
         ("Upgradeable", "False", "UpgradeNotSupported"),
     ]
@@ -3778,7 +3785,7 @@ def test_invalid_runtime_configuration_conditions_are_stable() -> None:
         ("Accepted", "True", "Accepted"),
         ("Progressing", "False", "InvalidRuntimeConfiguration"),
         ("Reconciled", "False", "InvalidRuntimeConfiguration"),
-        ("Ready", "False", "RuntimeNotImplemented"),
+        ("Ready", "False", "InvalidRuntimeConfiguration"),
         ("Degraded", "True", "InvalidRuntimeConfiguration"),
         ("Upgradeable", "False", "UpgradeNotSupported"),
     ]
@@ -3990,7 +3997,7 @@ def test_mariadb_reads_and_writes_follow_the_frozen_cross_api_order() -> None:
     assert all(event[0] == "read" for event in events[:first_write])
     assert status["acceptedVersion"] == "2603.4"
     assert status["conditions"][2]["reason"] == "Reconciled"
-    assert status["conditions"][3]["reason"] == "RuntimeNotImplemented"
+    assert status["conditions"][3]["reason"] == "RuntimeStarting"
 
 
 @pytest.mark.parametrize(
@@ -5337,10 +5344,835 @@ def test_bootstrap_running_conditions_are_exact_six_conditions() -> None:
         ("Accepted", "True", "Accepted"),
         ("Progressing", "True", "BootstrapRunning"),
         ("Reconciled", "False", "BootstrapRunning"),
-        ("Ready", "False", "RuntimeNotImplemented"),
+        ("Ready", "False", "BootstrapRunning"),
         ("Degraded", "False", "NotDegraded"),
         ("Upgradeable", "False", "UpgradeNotSupported"),
     ]
+
+
+def test_accepted_conditions_equal_the_starting_readiness_matrix() -> None:
+    assert accepted_conditions() == runtime_readiness_conditions(
+        RuntimeReadinessState.STARTING
+    )
+
+
+@pytest.mark.parametrize(
+    ("conditions", "reason", "message"),
+    [
+        (
+            retry_conditions("ResourceReadFailed"),
+            "ResourceReadFailed",
+            "Kubernetes resource reconciliation will be retried.",
+        ),
+        (
+            collision_conditions("operators", "example-operator-state"),
+            "ResourceCollision",
+            "The existing resource 'operators/example-operator-state' conflicts with "
+            "operator-managed identity and was not modified.",
+        ),
+        (
+            invalid_runtime_configuration_conditions(),
+            "InvalidRuntimeConfiguration",
+            "Complete valid MariaDB and RabbitMQ storage and resource configuration is "
+            "required.",
+        ),
+        (
+            rejected_conditions("UnsupportedProfile", "profile rejected"),
+            "UnsupportedProfile",
+            "profile rejected",
+        ),
+        (
+            blocked_conditions("2603.4", "2603.5"),
+            "VersionChangeRejected",
+            "Version change from '2603.4' to '2603.5' is rejected; the accepted "
+            "version is immutable.",
+        ),
+        (
+            bootstrap_running_conditions(),
+            "BootstrapRunning",
+            "The Coriolis-common bootstrap is running.",
+        ),
+        (
+            bootstrap_failed_conditions(),
+            "BootstrapFailed",
+            "The Coriolis-common bootstrap failed and must be removed before "
+            "continuing.",
+        ),
+    ],
+)
+def test_non_success_conditions_report_the_blocking_ready_reason(
+    conditions: list[tuple[str, str, str, str]], reason: str, message: str
+) -> None:
+    ready = next(condition for condition in conditions if condition[0] == "Ready")
+
+    assert ready == ("Ready", "False", reason, message)
+
+
+@pytest.mark.parametrize(
+    ("state", "expected"),
+    [
+        (
+            RuntimeReadinessState.STARTING,
+            [
+                ("Accepted", "True", "Accepted"),
+                ("Progressing", "True", "RuntimeStarting"),
+                ("Reconciled", "True", "Reconciled"),
+                ("Ready", "False", "RuntimeStarting"),
+                ("Degraded", "False", "NotDegraded"),
+                ("Upgradeable", "False", "UpgradeNotSupported"),
+            ],
+        ),
+        (
+            RuntimeReadinessState.READY,
+            [
+                ("Accepted", "True", "Accepted"),
+                ("Progressing", "False", "RuntimeReady"),
+                ("Reconciled", "True", "Reconciled"),
+                ("Ready", "True", "RuntimeReady"),
+                ("Degraded", "False", "NotDegraded"),
+                ("Upgradeable", "False", "UpgradeNotSupported"),
+            ],
+        ),
+        (
+            RuntimeReadinessState.HEALTH_CHECK_FAILED,
+            [
+                ("Accepted", "True", "Accepted"),
+                ("Progressing", "False", "RuntimeHealthCheckFailed"),
+                ("Reconciled", "True", "Reconciled"),
+                ("Ready", "False", "RuntimeHealthCheckFailed"),
+                ("Degraded", "True", "RuntimeHealthCheckFailed"),
+                ("Upgradeable", "False", "UpgradeNotSupported"),
+            ],
+        ),
+        (
+            RuntimeReadinessState.OBSERVATION_FAILED,
+            [
+                ("Accepted", "True", "Accepted"),
+                ("Progressing", "False", "RuntimeObservationFailed"),
+                ("Reconciled", "True", "Reconciled"),
+                ("Ready", "False", "RuntimeObservationFailed"),
+                ("Degraded", "True", "RuntimeObservationFailed"),
+                ("Upgradeable", "False", "UpgradeNotSupported"),
+            ],
+        ),
+    ],
+)
+def test_runtime_readiness_conditions_have_the_expected_matrix(
+    state: RuntimeReadinessState, expected: list[tuple[str, str, str]]
+) -> None:
+    conditions = runtime_readiness_conditions(state)
+
+    assert [
+        (condition_type, status, reason)
+        for condition_type, status, reason, _ in conditions
+    ] == expected
+    assert all("sentinel" not in message.lower() for _, _, _, message in conditions)
+
+
+def _ready_runtime_resources() -> dict[str, object]:
+    return {
+        "bootstrap_job": {"status": {"succeeded": 1, "active": 0, "failed": 0}},
+        "pvcs": ({"status": {"phase": "Bound"}},),
+        "deployments": (
+            {
+                "metadata": {"generation": 3},
+                "spec": {"replicas": 1},
+                "status": {
+                    "observedGeneration": 3,
+                    "replicas": 1,
+                    "updatedReplicas": 1,
+                    "readyReplicas": 1,
+                    "availableReplicas": 1,
+                    "unavailableReplicas": 0,
+                },
+            },
+        ),
+        "stateful_sets": (
+            {
+                "metadata": {"generation": 3},
+                "spec": {"replicas": 1},
+                "status": {
+                    "observedGeneration": 3,
+                    "currentReplicas": 1,
+                    "updatedReplicas": 1,
+                    "readyReplicas": 1,
+                    "availableReplicas": 1,
+                    "unavailableReplicas": 0,
+                    "currentRevision": "revision-3",
+                    "updateRevision": "revision-3",
+                },
+            },
+        ),
+        "services": ({},),
+    }
+
+
+def test_runtime_resources_ready_accepts_complete_mapping_resources() -> None:
+    resources = _ready_runtime_resources()
+    before = copy.deepcopy(resources)
+
+    assert runtime_resources_ready(**resources)
+    assert resources == before
+
+
+def test_runtime_resources_ready_accepts_kubernetes_model_style_resources() -> None:
+    resources = {
+        "bootstrap_job": SimpleNamespace(
+            status=SimpleNamespace(succeeded=1, active=0, failed=0)
+        ),
+        "pvcs": (SimpleNamespace(status=SimpleNamespace(phase="Bound")),),
+        "deployments": (
+            client.V1Deployment(
+                metadata=client.V1ObjectMeta(generation=3),
+                spec=client.V1DeploymentSpec(
+                    replicas=1,
+                    selector=client.V1LabelSelector(match_labels={}),
+                    template=client.V1PodTemplateSpec(),
+                ),
+                status=client.V1DeploymentStatus(
+                    observed_generation=3,
+                    replicas=1,
+                    updated_replicas=1,
+                    ready_replicas=1,
+                    available_replicas=1,
+                    unavailable_replicas=0,
+                ),
+            ),
+        ),
+        "stateful_sets": (
+            SimpleNamespace(
+                metadata=SimpleNamespace(generation=3),
+                spec=SimpleNamespace(replicas=1),
+                status=SimpleNamespace(
+                    observed_generation=3,
+                    current_replicas=1,
+                    updated_replicas=1,
+                    ready_replicas=1,
+                    available_replicas=1,
+                    unavailable_replicas=0,
+                    current_revision="revision-3",
+                    update_revision="revision-3",
+                ),
+            ),
+        ),
+        "services": (client.V1Service(),),
+    }
+
+    assert runtime_resources_ready(**resources)
+
+
+@pytest.mark.parametrize(
+    "failure",
+    [
+        "missing-bootstrap",
+        "active-bootstrap",
+        "failed-bootstrap",
+        "empty-required-collection",
+        "missing-pvc",
+        "unbound-pvc",
+        "missing-deployment",
+        "deployment-scale-zero",
+        "deployment-stale-generation",
+        "deployment-ahead-generation",
+        "deployment-unavailable",
+        "missing-stateful-set",
+        "stateful-set-scale-zero",
+        "stateful-set-stale-generation",
+        "stateful-set-ahead-generation",
+        "stateful-set-unavailable",
+        "stateful-set-revision-mismatch",
+        "missing-service",
+        "malformed-resource",
+    ],
+)
+def test_runtime_resources_ready_rejects_required_resource_failures(
+    failure: str,
+) -> None:
+    resources = _ready_runtime_resources()
+    deployment = resources["deployments"][0]
+    stateful_set = resources["stateful_sets"][0]
+
+    if failure == "missing-bootstrap":
+        resources["bootstrap_job"] = None
+    elif failure == "active-bootstrap":
+        resources["bootstrap_job"]["status"]["active"] = 1
+    elif failure == "failed-bootstrap":
+        resources["bootstrap_job"]["status"]["failed"] = 1
+    elif failure == "empty-required-collection":
+        resources["pvcs"] = ()
+    elif failure == "missing-pvc":
+        resources["pvcs"] = (None,)
+    elif failure == "unbound-pvc":
+        resources["pvcs"][0]["status"]["phase"] = "Pending"
+    elif failure == "missing-deployment":
+        resources["deployments"] = (None,)
+    elif failure == "deployment-scale-zero":
+        deployment["spec"]["replicas"] = 0
+    elif failure == "deployment-stale-generation":
+        deployment["status"]["observedGeneration"] = 2
+    elif failure == "deployment-ahead-generation":
+        deployment["status"]["observedGeneration"] = 4
+    elif failure == "deployment-unavailable":
+        deployment["status"]["unavailableReplicas"] = 1
+    elif failure == "missing-stateful-set":
+        resources["stateful_sets"] = (None,)
+    elif failure == "stateful-set-scale-zero":
+        stateful_set["spec"]["replicas"] = 0
+    elif failure == "stateful-set-stale-generation":
+        stateful_set["status"]["observedGeneration"] = 2
+    elif failure == "stateful-set-ahead-generation":
+        stateful_set["status"]["observedGeneration"] = 4
+    elif failure == "stateful-set-unavailable":
+        stateful_set["status"]["unavailableReplicas"] = 1
+    elif failure == "stateful-set-revision-mismatch":
+        stateful_set["status"]["updateRevision"] = "revision-4"
+    elif failure == "missing-service":
+        resources["services"] = (None,)
+    else:
+        resources["deployments"] = ({"metadata": {"generation": 3}},)
+
+    assert not runtime_resources_ready(**resources)
+    assert (
+        evaluate_runtime_readiness(**resources, health_checks_passed=True)
+        is RuntimeReadinessState.STARTING
+    )
+
+
+@pytest.mark.parametrize(
+    ("health_checks_passed", "expected"),
+    [
+        (None, RuntimeReadinessState.STARTING),
+        (False, RuntimeReadinessState.HEALTH_CHECK_FAILED),
+        (True, RuntimeReadinessState.READY),
+    ],
+)
+def test_evaluate_runtime_readiness_uses_the_tri_state_health_result(
+    health_checks_passed: bool | None, expected: RuntimeReadinessState
+) -> None:
+    assert (
+        evaluate_runtime_readiness(
+            **_ready_runtime_resources(), health_checks_passed=health_checks_passed
+        )
+        is expected
+    )
+
+
+class _HealthResponse:
+    def __init__(
+        self,
+        status: int,
+        body: bytes = b"",
+        headers: dict[str, str] | None = None,
+        close_exception: Exception | None = None,
+    ) -> None:
+        self.status = status
+        self.body = body
+        self.headers = headers or {}
+        self.close_exception = close_exception
+        self.close_calls = 0
+
+    def read(self, _: int) -> bytes:
+        return self.body
+
+    def close(self) -> None:
+        self.close_calls += 1
+        if self.close_exception is not None:
+            raise self.close_exception
+
+
+def _health_config_response() -> _HealthResponse:
+    return _HealthResponse(
+        200,
+        json.dumps(
+            {
+                "config": {
+                    "servicesUrls": {
+                        "keystone": "/identity",
+                        "barbican": "/barbican",
+                        "coriolis": "/coriolis",
+                        "coriolisLogs": "/logs",
+                        "coriolisLogStreamBaseUrl": "",
+                        "coriolisLicensing": "/licensing",
+                        "metalhub": "/metal-hub",
+                    }
+                },
+                "isFirstLaunch": False,
+            }
+        ).encode(),
+    )
+
+
+def _successful_health_responses() -> list[_HealthResponse]:
+    return [
+        _HealthResponse(200),
+        _health_config_response(),
+        _HealthResponse(
+            201,
+            b'{"token":{"project":{"id":"project / id"}}}',
+            {"X-Subject-Token": "token-sentinel"},
+        ),
+        _HealthResponse(200, b'{"endpoints":[]}'),
+    ]
+
+
+def test_runtime_health_checks_make_the_required_value_safe_requests() -> None:
+    requests = []
+    opened_responses = _successful_health_responses()
+    responses = iter(opened_responses)
+
+    def opener(request, *, timeout: int):
+        assert timeout == 5
+        requests.append(request)
+        return next(responses)
+
+    assert main._runtime_health_checks(
+        namespace="operators",
+        web_service="example-coriolis-web",
+        keystone_service="example-keystone",
+        coriolis_api_service="example-coriolis-api",
+        coriolis_keystone_password="credential-sentinel",
+        opener=opener,
+    )
+    assert [(request.get_method(), request.full_url) for request in requests] == [
+        ("GET", "http://example-coriolis-web.operators.svc:3000/"),
+        ("GET", "http://example-coriolis-web.operators.svc:3000/api/config"),
+        ("POST", "http://example-keystone.operators.svc:5000/v3/auth/tokens"),
+        (
+            "GET",
+            "http://example-coriolis-api.operators.svc:7667/v1/project%20%2F%20id/endpoints",
+        ),
+    ]
+    assert json.loads(requests[2].data) == {
+        "auth": {
+            "identity": {
+                "methods": ["password"],
+                "password": {
+                    "user": {
+                        "name": "coriolis",
+                        "domain": {"name": "Default"},
+                        "password": "credential-sentinel",
+                    }
+                },
+            },
+            "scope": {"project": {"name": "service", "domain": {"name": "Default"}}},
+        }
+    }
+    endpoint_headers = {key.lower(): value for key, value in requests[3].header_items()}
+    assert endpoint_headers["x-auth-token"] == "token-sentinel"
+    assert endpoint_headers["accept"] == "application/json"
+    assert [response.close_calls for response in opened_responses] == [1, 1, 1, 1]
+
+
+def test_runtime_health_checks_close_opened_responses_before_early_return() -> None:
+    opened_responses = [_HealthResponse(200), _HealthResponse(503)]
+    responses = iter(opened_responses)
+
+    def opener(*_: object, **__: object) -> _HealthResponse:
+        return next(responses)
+
+    assert not main._runtime_health_checks(
+        namespace="operators",
+        web_service="example-coriolis-web",
+        keystone_service="example-keystone",
+        coriolis_api_service="example-coriolis-api",
+        coriolis_keystone_password="credential-sentinel",
+        opener=opener,
+    )
+    assert [response.close_calls for response in opened_responses] == [1, 1]
+
+
+def test_runtime_health_checks_close_httperror_responses_without_value_leakage(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    error_body = MagicMock()
+    error = HTTPError(
+        "http://example-coriolis-web.operators.svc:3000/",
+        503,
+        "credential-sentinel token-sentinel body-sentinel",
+        {},
+        error_body,
+    )
+
+    def opener(*_: object, **__: object) -> object:
+        raise error
+
+    assert not main._runtime_health_checks(
+        namespace="operators",
+        web_service="example-coriolis-web",
+        keystone_service="example-keystone",
+        coriolis_api_service="example-coriolis-api",
+        coriolis_keystone_password="credential-sentinel",
+        opener=opener,
+    )
+    error_body.close.assert_called_once_with()
+    assert "credential-sentinel" not in caplog.text
+    assert "token-sentinel" not in caplog.text
+    assert "body-sentinel" not in caplog.text
+
+
+def test_runtime_health_checks_ignore_close_failures_without_value_leakage(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    close_error = RuntimeError("credential-sentinel token-sentinel body-sentinel")
+    opened_responses = _successful_health_responses()
+    for response in opened_responses:
+        response.close_exception = close_error
+    responses = iter(opened_responses)
+
+    def opener(*_: object, **__: object) -> _HealthResponse:
+        return next(responses)
+
+    assert main._runtime_health_checks(
+        namespace="operators",
+        web_service="example-coriolis-web",
+        keystone_service="example-keystone",
+        coriolis_api_service="example-coriolis-api",
+        coriolis_keystone_password="credential-sentinel",
+        opener=opener,
+    )
+    assert [response.close_calls for response in opened_responses] == [1, 1, 1, 1]
+    assert "credential-sentinel" not in caplog.text
+    assert "token-sentinel" not in caplog.text
+    assert "body-sentinel" not in caplog.text
+
+
+@pytest.mark.parametrize(
+    "responses",
+    [
+        [_HealthResponse(503)],
+        [_HealthResponse(200), _HealthResponse(503)],
+        [_HealthResponse(200), _health_config_response(), _HealthResponse(500)],
+        [
+            _HealthResponse(200),
+            _health_config_response(),
+            _HealthResponse(201, b'{"token":{"project":{"id":"project"}}}'),
+        ],
+        [
+            _HealthResponse(200),
+            _HealthResponse(200, b"not-json"),
+        ],
+        [
+            _HealthResponse(200),
+            _HealthResponse(200, b"x" * (main._READINESS_HTTP_MAX_BODY_BYTES + 1)),
+        ],
+        [
+            _HealthResponse(200),
+            _health_config_response(),
+            _HealthResponse(201, b'{"token":{"project":{}}}', {"X-Subject-Token": "t"}),
+        ],
+        [
+            _HealthResponse(200),
+            _health_config_response(),
+            _successful_health_responses()[2],
+            _HealthResponse(200, b'{"endpoints":{}}'),
+        ],
+    ],
+)
+def test_runtime_health_checks_reject_bad_responses_without_value_leakage(
+    responses: list[_HealthResponse], caplog: pytest.LogCaptureFixture
+) -> None:
+    response_iter = iter(responses)
+
+    def opener(*_: object, **__: object) -> _HealthResponse:
+        return next(response_iter)
+
+    assert not main._runtime_health_checks(
+        namespace="operators",
+        web_service="example-coriolis-web",
+        keystone_service="example-keystone",
+        coriolis_api_service="example-coriolis-api",
+        coriolis_keystone_password="credential-sentinel",
+        opener=opener,
+    )
+    assert "credential-sentinel" not in caplog.text
+    assert "token-sentinel" not in caplog.text
+
+
+def test_runtime_health_checks_catches_opener_failures_without_value_leakage(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    def opener(*_: object, **__: object) -> object:
+        raise RuntimeError("credential-sentinel token-sentinel body-sentinel")
+
+    assert not main._runtime_health_checks(
+        namespace="operators",
+        web_service="example-coriolis-web",
+        keystone_service="example-keystone",
+        coriolis_api_service="example-coriolis-api",
+        coriolis_keystone_password="credential-sentinel",
+        opener=opener,
+    )
+    assert "credential-sentinel" not in caplog.text
+    assert "token-sentinel" not in caplog.text
+    assert "body-sentinel" not in caplog.text
+
+
+def _ready_runtime_observer_apis() -> tuple[MagicMock, MagicMock, MagicMock]:
+    resources = _ready_runtime_resources()
+    core_api = MagicMock()
+    apps_api = MagicMock()
+    batch_api = MagicMock()
+    credential_secret = build_coriolis_credentials_secret(
+        appliance_name="example",
+        namespace="operators",
+        accepted_version="2603.4",
+        retention="retain",
+        values=CORIOLIS_CREDENTIALS,
+    )
+    pvcs = {
+        appliance_resource_name("example", component): resources["pvcs"][0]
+        for component in ("mariadb-data", "rabbitmq-data")
+    }
+    services = {
+        appliance_resource_name("example", component): {}
+        for component in (
+            *[component for component, _ in DEPENDENCY_SERVICES],
+            "coriolis-api",
+            "coriolis-web",
+        )
+    }
+    stateful_sets = {
+        appliance_resource_name("example", component): resources["stateful_sets"][0]
+        for component in ("mariadb", "rabbitmq")
+    }
+    deployments = {
+        appliance_resource_name("example", component): resources["deployments"][0]
+        for component in (
+            "memcached",
+            "keystone",
+            "coriolis-conductor",
+            "coriolis-scheduler",
+            "coriolis-transfer-cron",
+            "coriolis-minion-manager",
+            "coriolis-deployer-manager",
+            "coriolis-worker",
+            "coriolis-api",
+            "coriolis-web",
+        )
+    }
+
+    def read(mapping: dict[str, object]):
+        def read_resource(*, name: str, namespace: str) -> object:
+            assert namespace == "operators"
+            if name not in mapping:
+                raise _api_exception(404)
+            return mapping[name]
+
+        return read_resource
+
+    core_api.read_namespaced_persistent_volume_claim.side_effect = read(pvcs)
+    core_api.read_namespaced_service.side_effect = read(services)
+    core_api.read_namespaced_secret.side_effect = read(
+        {"example-coriolis-credentials": credential_secret}
+    )
+    apps_api.read_namespaced_stateful_set.side_effect = read(stateful_sets)
+    apps_api.read_namespaced_deployment.side_effect = read(deployments)
+    batch_api.read_namespaced_job.side_effect = read(
+        {
+            appliance_resource_name("example", BOOTSTRAP_COMPONENT): resources[
+                "bootstrap_job"
+            ]
+        }
+    )
+    return core_api, apps_api, batch_api
+
+
+def _runtime_observer_status() -> dict:
+    return build_status(7, accepted_version="2603.4", conditions=accepted_conditions())
+
+
+def _readiness_state(status: dict) -> str:
+    return next(
+        condition["reason"]
+        for condition in status["conditions"]
+        if condition["type"] == "Ready"
+    )
+
+
+def test_runtime_observer_reports_starting_without_health_for_missing_resource(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    core_api, apps_api, batch_api = _ready_runtime_observer_apis()
+    core_api.read_namespaced_persistent_volume_claim.side_effect = _api_exception(404)
+    health_checks = MagicMock(return_value=True)
+    monkeypatch.setattr(main, "_runtime_health_checks", health_checks)
+
+    observed = main.observe_runtime_readiness(
+        meta=sample_meta(),
+        status=_runtime_observer_status(),
+        core_api=core_api,
+        apps_api=apps_api,
+        batch_api=batch_api,
+    )
+
+    assert _readiness_state(observed) == "RuntimeStarting"
+    health_checks.assert_not_called()
+    core_api.read_namespaced_secret.assert_not_called()
+
+
+def test_runtime_observer_reports_observation_failure_for_read_or_secret_failure(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    for failure in ("read", "missing-secret", "malformed-secret"):
+        core_api, apps_api, batch_api = _ready_runtime_observer_apis()
+        if failure == "read":
+            core_api.read_namespaced_persistent_volume_claim.side_effect = RuntimeError(
+                "credential-sentinel"
+            )
+        elif failure == "missing-secret":
+            core_api.read_namespaced_secret.side_effect = _api_exception(404)
+        else:
+            core_api.read_namespaced_secret.return_value = {
+                "type": "Opaque",
+                "data": {},
+            }
+            core_api.read_namespaced_secret.side_effect = None
+        health_checks = MagicMock(return_value=True)
+        monkeypatch.setattr(main, "_runtime_health_checks", health_checks)
+
+        observed = main.observe_runtime_readiness(
+            meta=sample_meta(),
+            status=_runtime_observer_status(),
+            core_api=core_api,
+            apps_api=apps_api,
+            batch_api=batch_api,
+        )
+
+        assert _readiness_state(observed) == "RuntimeObservationFailed"
+        assert "credential-sentinel" not in repr(observed)
+        health_checks.assert_not_called()
+
+
+def test_runtime_observer_reports_health_failure_and_ready(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    for health_result, expected_reason in (
+        (False, "RuntimeHealthCheckFailed"),
+        (True, "RuntimeReady"),
+    ):
+        core_api, apps_api, batch_api = _ready_runtime_observer_apis()
+        health_checks = MagicMock(return_value=health_result)
+        monkeypatch.setattr(main, "_runtime_health_checks", health_checks)
+
+        observed = main.observe_runtime_readiness(
+            meta=sample_meta(),
+            status=_runtime_observer_status(),
+            core_api=core_api,
+            apps_api=apps_api,
+            batch_api=batch_api,
+        )
+
+        assert _readiness_state(observed) == expected_reason
+        health_checks.assert_called_once()
+        for api in (core_api, apps_api, batch_api):
+            assert all(
+                not call_info[0].startswith(
+                    ("create_namespaced", "patch_namespaced", "delete", "list", "watch")
+                )
+                for call_info in api.method_calls
+            )
+        if health_result:
+            assert [call_info[0] for call_info in core_api.method_calls] == [
+                "read_namespaced_persistent_volume_claim",
+                "read_namespaced_persistent_volume_claim",
+                *("read_namespaced_service",) * 6,
+                "read_namespaced_secret",
+            ]
+            assert [call_info[0] for call_info in apps_api.method_calls] == [
+                *("read_namespaced_stateful_set",) * 2,
+                *("read_namespaced_deployment",) * 10,
+            ]
+            assert [call_info[0] for call_info in batch_api.method_calls] == [
+                "read_namespaced_job"
+            ]
+
+
+def test_runtime_readiness_timer_skips_unreconciled_status_without_api_work(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    observe = MagicMock()
+    monkeypatch.setattr(main, "observe_runtime_readiness", observe)
+    patch = MagicMock()
+
+    main.observe_appliance_runtime_readiness(
+        valid_spec(), sample_meta(), patch, {"conditions": []}
+    )
+
+    observe.assert_not_called()
+    patch.status.update.assert_not_called()
+
+
+def test_runtime_readiness_timer_skips_missing_accepted_version_without_api_work(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    assert_no_api_instantiation(monkeypatch)
+    patch = MagicMock()
+    status = {
+        "conditions": [
+            {"type": "Accepted", "status": "True"},
+            {"type": "Reconciled", "status": "True"},
+        ]
+    }
+
+    main.observe_appliance_runtime_readiness(valid_spec(), sample_meta(), patch, status)
+
+    patch.status.update.assert_not_called()
+
+
+@pytest.mark.parametrize(
+    ("generation", "status"),
+    [
+        (8, _runtime_observer_status()),
+        (8, dict(_runtime_observer_status(), observedGeneration=9)),
+        (7, dict(_runtime_observer_status(), acceptedVersion="2603.5")),
+        (None, _runtime_observer_status()),
+        ("7", _runtime_observer_status()),
+        (True, _runtime_observer_status()),
+    ],
+)
+def test_runtime_readiness_timer_skips_stale_or_invalid_reconciliation_status(
+    monkeypatch: pytest.MonkeyPatch, generation: object, status: dict
+) -> None:
+    observe = MagicMock()
+    reconcile = MagicMock()
+    monkeypatch.setattr(main, "observe_runtime_readiness", observe)
+    monkeypatch.setattr(main, "_handle_reconcile", reconcile)
+    patch = MagicMock()
+    meta = sample_meta()
+    if generation is None:
+        del meta["generation"]
+    else:
+        meta["generation"] = generation
+
+    main.observe_appliance_runtime_readiness(valid_spec(), meta, patch, status)
+
+    observe.assert_not_called()
+    patch.status.update.assert_not_called()
+    reconcile.assert_not_called()
+
+
+def test_runtime_readiness_timer_patches_only_changed_status_without_reconcile(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    prior_status = build_status(
+        8, accepted_version="2603.4", conditions=accepted_conditions()
+    )
+    observed_status = dict(
+        prior_status, observedGeneration=8, conditions=[{"type": "Ready"}]
+    )
+    observe = MagicMock(return_value=observed_status)
+    reconcile = MagicMock()
+    monkeypatch.setattr(main, "observe_runtime_readiness", observe)
+    monkeypatch.setattr(main, "_handle_reconcile", reconcile)
+    patch = MagicMock()
+
+    main.observe_appliance_runtime_readiness(
+        valid_spec(), sample_meta(generation=8), patch, prior_status
+    )
+
+    observe.assert_called_once_with(meta=sample_meta(generation=8), status=prior_status)
+    patch.status.update.assert_called_once_with({"conditions": [{"type": "Ready"}]})
+    reconcile.assert_not_called()
 
 
 def test_bootstrap_config_map_and_job_exact_contract() -> None:
@@ -5509,7 +6341,7 @@ def test_bootstrap_absent_creates_job_and_raises_running_before_marker() -> None
     assert statuses["Reconciled"]["status"] == "False"
     assert statuses["Reconciled"]["reason"] == "BootstrapRunning"
     assert statuses["Ready"]["status"] == "False"
-    assert statuses["Ready"]["reason"] == "RuntimeNotImplemented"
+    assert statuses["Ready"]["reason"] == "BootstrapRunning"
     assert statuses["Degraded"]["status"] == "False"
     assert statuses["Degraded"]["reason"] == "NotDegraded"
 
@@ -5560,7 +6392,7 @@ def test_bootstrap_succeeded_writes_marker_last_without_job_write() -> None:
     assert statuses["Reconciled"]["status"] == "True"
     assert statuses["Reconciled"]["reason"] == "Reconciled"
     assert statuses["Ready"]["status"] == "False"
-    assert statuses["Ready"]["reason"] == "RuntimeNotImplemented"
+    assert statuses["Ready"]["reason"] == "RuntimeStarting"
     assert statuses["Degraded"]["status"] == "False"
 
 
