@@ -192,6 +192,17 @@ from coriolis_operator.transfer_cron import (
     TRANSFER_CRON_RUN_AS_ID,
     TRANSFER_CRON_TERMINATION_GRACE_PERIOD_SECONDS,
 )
+from coriolis_operator.web import (
+    WEB_BIND_ADDRESS,
+    WEB_COMPONENT,
+    WEB_IMAGE,
+    WEB_IMAGE_PULL_SECRET_NAME,
+    WEB_PORT,
+    WEB_PROBE_PATH,
+    WEB_REPLICAS,
+    WEB_RUN_AS_ID,
+    WEB_TERMINATION_GRACE_PERIOD_SECONDS,
+)
 from coriolis_operator.worker import (
     WORKER_ARGS,
     WORKER_COMMAND,
@@ -226,7 +237,8 @@ RECONCILED_MESSAGE = (
     "The foundational appliance resources, dependency Services, MariaDB, RabbitMQ, "
     "Memcached, Keystone, Coriolis-common bootstrap, Coriolis API, Coriolis "
     "conductor, Coriolis scheduler, Coriolis transfer-cron, Coriolis minion-manager, "
-    "Coriolis deployer-manager, Coriolis worker, and controller state marker were "
+    "Coriolis deployer-manager, Coriolis worker, Coriolis web, and controller state "
+    "marker were "
     "reconciled in Kubernetes; runtime "
     "readiness is not implemented yet."
 )
@@ -368,6 +380,15 @@ class MemcachedResourcePreflight:
 @dataclass(frozen=True)
 class APIResourcePreflight:
     """Pure preflight outcome and desired Coriolis API resource bodies."""
+
+    service_classification: OwnedClassification
+    deployment_classification: OwnedClassification
+    manifests: tuple[dict[str, Any], ...] = field(repr=False)
+
+
+@dataclass(frozen=True)
+class WebResourcePreflight:
+    """Pure preflight outcome and desired Coriolis web resource bodies."""
 
     service_classification: OwnedClassification
     deployment_classification: OwnedClassification
@@ -1447,6 +1468,182 @@ def preflight_api_resources(
                 owner=owner,
             ),
             build_api_deployment(
+                appliance_name=appliance_name,
+                namespace=namespace,
+                accepted_version=accepted_version,
+                owner=owner,
+            ),
+        ),
+    )
+
+
+def build_web_service(
+    *,
+    appliance_name: str,
+    namespace: str,
+    accepted_version: str,
+    owner: Mapping[str, Any],
+) -> dict[str, Any]:
+    """Build the internal ClusterIP Service for Coriolis web."""
+    metadata = build_resource_metadata(
+        resource_name=appliance_resource_name(appliance_name, WEB_COMPONENT),
+        namespace=namespace,
+        appliance_name=appliance_name,
+        component=WEB_COMPONENT,
+        accepted_version=accepted_version,
+        owner=owner,
+    )
+    return {
+        "apiVersion": "v1",
+        "kind": "Service",
+        "metadata": metadata,
+        "spec": {
+            "type": "ClusterIP",
+            "selector": {
+                "coriolis.cloudbase.it/appliance": appliance_identity(appliance_name),
+                "coriolis.cloudbase.it/component": WEB_COMPONENT,
+            },
+            "ports": [
+                {
+                    "name": "web",
+                    "protocol": "TCP",
+                    "port": WEB_PORT,
+                    "targetPort": WEB_PORT,
+                }
+            ],
+        },
+    }
+
+
+def build_web_deployment(
+    *,
+    appliance_name: str,
+    namespace: str,
+    accepted_version: str,
+    owner: Mapping[str, Any],
+) -> dict[str, Any]:
+    """Build the restricted single-replica Coriolis web Deployment."""
+    resource_name = appliance_resource_name(appliance_name, WEB_COMPONENT)
+    metadata = build_resource_metadata(
+        resource_name=resource_name,
+        namespace=namespace,
+        appliance_name=appliance_name,
+        component=WEB_COMPONENT,
+        accepted_version=accepted_version,
+        owner=owner,
+    )
+    selector = {
+        "coriolis.cloudbase.it/appliance": appliance_identity(appliance_name),
+        "coriolis.cloudbase.it/component": WEB_COMPONENT,
+    }
+    probe = {"httpGet": {"path": WEB_PROBE_PATH, "port": "web"}}
+    container = {
+        "name": WEB_COMPONENT,
+        "image": WEB_IMAGE,
+        "imagePullPolicy": "Always",
+        "env": [{"name": "BIND", "value": WEB_BIND_ADDRESS}],
+        "ports": [{"name": "web", "containerPort": WEB_PORT, "protocol": "TCP"}],
+        "securityContext": {
+            "readOnlyRootFilesystem": False,
+            "allowPrivilegeEscalation": False,
+            "capabilities": {"drop": ["ALL"]},
+            "seccompProfile": {"type": "RuntimeDefault"},
+        },
+        "startupProbe": dict(
+            probe,
+            periodSeconds=2,
+            timeoutSeconds=5,
+            failureThreshold=30,
+        ),
+        "readinessProbe": dict(
+            probe,
+            periodSeconds=5,
+            timeoutSeconds=5,
+            failureThreshold=3,
+            successThreshold=1,
+        ),
+        "livenessProbe": dict(
+            probe,
+            periodSeconds=10,
+            timeoutSeconds=5,
+            failureThreshold=6,
+        ),
+    }
+    return {
+        "apiVersion": "apps/v1",
+        "kind": "Deployment",
+        "metadata": metadata,
+        "spec": {
+            "replicas": WEB_REPLICAS,
+            "strategy": {"type": "Recreate"},
+            "selector": {"matchLabels": selector},
+            "template": {
+                "metadata": {"labels": dict(metadata["labels"])},
+                "spec": {
+                    "imagePullSecrets": [{"name": WEB_IMAGE_PULL_SECRET_NAME}],
+                    "securityContext": {
+                        "runAsUser": WEB_RUN_AS_ID,
+                        "runAsGroup": WEB_RUN_AS_ID,
+                    },
+                    "automountServiceAccountToken": False,
+                    "enableServiceLinks": False,
+                    "terminationGracePeriodSeconds": (
+                        WEB_TERMINATION_GRACE_PERIOD_SECONDS
+                    ),
+                    "containers": [container],
+                },
+            },
+        },
+    }
+
+
+def preflight_web_resources(
+    *,
+    appliance_name: str,
+    namespace: str,
+    accepted_version: str,
+    owner: Mapping[str, Any],
+    web_service: Any | None,
+    web_deployment: Any | None,
+) -> WebResourcePreflight:
+    """Classify all Coriolis web resources before building desired bodies."""
+    resource_name = appliance_resource_name(appliance_name, WEB_COMPONENT)
+    service_classification = classify_owned_resource(
+        existing=web_service,
+        resource_name=resource_name,
+        namespace=namespace,
+        appliance_name=appliance_name,
+        component=WEB_COMPONENT,
+        accepted_version=accepted_version,
+        owner=owner,
+    )
+    deployment_classification = classify_owned_resource(
+        existing=web_deployment,
+        resource_name=resource_name,
+        namespace=namespace,
+        appliance_name=appliance_name,
+        component=WEB_COMPONENT,
+        accepted_version=accepted_version,
+        owner=owner,
+    )
+    if OwnedClassification.COLLISION in (
+        service_classification,
+        deployment_classification,
+    ):
+        return WebResourcePreflight(
+            service_classification, deployment_classification, ()
+        )
+    return WebResourcePreflight(
+        service_classification,
+        deployment_classification,
+        (
+            build_web_service(
+                appliance_name=appliance_name,
+                namespace=namespace,
+                accepted_version=accepted_version,
+                owner=owner,
+            ),
+            build_web_deployment(
                 appliance_name=appliance_name,
                 namespace=namespace,
                 accepted_version=accepted_version,

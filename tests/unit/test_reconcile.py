@@ -60,6 +60,8 @@ from coriolis_operator.reconcile import (
     build_state_config_map,
     build_status,
     build_transfer_cron_deployment,
+    build_web_deployment,
+    build_web_service,
     build_worker_deployment,
     classify_existing_marker,
     classify_owned_resource,
@@ -1529,7 +1531,8 @@ def test_build_status_reports_accepted_api_only_slice() -> None:
                 "RabbitMQ, Memcached, Keystone, Coriolis-common bootstrap, Coriolis "
                 "API, Coriolis conductor, Coriolis scheduler, Coriolis transfer-cron, "
                 "Coriolis minion-manager, Coriolis deployer-manager, Coriolis worker, "
-                "and controller state marker were reconciled in Kubernetes; runtime "
+                "Coriolis web, and controller state marker were reconciled in "
+                "Kubernetes; runtime "
                 "readiness is not "
                 "implemented yet.",
             ),
@@ -1694,6 +1697,9 @@ def test_reconcile_appliance_server_side_applies_state_and_returns_status() -> N
         call.read_namespaced_config_map(
             name="example-common-bootstrap-v2", namespace="operators"
         ),
+        call.read_namespaced_service(
+            name="example-coriolis-web", namespace="operators"
+        ),
         call.create_namespaced_secret(namespace="operators", body=ANY),
         call.create_namespaced_secret(namespace="operators", body=ANY),
         call.create_namespaced_config_map(namespace="operators", body=ANY),
@@ -1713,6 +1719,7 @@ def test_reconcile_appliance_server_side_applies_state_and_returns_status() -> N
         call.create_namespaced_config_map(namespace="operators", body=ANY),
         call.create_namespaced_secret(namespace="operators", body=ANY),
         call.create_namespaced_config_map(namespace="operators", body=ANY),
+        call.create_namespaced_service(namespace="operators", body=ANY),
         call.create_namespaced_service(namespace="operators", body=ANY),
         call.create_namespaced_config_map(namespace="operators", body=ANY),
     ]
@@ -3511,7 +3518,7 @@ def test_dependency_services_read_and_create_in_order() -> None:
     assert read_names == [
         appliance_resource_name("example", component)
         for component, _ in DEPENDENCY_SERVICES
-    ] + ["example-coriolis-api"]
+    ] + ["example-coriolis-api", "example-coriolis-web"]
     created_names = [
         call.kwargs["body"]["metadata"]["name"]
         for call in api.create_namespaced_service.call_args_list
@@ -3519,7 +3526,7 @@ def test_dependency_services_read_and_create_in_order() -> None:
     assert created_names == [
         appliance_resource_name("example", component)
         for component, _ in DEPENDENCY_SERVICES
-    ] + ["example-coriolis-api"]
+    ] + ["example-coriolis-api", "example-coriolis-web"]
     assert api.method_calls[-1] == call.create_namespaced_config_map(
         namespace="operators", body=ANY
     )
@@ -3533,6 +3540,7 @@ def test_managed_dependency_services_use_guarded_ssa_and_restore_content_type() 
             _managed_dependency_service(component)
             for component, _ in DEPENDENCY_SERVICES
         ],
+        _api_exception(404),
         _api_exception(404),
     ]
 
@@ -3572,6 +3580,7 @@ def test_dependency_service_collision_has_no_writes_after_all_service_reads() ->
         collided,
         *[_api_exception(404) for _ in DEPENDENCY_SERVICES[1:]],
         _api_exception(404),
+        _api_exception(404),
     ]
 
     status = reconcile_appliance(
@@ -3580,7 +3589,7 @@ def test_dependency_service_collision_has_no_writes_after_all_service_reads() ->
         core_api=api,
     )
 
-    assert api.read_namespaced_service.call_count == len(DEPENDENCY_SERVICES) + 1
+    assert api.read_namespaced_service.call_count == len(DEPENDENCY_SERVICES) + 2
     assert status["conditions"][2]["reason"] == "ResourceCollision"
     assert "operators/example-rabbitmq" in status["conditions"][2]["message"]
     assert not [
@@ -3597,6 +3606,7 @@ def test_dependency_service_read_error_and_missing_version_retry() -> None:
     missing_version_api.read_namespaced_service.side_effect = [
         _managed_dependency_service("rabbitmq", resource_version=None),
         *[_api_exception(404) for _ in DEPENDENCY_SERVICES[1:]],
+        _api_exception(404),
         _api_exception(404),
     ]
 
@@ -3628,6 +3638,7 @@ def test_dependency_service_apply_failure_prevents_marker_write(operation: str) 
                 _managed_dependency_service(component)
                 for component, _ in DEPENDENCY_SERVICES
             ],
+            _api_exception(404),
             _api_exception(404),
         ]
         api.patch_namespaced_service.side_effect = [
@@ -3826,6 +3837,8 @@ def test_mariadb_reads_and_writes_follow_the_frozen_cross_api_order() -> None:
         ("read", "deployment", "example-coriolis-deployer-manager"),
         ("read", "deployment", "example-coriolis-worker"),
         ("read", "configmap", "example-common-bootstrap-v2"),
+        ("read", "service", "example-coriolis-web"),
+        ("read", "deployment", "example-coriolis-web"),
     ]
     assert [event for event in events if event[0] == "write"] == [
         ("write", "secret", "example-coriolis-credentials"),
@@ -3859,6 +3872,8 @@ def test_mariadb_reads_and_writes_follow_the_frozen_cross_api_order() -> None:
         ("write", "deployment", "example-coriolis-worker"),
         ("write", "service", "example-coriolis-api"),
         ("write", "deployment", "example-coriolis-api"),
+        ("write", "service", "example-coriolis-web"),
+        ("write", "deployment", "example-coriolis-web"),
         ("write", "configmap", "example-operator-state"),
     ]
     assert status["acceptedVersion"] == "2603.4"
@@ -4602,6 +4617,8 @@ def test_keystone_reads_all_resources_before_the_first_write() -> None:
         "example-coriolis-deployer-manager",
         "example-coriolis-worker",
         "example-common-bootstrap-v2",
+        "example-coriolis-web",
+        "example-coriolis-web",
     ]
     assert reads.index("example-keystone-database-credentials") > reads.index(
         "example-rabbitmq"
@@ -4745,6 +4762,8 @@ def test_keystone_retained_creation_precedes_mariadb_and_marker_is_last() -> Non
         "example-coriolis-worker",
         "example-coriolis-api",
         "example-coriolis-api",
+        "example-coriolis-web",
+        "example-coriolis-web",
         "example-operator-state",
     ]
 
@@ -5237,6 +5256,8 @@ def test_api_resources_are_not_applied_until_bootstrap_succeeds() -> None:
     ]
     assert "example-coriolis-api" not in created_services
     assert "example-coriolis-api" not in created_deployments
+    assert "example-coriolis-web" not in created_services
+    assert "example-coriolis-web" not in created_deployments
     assert_no_marker_write(core_api)
 
 
@@ -5420,6 +5441,243 @@ def test_managed_api_without_resource_version_retries_before_writes(
     assert excinfo.value.status["conditions"][2]["reason"] == "ResourceApplyFailed"
     assert api_writes(core_api) == []
     assert api_writes(apps_api) == []
+
+
+@pytest.mark.parametrize("resource_kind", ["service", "deployment"])
+def test_web_collision_is_mutation_free(resource_kind: str) -> None:
+    core_api = make_core_api()
+    apps_api = make_apps_api()
+    web_resource = (
+        build_web_service(
+            appliance_name="example",
+            namespace="operators",
+            accepted_version="2603.4",
+            owner=OWNER,
+        )
+        if resource_kind == "service"
+        else build_web_deployment(
+            appliance_name="example",
+            namespace="operators",
+            accepted_version="2603.4",
+            owner=OWNER,
+        )
+    )
+    web_resource["metadata"]["labels"]["app.kubernetes.io/managed-by"] = "other"
+
+    def read_service(*, name: str, namespace: str) -> object:
+        assert namespace == "operators"
+        if name == "example-coriolis-web" and resource_kind == "service":
+            return web_resource
+        raise _api_exception(404)
+
+    def read_deployment(*, name: str, namespace: str) -> object:
+        assert namespace == "operators"
+        if name == "example-coriolis-web" and resource_kind == "deployment":
+            return web_resource
+        raise _api_exception(404)
+
+    core_api.read_namespaced_service.side_effect = read_service
+    apps_api.read_namespaced_deployment.side_effect = read_deployment
+    status = reconcile_appliance(
+        spec=valid_spec(), meta=sample_meta(), core_api=core_api, apps_api=apps_api
+    )
+
+    assert status["conditions"][2]["reason"] == "ResourceCollision"
+    assert "operators/example-coriolis-web" in status["conditions"][2]["message"]
+    assert api_writes(core_api) == []
+    assert api_writes(apps_api) == []
+
+
+@pytest.mark.parametrize("resource_kind", ["service", "deployment"])
+def test_managed_web_without_resource_version_retries_before_writes(
+    resource_kind: str,
+) -> None:
+    core_api = make_core_api()
+    apps_api = make_apps_api()
+    web_resource = (
+        build_web_service(
+            appliance_name="example",
+            namespace="operators",
+            accepted_version="2603.4",
+            owner=OWNER,
+        )
+        if resource_kind == "service"
+        else build_web_deployment(
+            appliance_name="example",
+            namespace="operators",
+            accepted_version="2603.4",
+            owner=OWNER,
+        )
+    )
+
+    def read_service(*, name: str, namespace: str) -> object:
+        assert namespace == "operators"
+        if name == "example-coriolis-web" and resource_kind == "service":
+            return web_resource
+        raise _api_exception(404)
+
+    def read_deployment(*, name: str, namespace: str) -> object:
+        assert namespace == "operators"
+        if name == "example-coriolis-web" and resource_kind == "deployment":
+            return web_resource
+        raise _api_exception(404)
+
+    core_api.read_namespaced_service.side_effect = read_service
+    apps_api.read_namespaced_deployment.side_effect = read_deployment
+
+    with pytest.raises(main.ReconcileRetry) as excinfo:
+        reconcile_appliance(
+            spec=valid_spec(), meta=sample_meta(), core_api=core_api, apps_api=apps_api
+        )
+
+    assert excinfo.value.status["conditions"][2]["reason"] == "ResourceApplyFailed"
+    assert api_writes(core_api) == []
+    assert api_writes(apps_api) == []
+
+
+@pytest.mark.parametrize("resource_kind", ["service", "deployment"])
+def test_managed_web_resources_use_guarded_ssa(resource_kind: str) -> None:
+    core_api = make_core_api()
+    apps_api = make_apps_api()
+    web_resource = (
+        build_web_service(
+            appliance_name="example",
+            namespace="operators",
+            accepted_version="2603.4",
+            owner=OWNER,
+        )
+        if resource_kind == "service"
+        else build_web_deployment(
+            appliance_name="example",
+            namespace="operators",
+            accepted_version="2603.4",
+            owner=OWNER,
+        )
+    )
+    web_resource["metadata"]["resourceVersion"] = "46"
+
+    def read_service(*, name: str, namespace: str) -> object:
+        assert namespace == "operators"
+        if name == "example-coriolis-web" and resource_kind == "service":
+            return web_resource
+        raise _api_exception(404)
+
+    def read_deployment(*, name: str, namespace: str) -> object:
+        assert namespace == "operators"
+        if name == "example-coriolis-web" and resource_kind == "deployment":
+            return web_resource
+        raise _api_exception(404)
+
+    core_api.read_namespaced_service.side_effect = read_service
+    apps_api.read_namespaced_deployment.side_effect = read_deployment
+    reconcile_appliance(
+        spec=valid_spec(), meta=sample_meta(), core_api=core_api, apps_api=apps_api
+    )
+
+    patch_call = (
+        core_api.patch_namespaced_service.call_args
+        if resource_kind == "service"
+        else apps_api.patch_namespaced_deployment.call_args
+    )
+    create_calls = (
+        core_api.create_namespaced_service.call_args_list
+        if resource_kind == "service"
+        else apps_api.create_namespaced_deployment.call_args_list
+    )
+    assert patch_call.kwargs["name"] == "example-coriolis-web"
+    assert patch_call.kwargs["body"]["metadata"]["resourceVersion"] == "46"
+    assert patch_call.kwargs["field_manager"] == "coriolis-operator"
+    assert patch_call.kwargs["force"] is True
+    assert "example-coriolis-web" not in [
+        call.kwargs["body"]["metadata"]["name"] for call in create_calls
+    ]
+
+
+@pytest.mark.parametrize("resource_kind", ["service", "deployment"])
+def test_web_non_404_read_failure_is_sanitized_before_writes(
+    resource_kind: str,
+) -> None:
+    core_api = make_core_api()
+    apps_api = make_apps_api()
+    sentinel = f"web-{resource_kind}-read-sentinel"
+
+    def fail_web_service(*, name: str, namespace: str) -> object:
+        assert namespace == "operators"
+        if name == "example-coriolis-web":
+            raise client.ApiException(status=403, reason=sentinel)
+        raise _api_exception(404)
+
+    def fail_web_deployment(*, name: str, namespace: str) -> object:
+        assert namespace == "operators"
+        if name == "example-coriolis-web":
+            raise client.ApiException(status=403, reason=sentinel)
+        raise _api_exception(404)
+
+    if resource_kind == "service":
+        core_api.read_namespaced_service.side_effect = fail_web_service
+    else:
+        apps_api.read_namespaced_deployment.side_effect = fail_web_deployment
+
+    with pytest.raises(main.ReconcileRetry) as excinfo:
+        reconcile_appliance(
+            spec=valid_spec(), meta=sample_meta(), core_api=core_api, apps_api=apps_api
+        )
+
+    service_reads = [
+        call.kwargs["name"] for call in core_api.read_namespaced_service.call_args_list
+    ]
+    deployment_reads = [
+        call.kwargs["name"]
+        for call in apps_api.read_namespaced_deployment.call_args_list
+    ]
+    assert service_reads[-1] == "example-coriolis-web"
+    if resource_kind == "service":
+        assert deployment_reads[-1] == "example-coriolis-worker"
+    else:
+        assert deployment_reads[-2:] == [
+            "example-coriolis-worker",
+            "example-coriolis-web",
+        ]
+    assert excinfo.value.status["conditions"][2]["reason"] == "ResourceReadFailed"
+    assert sentinel not in repr(excinfo.value.status)
+    assert api_writes(core_api) == []
+    assert api_writes(apps_api) == []
+
+
+@pytest.mark.parametrize("resource_kind", ["service", "deployment"])
+def test_web_apply_failure_is_sanitized_and_skips_marker(resource_kind: str) -> None:
+    core_api = make_core_api()
+    apps_api = make_apps_api()
+
+    def fail_web(*, body: dict, **_: object) -> None:
+        if body["metadata"]["name"] == "example-coriolis-web":
+            raise client.ApiException(status=409, reason="web-apply-sentinel")
+
+    if resource_kind == "service":
+        core_api.create_namespaced_service.side_effect = fail_web
+    else:
+        apps_api.create_namespaced_deployment.side_effect = fail_web
+
+    with pytest.raises(main.ReconcileRetry) as excinfo:
+        reconcile_appliance(
+            spec=valid_spec(), meta=sample_meta(), core_api=core_api, apps_api=apps_api
+        )
+
+    assert excinfo.value.status["conditions"][2]["reason"] == "ResourceApplyFailed"
+    assert "web-apply-sentinel" not in repr(excinfo.value.status)
+    created_web_services = [
+        item.kwargs["body"]["metadata"]["name"]
+        for item in core_api.create_namespaced_service.call_args_list
+    ]
+    created_web_deployments = [
+        item.kwargs["body"]["metadata"]["name"]
+        for item in apps_api.create_namespaced_deployment.call_args_list
+    ]
+    if resource_kind == "service":
+        assert "example-coriolis-web" not in created_web_deployments
+    else:
+        assert "example-coriolis-web" in created_web_services
+    assert_no_marker_write(core_api)
 
 
 def test_conductor_collision_is_mutation_free() -> None:
