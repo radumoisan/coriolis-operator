@@ -74,7 +74,7 @@ def test_deployer_manager_deployment_has_frozen_runtime_contract() -> None:
     }
     assert pod["automountServiceAccountToken"] is False
     assert pod["enableServiceLinks"] is False
-    assert pod["terminationGracePeriodSeconds"] == 15
+    assert pod["terminationGracePeriodSeconds"] == 30
     assert DEPLOYER_MANAGER_IMAGE == (
         "cr.virtomat.io/virtomat/coriolis/coriolis-deployer-manager:2603.4"
         "@sha256:a2a7091daf8e172b96fa0b48d19ffad285d7bfaad42fc7e8cd44a688f06f36aa"

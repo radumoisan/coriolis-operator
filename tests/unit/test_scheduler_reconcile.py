@@ -74,7 +74,7 @@ def test_scheduler_deployment_has_frozen_runtime_contract() -> None:
     }
     assert pod["automountServiceAccountToken"] is False
     assert pod["enableServiceLinks"] is False
-    assert pod["terminationGracePeriodSeconds"] == 15
+    assert pod["terminationGracePeriodSeconds"] == 30
 
     assert SCHEDULER_IMAGE == (
         "cr.virtomat.io/virtomat/coriolis/coriolis-scheduler:2603.4"

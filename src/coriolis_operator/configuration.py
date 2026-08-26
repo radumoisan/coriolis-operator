@@ -21,22 +21,19 @@ _RENDER_FAILURE_MESSAGE = "Coriolis configuration rendering failed"
 _INVALID_SENSITIVE_INPUT_MESSAGE = "invalid sensitive Coriolis configuration input"
 _SENSITIVE_RENDER_FAILURE_MESSAGE = "sensitive Coriolis configuration rendering failed"
 
+# Exact 2603.4 worker-qualified Kubernetes provider set; retain module maps/templates
+# for unavailable providers as upstream provenance.
 _EXPORT_PROVIDERS = (
     "openstack",
-    "oracle-vm",
-    "opc",
     "azure",
     "scvmm",
     "vmware",
     "aws",
     "metal",
     "ovirt",
-    "nutanix",
 )
 _IMPORT_PROVIDERS = (
     "openstack",
-    "oracle-vm",
-    "opc",
     "azure",
     "scvmm",
     "oci",
@@ -47,7 +44,6 @@ _IMPORT_PROVIDERS = (
     "lxd",
     "proxmox",
     "libvirt",
-    "cloudstack",
 )
 _PROVIDERS = tuple(dict.fromkeys((*_EXPORT_PROVIDERS, *_IMPORT_PROVIDERS)))
 _EXPORT_MODULES = MappingProxyType(

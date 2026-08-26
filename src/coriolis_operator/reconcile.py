@@ -192,6 +192,18 @@ from coriolis_operator.transfer_cron import (
     TRANSFER_CRON_RUN_AS_ID,
     TRANSFER_CRON_TERMINATION_GRACE_PERIOD_SECONDS,
 )
+from coriolis_operator.worker import (
+    WORKER_ARGS,
+    WORKER_COMMAND,
+    WORKER_COMPONENT,
+    WORKER_CONFIG_DIR,
+    WORKER_EXPORT_DIR,
+    WORKER_IMAGE,
+    WORKER_IMAGE_PULL_SECRET_NAME,
+    WORKER_LOG_DIR,
+    WORKER_REPLICAS,
+    WORKER_TERMINATION_GRACE_PERIOD_SECONDS,
+)
 
 STATE_CONFIG_MAP_SUFFIX = "-operator-state"
 CONFIG_MAP_NAME_MAX_LENGTH = 253
@@ -214,8 +226,8 @@ RECONCILED_MESSAGE = (
     "The foundational appliance resources, dependency Services, MariaDB, RabbitMQ, "
     "Memcached, Keystone, Coriolis-common bootstrap, Coriolis API, Coriolis "
     "conductor, Coriolis scheduler, Coriolis transfer-cron, Coriolis minion-manager, "
-    "Coriolis deployer-manager, and controller state marker were reconciled in "
-    "Kubernetes; runtime "
+    "Coriolis deployer-manager, Coriolis worker, and controller state marker were "
+    "reconciled in Kubernetes; runtime "
     "readiness is not implemented yet."
 )
 UPGRADE_NOT_SUPPORTED_MESSAGE = "The core profile has no supported upgrade path."
@@ -397,6 +409,14 @@ class MinionManagerResourcePreflight:
 @dataclass(frozen=True)
 class DeployerManagerResourcePreflight:
     """Pure preflight outcome and desired Coriolis deployer-manager Deployment."""
+
+    classification: OwnedClassification
+    manifests: tuple[dict[str, Any], ...] = field(repr=False)
+
+
+@dataclass(frozen=True)
+class WorkerResourcePreflight:
+    """Pure preflight outcome and desired Coriolis worker Deployment."""
 
     classification: OwnedClassification
     manifests: tuple[dict[str, Any], ...] = field(repr=False)
@@ -2172,6 +2192,135 @@ def preflight_deployer_manager_resource(
         classification,
         (
             build_deployer_manager_deployment(
+                appliance_name=appliance_name,
+                namespace=namespace,
+                accepted_version=accepted_version,
+                owner=owner,
+            ),
+        ),
+    )
+
+
+def build_worker_deployment(
+    *,
+    appliance_name: str,
+    namespace: str,
+    accepted_version: str,
+    owner: Mapping[str, Any],
+) -> dict[str, Any]:
+    """Build the one-replica Coriolis worker Deployment."""
+    component = WORKER_COMPONENT
+    resource_name = appliance_resource_name(appliance_name, component)
+    metadata = build_resource_metadata(
+        resource_name=resource_name,
+        namespace=namespace,
+        appliance_name=appliance_name,
+        component=component,
+        accepted_version=accepted_version,
+        owner=owner,
+    )
+    selector = {
+        "coriolis.cloudbase.it/appliance": appliance_identity(appliance_name),
+        "coriolis.cloudbase.it/component": component,
+    }
+    config_secret_name = appliance_resource_name(
+        appliance_name, "coriolis-config-secret"
+    )
+    container = {
+        "name": component,
+        "image": WORKER_IMAGE,
+        "imagePullPolicy": "Always",
+        "command": [WORKER_COMMAND],
+        "args": list(WORKER_ARGS),
+        "env": [
+            {"name": "HOME", "value": "/tmp"},
+            {"name": "PYTHONDONTWRITEBYTECODE", "value": "1"},
+        ],
+        "securityContext": {
+            "runAsUser": 0,
+            "runAsGroup": 0,
+            "privileged": True,
+            "allowPrivilegeEscalation": True,
+            "readOnlyRootFilesystem": True,
+            "seccompProfile": {"type": "Unconfined"},
+        },
+        "volumeMounts": [
+            {"name": "config", "mountPath": WORKER_CONFIG_DIR, "readOnly": True},
+            {"name": "tmp", "mountPath": "/tmp"},
+            {"name": "logs", "mountPath": WORKER_LOG_DIR},
+            {"name": "export", "mountPath": WORKER_EXPORT_DIR},
+            {"name": "dev", "mountPath": "/dev"},
+            {"name": "lib-modules", "mountPath": "/lib/modules", "readOnly": True},
+        ],
+    }
+    return {
+        "apiVersion": "apps/v1",
+        "kind": "Deployment",
+        "metadata": metadata,
+        "spec": {
+            "replicas": WORKER_REPLICAS,
+            "strategy": {"type": "Recreate"},
+            "selector": {"matchLabels": selector},
+            "template": {
+                "metadata": {"labels": dict(metadata["labels"])},
+                "spec": {
+                    "hostname": resource_name,
+                    "imagePullSecrets": [{"name": WORKER_IMAGE_PULL_SECRET_NAME}],
+                    "automountServiceAccountToken": False,
+                    "enableServiceLinks": False,
+                    "terminationGracePeriodSeconds": (
+                        WORKER_TERMINATION_GRACE_PERIOD_SECONDS
+                    ),
+                    "containers": [container],
+                    "volumes": [
+                        {
+                            "name": "config",
+                            "secret": {"secretName": config_secret_name},
+                        },
+                        {"name": "tmp", "emptyDir": {"medium": "Memory"}},
+                        {"name": "logs", "emptyDir": {}},
+                        {"name": "export", "emptyDir": {}},
+                        {
+                            "name": "dev",
+                            "hostPath": {"path": "/dev", "type": "Directory"},
+                        },
+                        {
+                            "name": "lib-modules",
+                            "hostPath": {"path": "/lib/modules", "type": "Directory"},
+                        },
+                    ],
+                },
+            },
+        },
+    }
+
+
+def preflight_worker_resource(
+    *,
+    appliance_name: str,
+    namespace: str,
+    accepted_version: str,
+    owner: Mapping[str, Any],
+    worker_deployment: Any | None,
+) -> WorkerResourcePreflight:
+    """Classify the worker before building its desired Deployment."""
+    component = WORKER_COMPONENT
+    resource_name = appliance_resource_name(appliance_name, component)
+    classification = classify_owned_resource(
+        existing=worker_deployment,
+        resource_name=resource_name,
+        namespace=namespace,
+        appliance_name=appliance_name,
+        component=component,
+        accepted_version=accepted_version,
+        owner=owner,
+    )
+    if classification is OwnedClassification.COLLISION:
+        return WorkerResourcePreflight(classification, ())
+    return WorkerResourcePreflight(
+        classification,
+        (
+            build_worker_deployment(
                 appliance_name=appliance_name,
                 namespace=namespace,
                 accepted_version=accepted_version,

@@ -76,7 +76,7 @@ def test_conductor_deployment_has_frozen_runtime_contract() -> None:
     }
     assert pod["automountServiceAccountToken"] is False
     assert pod["enableServiceLinks"] is False
-    assert pod["terminationGracePeriodSeconds"] == 15
+    assert pod["terminationGracePeriodSeconds"] == 45
 
     assert container["name"] == CONDUCTOR_COMPONENT
     assert container["image"] == CONDUCTOR_IMAGE

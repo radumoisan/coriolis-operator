@@ -60,6 +60,7 @@ from coriolis_operator.reconcile import (
     build_state_config_map,
     build_status,
     build_transfer_cron_deployment,
+    build_worker_deployment,
     classify_existing_marker,
     classify_owned_resource,
     classify_retained_resource,
@@ -1527,8 +1528,8 @@ def test_build_status_reports_accepted_api_only_slice() -> None:
                 "The foundational appliance resources, dependency Services, MariaDB, "
                 "RabbitMQ, Memcached, Keystone, Coriolis-common bootstrap, Coriolis "
                 "API, Coriolis conductor, Coriolis scheduler, Coriolis transfer-cron, "
-                "Coriolis minion-manager, Coriolis deployer-manager, and controller "
-                "state marker were reconciled in Kubernetes; runtime "
+                "Coriolis minion-manager, Coriolis deployer-manager, Coriolis worker, "
+                "and controller state marker were reconciled in Kubernetes; runtime "
                 "readiness is not "
                 "implemented yet.",
             ),
@@ -3823,6 +3824,7 @@ def test_mariadb_reads_and_writes_follow_the_frozen_cross_api_order() -> None:
         ("read", "deployment", "example-coriolis-transfer-cron"),
         ("read", "deployment", "example-coriolis-minion-manager"),
         ("read", "deployment", "example-coriolis-deployer-manager"),
+        ("read", "deployment", "example-coriolis-worker"),
         ("read", "configmap", "example-common-bootstrap-v2"),
     ]
     assert [event for event in events if event[0] == "write"] == [
@@ -3854,6 +3856,7 @@ def test_mariadb_reads_and_writes_follow_the_frozen_cross_api_order() -> None:
         ("write", "deployment", "example-coriolis-transfer-cron"),
         ("write", "deployment", "example-coriolis-minion-manager"),
         ("write", "deployment", "example-coriolis-deployer-manager"),
+        ("write", "deployment", "example-coriolis-worker"),
         ("write", "service", "example-coriolis-api"),
         ("write", "deployment", "example-coriolis-api"),
         ("write", "configmap", "example-operator-state"),
@@ -4597,6 +4600,7 @@ def test_keystone_reads_all_resources_before_the_first_write() -> None:
         "example-coriolis-transfer-cron",
         "example-coriolis-minion-manager",
         "example-coriolis-deployer-manager",
+        "example-coriolis-worker",
         "example-common-bootstrap-v2",
     ]
     assert reads.index("example-keystone-database-credentials") > reads.index(
@@ -4738,6 +4742,7 @@ def test_keystone_retained_creation_precedes_mariadb_and_marker_is_last() -> Non
         "example-coriolis-transfer-cron",
         "example-coriolis-minion-manager",
         "example-coriolis-deployer-manager",
+        "example-coriolis-worker",
         "example-coriolis-api",
         "example-coriolis-api",
         "example-operator-state",
@@ -5994,6 +5999,89 @@ def test_deployer_manager_apply_failure_is_sanitized_and_skips_api_and_marker() 
     assert_no_marker_write(core_api)
 
 
+def test_worker_collision_is_mutation_free() -> None:
+    core_api = make_core_api()
+    apps_api = make_apps_api()
+    worker = build_worker_deployment(
+        appliance_name="example",
+        namespace="operators",
+        accepted_version="2603.4",
+        owner=OWNER,
+    )
+    worker["metadata"]["labels"]["app.kubernetes.io/managed-by"] = "other"
+
+    def read_deployment(*, name: str, namespace: str) -> object:
+        assert namespace == "operators"
+        if name == "example-coriolis-worker":
+            return worker
+        raise _api_exception(404)
+
+    apps_api.read_namespaced_deployment.side_effect = read_deployment
+    status = reconcile_appliance(
+        spec=valid_spec(), meta=sample_meta(), core_api=core_api, apps_api=apps_api
+    )
+
+    assert status["conditions"][2]["reason"] == "ResourceCollision"
+    assert "operators/example-coriolis-worker" in status["conditions"][2]["message"]
+    assert api_writes(core_api) == []
+    assert api_writes(apps_api) == []
+
+
+def test_managed_worker_uses_guarded_ssa() -> None:
+    core_api = make_core_api()
+    apps_api = make_apps_api()
+    worker = build_worker_deployment(
+        appliance_name="example",
+        namespace="operators",
+        accepted_version="2603.4",
+        owner=OWNER,
+    )
+    worker["metadata"]["resourceVersion"] = "45"
+
+    def read_deployment(*, name: str, namespace: str) -> object:
+        assert namespace == "operators"
+        if name == "example-coriolis-worker":
+            return worker
+        raise _api_exception(404)
+
+    apps_api.read_namespaced_deployment.side_effect = read_deployment
+    reconcile_appliance(
+        spec=valid_spec(), meta=sample_meta(), core_api=core_api, apps_api=apps_api
+    )
+
+    worker_call = next(
+        call
+        for call in apps_api.patch_namespaced_deployment.call_args_list
+        if call.kwargs["name"] == "example-coriolis-worker"
+    )
+    assert worker_call.kwargs["body"]["metadata"]["resourceVersion"] == "45"
+    assert worker_call.kwargs["field_manager"] == "coriolis-operator"
+    assert worker_call.kwargs["force"] is True
+
+
+def test_worker_apply_failure_is_sanitized_and_skips_api_and_marker() -> None:
+    core_api = make_core_api()
+    apps_api = make_apps_api()
+
+    def fail_worker(*, body: dict, **_: object) -> None:
+        if body["metadata"]["name"] == "example-coriolis-worker":
+            raise client.ApiException(status=409, reason="worker-apply-sentinel")
+
+    apps_api.create_namespaced_deployment.side_effect = fail_worker
+    with pytest.raises(main.ReconcileRetry) as excinfo:
+        reconcile_appliance(
+            spec=valid_spec(), meta=sample_meta(), core_api=core_api, apps_api=apps_api
+        )
+
+    assert excinfo.value.status["conditions"][2]["reason"] == "ResourceApplyFailed"
+    assert "worker-apply-sentinel" not in repr(excinfo.value.status)
+    assert "example-coriolis-api" not in [
+        item.kwargs["body"]["metadata"]["name"]
+        for item in core_api.create_namespaced_service.call_args_list
+    ]
+    assert_no_marker_write(core_api)
+
+
 def test_bootstrap_active_creates_no_conductor() -> None:
     core_api = make_core_api()
     apps_api = make_apps_api()
@@ -6018,6 +6106,7 @@ def test_bootstrap_active_creates_no_conductor() -> None:
     assert "example-coriolis-transfer-cron" not in created_deployments
     assert "example-coriolis-minion-manager" not in created_deployments
     assert "example-coriolis-deployer-manager" not in created_deployments
+    assert "example-coriolis-worker" not in created_deployments
     assert_no_marker_write(core_api)
 
 
@@ -6044,6 +6133,7 @@ def test_bootstrap_failed_creates_no_conductor() -> None:
     assert "example-coriolis-transfer-cron" not in created_deployments
     assert "example-coriolis-minion-manager" not in created_deployments
     assert "example-coriolis-deployer-manager" not in created_deployments
+    assert "example-coriolis-worker" not in created_deployments
     assert status["conditions"][2]["reason"] == "BootstrapFailed"
     assert status["conditions"][4]["status"] == "True"
     assert_no_marker_write(core_api)

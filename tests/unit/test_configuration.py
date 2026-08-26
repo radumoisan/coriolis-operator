@@ -52,36 +52,27 @@ SENSITIVE_CREDENTIALS = SensitiveCoriolisCredentials(
 )
 PROVIDER_SECTIONS = (
     "[openstack_migration_provider]",
-    "[oracle_vm_migration_provider]",
-    "[opc_migration_provider]",
     "[azure_migration_provider]",
     "[scvmm_migration_provider]",
     "[vmware_vsphere_migration_provider]",
     "[aws_migration_provider]",
     "[metal_migration_provider]",
     "[ovirt_migration_provider]",
-    "[nutanix_migration_provider]",
     "[oci_migration_provider]",
     "[kubevirt_migration_provider]",
     "[lxd_migration_provider]",
     "[proxmox_migration_provider]",
     "[libvirt_migration_provider]",
-    "[cloudstack_migration_provider]",
 )
 PROVIDER_MODULES = (
     "coriolis_provider_openstack.ExportProvider",
-    "coriolis_provider_oracle_vm.ExportProvider",
-    "coriolis_provider_opc.ExportProvider",
     "coriolis_provider_azure.ExportProvider",
     "coriolis_provider_scvmm.HyperVExportProvider",
     "coriolis_provider_vmware_vsphere.ExportProvider",
     "coriolis_provider_aws.ExportProvider",
     "coriolis_provider_metal.ExportProvider",
     "coriolis_provider_ovirt_olvm.ExportProvider,coriolis_provider_ovirt_rhev.ExportProvider",
-    "coriolis_provider_nutanix.ExportProvider",
     "coriolis_provider_openstack.ImportProvider,coriolis_provider_vhi.ImportProvider",
-    "coriolis_provider_oracle_vm.ImportProvider",
-    "coriolis_provider_opc.ImportProvider",
     "coriolis_provider_azure.ImportProvider",
     "coriolis_provider_scvmm.ImportProvider",
     "coriolis_provider_oci.ImportProvider,coriolis_provider_opca.ImportProvider,coriolis_provider_o3c.ImportProvider",
@@ -92,6 +83,19 @@ PROVIDER_MODULES = (
     "coriolis_provider_lxd.ImportProvider",
     "coriolis_provider_proxmox.ImportProvider",
     "coriolis_provider_libvirt.ImportProvider",
+)
+UNAVAILABLE_PROVIDER_SECTIONS = (
+    "[oracle_vm_migration_provider]",
+    "[opc_migration_provider]",
+    "[nutanix_migration_provider]",
+    "[cloudstack_migration_provider]",
+)
+UNAVAILABLE_PROVIDER_MODULES = (
+    "coriolis_provider_oracle_vm.ExportProvider",
+    "coriolis_provider_oracle_vm.ImportProvider",
+    "coriolis_provider_opc.ExportProvider",
+    "coriolis_provider_opc.ImportProvider",
+    "coriolis_provider_nutanix.ExportProvider",
     "coriolis_provider_cloudstack.imp.ImportProvider",
 )
 EXPECTED_PROVIDER_BLOCK = (
@@ -230,6 +234,10 @@ def test_kubernetes_templates_have_only_the_approved_deltas() -> None:
         )
         .replace("cafile = {{ coriolis_config_dir }}/ssl/ca/coriolis-ca.crt\n", "")
         .replace(UPSTREAM_PROVIDER_TEMPLATE_BLOCK, KUBERNETES_PROVIDER_TEMPLATE_BLOCK)
+        .replace(
+            "export_base_path = {{ coriolis_export_dir }}\n",
+            "export_base_path = {{ coriolis_export_dir }}\n\n[luks]\ntpm2_pcrs = 7\n",
+        )
     )
     assert derived_wsgi == (
         upstream_wsgi.replace(
@@ -358,6 +366,13 @@ def test_sensitive_render_has_frozen_providers_and_fixed_values() -> None:
         content.index(module) for module in PROVIDER_MODULES
     )
     assert all(content.count(module) == 1 for module in PROVIDER_MODULES)
+    assert not any(section in content for section in UNAVAILABLE_PROVIDER_SECTIONS)
+    assert not any(module in content for module in UNAVAILABLE_PROVIDER_MODULES)
+    template_root = files("coriolis_operator").joinpath("templates/providers")
+    assert all(
+        template_root.joinpath(f"{provider}.conf.j2").is_file()
+        for provider in ("oracle-vm", "opc", "nutanix", "cloudstack")
+    )
     provider_block = content.split("\n\ncaching =", maxsplit=1)[0].rsplit(
         "\n\n", maxsplit=1
     )[1]
@@ -377,6 +392,7 @@ def test_sensitive_render_has_frozen_providers_and_fixed_values() -> None:
         "policy_file = /etc/coriolis/policy.yml",
         "lock_path = /opt/coriolis/locks",
         "export_base_path = /opt/coriolis/export",
+        "tpm2_pcrs = 7",
         "temp_keypair_password = KEYPAIR_SENTINEL_5d03",
         "vixdisklib_library_directory = /opt/coriolis/vmware-vix-disklib",
         "vixdisklib_config_location = /etc/coriolis/vixdisklib.conf",

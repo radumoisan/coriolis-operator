@@ -53,14 +53,16 @@ Evidence produced:
       authenticated secret-aware verifier proves the API->RabbitMQ RPC->conductor
       ->MariaDB path for `/v1/{project_id}/endpoints` without emitting any
       sensitive value. An admin-context messaging probe proves the scheduler RPC
-      (including its read of the empty bootstrap MariaDB raising the expected
-      `NoWorkerServiceError`), the transfer-cron RPC, and minion-manager
-      diagnostics plus its empty-pool MariaDB read over RabbitMQ. The conductor,
-      scheduler, transfer-cron, minion-manager, and deployer-manager must remain
-      running over a bounded stability interval, exit cleanly on SIGTERM/`docker
-      stop`, restart, and recover after a RabbitMQ restart without being
-      recreated. The fresh stack has no pending deployments; this evidence does
-      not invoke deployer RPCs, deployments, provider workflows, or writes.
+      (including its initial read of the empty bootstrap MariaDB raising the
+      expected `NoWorkerServiceError`), the transfer-cron RPC, and minion-manager
+      diagnostics plus its empty-pool MariaDB read over RabbitMQ. A separate
+      registration-only gate then proves one enabled/up worker, direct worker RPC,
+      scheduler selection, and stable hashed service identity. The conductor,
+      scheduler, transfer-cron, minion-manager, deployer-manager, and worker must
+      remain running over a bounded stability interval, exit cleanly on
+      SIGTERM/`docker stop`, restart, and recover after a RabbitMQ restart without
+      being recreated. The fresh stack has no pending deployments; this evidence
+      does not invoke deployer RPCs, deployments, provider workflows, or writes.
 
 This script must never print credentials, DSNs, tokens, headers, bodies, raw
 sensitive logs, or process environments. It prints sanitized PASS/FAIL stage
@@ -71,6 +73,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import re
 import secrets
 import shutil
 import subprocess
@@ -176,6 +179,10 @@ MINION_MANAGER_IMAGE = (
     "cr.virtomat.io/virtomat/coriolis/coriolis-minion-manager:2603.4"
     "@sha256:1ea016dd967ce249a45cf9937701a45880f3b42f8146a93d1f5eb4f1d84e1fb9"
 )
+WORKER_IMAGE = (
+    "cr.virtomat.io/virtomat/coriolis/coriolis-worker:2603.4"
+    "@sha256:ff30999d6e43709411f197b1b6b80dbce1d7e5498a27f869df93a061626ab2c9"
+)
 
 CONDUCTOR_RUN_AS_ID = 42434
 SCHEDULER_RUN_AS_ID = 42434
@@ -188,11 +195,15 @@ CORIOLIS_SCHEMA_TABLES = ("migrate_version", "endpoint", "service", "region")
 API_ALIAS = "coriolis-api"
 API_VERSION_TAG = "2603.4"
 STABILITY_INTERVAL = 20.0
-# coriolis.cmd.conductor defaults to the host logical CPU worker count, so the
-# conductor's clean SIGTERM shutdown needs a longer grace window than the
-# single-worker scheduler, transfer-cron, minion-manager, and deployer-manager
-# workloads.
-CONDUCTOR_STOP_TIMEOUT = 30
+# Full-stack qualification keeps bounded shutdown windows for the workloads
+# that exceeded the historical 15-second bound while still requiring exit
+# zero. The scheduler, deployer-manager, and worker retain 30 seconds; the
+# conductor gets 45 seconds because its own internal shutdown consumes its
+# roughly 30-second container grace and raced SIGKILL at the 30-second bound.
+CONDUCTOR_STOP_TIMEOUT = 45
+DEPLOYER_MANAGER_STOP_TIMEOUT = 30
+SCHEDULER_STOP_TIMEOUT = 30
+WORKER_STOP_TIMEOUT = 30
 
 CONDUCTOR_ENTRYPOINT = "/entrypoint.sh"
 CONDUCTOR_COMMAND = (
@@ -213,6 +224,48 @@ MINION_MANAGER_ENTRYPOINT = "/entrypoint.sh"
 MINION_MANAGER_COMMAND = (
     "/usr/local/bin/coriolis-minion-manager",
     "--config-file=/etc/coriolis/coriolis.conf",
+)
+WORKER_ENTRYPOINT = "/entrypoint.sh"
+WORKER_IMAGE_COMMAND = (
+    "/usr/local/bin/coriolis-worker",
+    "--config-file=/etc/coriolis/coriolis.conf",
+)
+WORKER_COMMAND = (
+    "/usr/local/bin/coriolis-worker",
+    "--worker-process-count",
+    "1",
+    "--config-file=/etc/coriolis/coriolis.conf",
+)
+WORKER_HOSTNAME = "coriolis-worker"
+WORKER_TOPIC = "coriolis_worker"
+WORKER_PROBE_FILENAME = "coriolis_worker_probe.py"
+# Exact 2603.4 worker-qualified provider module roots. The active Kubernetes
+# provider class mappings reference only these roots, and the oracle-vm/opc/
+# nutanix/cloudstack roots are excluded. Probed via find_spec (never imported).
+WORKER_PROVIDER_MODULE_ROOTS = (
+    "coriolis_provider_openstack",
+    "coriolis_provider_vhi",
+    "coriolis_provider_azure",
+    "coriolis_provider_scvmm",
+    "coriolis_provider_vmware_vsphere",
+    "coriolis_provider_aws",
+    "coriolis_provider_metal",
+    "coriolis_provider_ovirt_olvm",
+    "coriolis_provider_ovirt_rhev",
+    "coriolis_provider_oci",
+    "coriolis_provider_opca",
+    "coriolis_provider_o3c",
+    "coriolis_provider_kubevirt",
+    "coriolis_provider_harvester",
+    "coriolis_provider_lxd",
+    "coriolis_provider_proxmox",
+    "coriolis_provider_libvirt",
+)
+WORKER_EXCLUDED_PROVIDER_MODULE_ROOTS = (
+    "coriolis_provider_oracle_vm",
+    "coriolis_provider_opc",
+    "coriolis_provider_nutanix",
+    "coriolis_provider_cloudstack",
 )
 DEPLOYER_MANAGER_ENTRYPOINT = "/entrypoint.sh"
 DEPLOYER_MANAGER_IMAGE_COMMAND = (DEPLOYER_MANAGER_COMMAND, *DEPLOYER_MANAGER_ARGS)
@@ -402,8 +455,16 @@ class Resources:
         return f"{PREFIX}-{self.token}-deployer-manager"
 
     @property
+    def worker_main(self) -> str:
+        return f"{PREFIX}-{self.token}-worker"
+
+    @property
     def messaging_probe(self) -> str:
         return f"{PREFIX}-{self.token}-messaging-probe"
+
+    @property
+    def worker_probe(self) -> str:
+        return f"{PREFIX}-{self.token}-worker-probe"
 
     @property
     def api_main(self) -> str:
@@ -640,14 +701,17 @@ try:
     cfg.CONF([], project='coriolis',
              default_config_files=['/etc/coriolis/coriolis.conf'])
     ctxt = get_admin_context()
+    expect_worker = sys.argv[1:] == ['worker']
     scheduler = SchedulerClient()
     scheduler.get_diagnostics(ctxt)
     try:
-        scheduler.get_workers_for_specs(ctxt)
+        workers = scheduler.get_workers_for_specs(ctxt)
     except exception.NoWorkerServiceError:
-        pass
+        if expect_worker:
+            fail()
     else:
-        fail()
+        if not expect_worker or len(workers) != 1:
+            fail()
     transfer_cron = TransferCronClient()
     transfer_cron.get_diagnostics(ctxt)
     minion_manager = MinionManagerClient()
@@ -655,6 +719,44 @@ try:
     if minion_manager.get_minion_pools(ctxt) != []:
         fail()
     print('coriolis-messaging-ok')
+except Exception:
+    fail()
+"""
+
+# Registration-only worker probe. It uses the generated config and an admin
+# context, but never performs provider, migration, trust, or write operations.
+CORIOLIS_WORKER_PROBE = """import sys
+from oslo_config import cfg
+
+def fail():
+    print('CORIOLIS_WORKER_FAIL')
+    sys.exit(1)
+
+try:
+    from coriolis.context import get_admin_context
+    from coriolis.scheduler.rpc.client import SchedulerClient
+    from coriolis.worker.rpc.client import WorkerClient
+
+    cfg.CONF([], project='coriolis',
+             default_config_files=['/etc/coriolis/coriolis.conf'])
+    ctxt = get_admin_context()
+    status = WorkerClient(host='coriolis-worker').get_service_status(ctxt)
+    if (status.get('host') != 'coriolis-worker'
+            or status.get('topic') != 'coriolis_worker'):
+        fail()
+    workers = SchedulerClient().get_workers_for_specs(ctxt, enabled=True)
+    if len(workers) != 1:
+        fail()
+    worker = workers[0]
+    field = (worker.get if isinstance(worker, dict)
+             else lambda name: getattr(worker, name))
+    if (field('host') != 'coriolis-worker'
+            or field('binary') != 'coriolis-worker'
+            or field('topic') != 'coriolis_worker'
+            or field('enabled') is not True
+            or field('status') != 'UP'):
+        fail()
+    print('coriolis-worker-ok')
 except Exception:
     fail()
 """
@@ -766,6 +868,7 @@ def create_evidence_files(
             _write_private(coriolis / name, content)
         _write_private(coriolis / "coriolis_rpc_probe.py", CORIOLIS_RPC_PROBE)
         _write_private(coriolis / MESSAGING_PROBE_FILENAME, CORIOLIS_MESSAGING_PROBE)
+        _write_private(coriolis / WORKER_PROBE_FILENAME, CORIOLIS_WORKER_PROBE)
         _write_private(
             coriolis / "bootstrap.py",
             render_bootstrap_script(
@@ -834,6 +937,7 @@ class Validator:
         self.report = report
         self.resources = Resources(secrets.token_hex(8))
         self.paths: EvidencePaths | None = None
+        self.worker_service_uuid: str | None = None
 
     def _checked(self, stage: str, command: Sequence[str]) -> None:
         try:
@@ -945,6 +1049,53 @@ class Validator:
             MINION_MANAGER_IMAGE,
             MINION_MANAGER_ENTRYPOINT,
             MINION_MANAGER_COMMAND,
+        )
+
+    def _verify_worker_image_contract(self) -> None:
+        self._verify_application_image_contract(
+            "worker-image-contract",
+            WORKER_IMAGE,
+            WORKER_ENTRYPOINT,
+            WORKER_IMAGE_COMMAND,
+        )
+
+    def _worker_provider_probe_source(self) -> str:
+        """Build the no-import/no-write provider-module probe source.
+
+        Uses `importlib.util.find_spec` only; never imports or invokes a
+        provider. Double-quoted string literals keep the source safe to embed
+        in a single-quoted shell argument, and it emits no output.
+        """
+        source = "import importlib.util as _u\n"
+        source += "".join(
+            f'if _u.find_spec("{root}") is None: raise SystemExit(1)\n'
+            for root in WORKER_PROVIDER_MODULE_ROOTS
+        )
+        source += "".join(
+            f'if _u.find_spec("{root}") is not None: raise SystemExit(1)\n'
+            for root in WORKER_EXCLUDED_PROVIDER_MODULE_ROOTS
+        )
+        return source
+
+    def _verify_worker_provider_image_contract(self) -> None:
+        self._checked(
+            "worker-provider-image-contract",
+            self._docker(
+                "run",
+                "--rm",
+                "--network",
+                "none",
+                "--read-only",
+                "--cap-drop",
+                "ALL",
+                "--security-opt",
+                "no-new-privileges",
+                "--entrypoint",
+                "/bin/sh",
+                WORKER_IMAGE,
+                "-c",
+                f"set -eu; python3 -c '{self._worker_provider_probe_source()}'",
+            ),
         )
 
     def _verify_deployer_manager_image_contract(self) -> None:
@@ -2045,7 +2196,48 @@ class Validator:
             ),
         )
 
-    def _messaging_probe_arguments(self, container_name: str) -> list[str]:
+    def _worker_runtime_arguments(self, container_name: str) -> list[str]:
+        return [
+            "run",
+            "--name",
+            container_name,
+            "--detach",
+            "--network",
+            self.resources.network,
+            "--hostname",
+            WORKER_HOSTNAME,
+            "--user",
+            "0:0",
+            "--privileged",
+            "--read-only",
+            "--env",
+            "HOME=/tmp",
+            "--env",
+            "PYTHONDONTWRITEBYTECODE=1",
+            "--tmpfs",
+            "/tmp:rw,noexec,nosuid,size=64m",
+            "--tmpfs",
+            f"{API_LOG_DIR}:rw,noexec,nosuid,size=64m",
+            "--tmpfs",
+            "/opt/coriolis/export:rw,noexec,nosuid,size=64m",
+            "--mount",
+            f"type=volume,src={self.resources.coriolis_config_volume},"
+            f"dst={API_CONFIG_DIR},readonly",
+            "--entrypoint",
+            WORKER_COMMAND[0],
+            WORKER_IMAGE,
+            *WORKER_COMMAND[1:],
+        ]
+
+    def _start_worker(self) -> None:
+        self._checked(
+            "start-worker",
+            self._docker(*self._worker_runtime_arguments(self.resources.worker_main)),
+        )
+
+    def _messaging_probe_arguments(
+        self, container_name: str, *, expect_worker: bool = False
+    ) -> list[str]:
         return [
             "run",
             "--rm",
@@ -2076,16 +2268,43 @@ class Validator:
             "/bin/sh",
             CONDUCTOR_IMAGE,
             "-c",
-            f"set -eu; python3 {API_CONFIG_DIR}/{MESSAGING_PROBE_FILENAME}",
+            f"set -eu; python3 {API_CONFIG_DIR}/{MESSAGING_PROBE_FILENAME}"
+            + (" worker" if expect_worker else ""),
         ]
 
-    def _poll_messaging_probe(self, stage: str) -> None:
+    def _poll_messaging_probe(self, stage: str, *, expect_worker: bool = False) -> None:
         deadline = self.clock() + self.timeout
         while self.clock() < deadline:
             try:
                 result = self.runner(
                     self._docker(
-                        *self._messaging_probe_arguments(self.resources.messaging_probe)
+                        *self._messaging_probe_arguments(
+                            self.resources.messaging_probe,
+                            expect_worker=expect_worker,
+                        )
+                    ),
+                    self.timeout,
+                )
+            except (OSError, subprocess.SubprocessError):
+                raise ValidationFailure(stage) from None
+            if result.returncode == 0:
+                return
+            self.sleeper(POLL_INTERVAL)
+        raise ValidationFailure(stage)
+
+    def _poll_worker_probe(self, stage: str) -> None:
+        deadline = self.clock() + self.timeout
+        while self.clock() < deadline:
+            if not self._container_running(self.resources.worker_main):
+                raise ValidationFailure("worker-container-exited")
+            try:
+                result = self.runner(
+                    self._docker(
+                        *self._messaging_probe_arguments(self.resources.worker_probe)[
+                            :-2
+                        ],
+                        "-c",
+                        f"set -eu; python3 {API_CONFIG_DIR}/{WORKER_PROBE_FILENAME}",
                     ),
                     self.timeout,
                 )
@@ -2160,6 +2379,83 @@ class Validator:
         if set(tmpfs) != set(writable_paths):
             raise ValidationFailure(stage)
 
+    def _inspect_worker_runtime(self) -> None:
+        stage = "inspect-worker"
+        try:
+            result = self.runner(
+                self._docker("inspect", self.resources.worker_main), self.timeout
+            )
+        except (OSError, subprocess.SubprocessError):
+            raise ValidationFailure(stage) from None
+        if result.returncode != 0:
+            raise ValidationFailure(stage)
+        try:
+            payload = json.loads(result.stdout)
+            if len(payload) != 1:
+                raise ValueError
+            container = payload[0]
+            config = container["Config"]
+            host_config = container["HostConfig"]
+        except (KeyError, TypeError, ValueError, json.JSONDecodeError):
+            raise ValidationFailure(stage) from None
+        if (
+            config.get("Image") != WORKER_IMAGE
+            or config.get("Hostname") != WORKER_HOSTNAME
+            or config.get("User") != "0:0"
+            or tuple(config.get("Entrypoint") or ()) != (WORKER_COMMAND[0],)
+            or tuple(config.get("Cmd") or ()) != WORKER_COMMAND[1:]
+            or host_config.get("Privileged") is not True
+            or host_config.get("ReadonlyRootfs") is not True
+            or host_config.get("NetworkMode") != self.resources.network
+            or host_config.get("PortBindings")
+            or host_config.get("Binds")
+            or host_config.get("Devices")
+            or host_config.get("DeviceRequests")
+            or host_config.get("VolumesFrom")
+        ):
+            raise ValidationFailure(stage)
+        mounts = host_config.get("Mounts") or []
+        if len(mounts) != 1 or (
+            mounts[0].get("Type") not in (None, "volume")
+            or mounts[0].get("Source")
+            not in (None, self.resources.coriolis_config_volume)
+            or mounts[0].get("Target") != API_CONFIG_DIR
+            or mounts[0].get("ReadOnly") is not True
+        ):
+            raise ValidationFailure(stage)
+        tmpfs = host_config.get("Tmpfs") or {}
+        if set(tmpfs) != {"/tmp", API_LOG_DIR, "/opt/coriolis/export"}:
+            raise ValidationFailure(stage)
+        networks = (container.get("NetworkSettings") or {}).get("Networks") or {}
+        if set(networks) != {self.resources.network}:
+            raise ValidationFailure(stage)
+
+    def _worker_service_uuid(self, stage: str) -> str:
+        query = (
+            "SELECT SHA2(id, 256) FROM coriolis.service "
+            "WHERE host='coriolis-worker' AND `binary`='coriolis-worker' "
+            "AND topic='coriolis_worker';"
+        )
+        try:
+            result = self.runner(
+                self._docker(
+                    "exec",
+                    self.resources.mariadb_main,
+                    "mariadb",
+                    f"--defaults-file={MARIADB_ADMIN_CNF_PATH}",
+                    "--batch",
+                    "--skip-column-names",
+                    f"--execute={query}",
+                ),
+                self.timeout,
+            )
+        except (OSError, subprocess.SubprocessError):
+            raise ValidationFailure(stage) from None
+        rows = result.stdout.splitlines() if result.returncode == 0 else []
+        if len(rows) != 1 or re.fullmatch(r"[0-9a-f]{64}", rows[0].strip()) is None:
+            raise ValidationFailure(stage)
+        return rows[0].strip()
+
     def _gate_api_unauthenticated(self) -> None:
         deadline = self.clock() + self.timeout
         while self.clock() < deadline:
@@ -2195,6 +2491,7 @@ class Validator:
             (self.resources.transfer_cron_main, "transfer-cron-stability"),
             (self.resources.minion_manager_main, "minion-manager-stability"),
             (self.resources.deployer_manager_main, "deployer-manager-stability"),
+            (self.resources.worker_main, "worker-stability"),
         )
         deadline = self.clock() + STABILITY_INTERVAL
         while self.clock() < deadline:
@@ -2220,8 +2517,10 @@ class Validator:
             )
         except (OSError, subprocess.SubprocessError):
             raise ValidationFailure(stage) from None
-        if result.returncode != 0 or result.stdout.strip() != "0":
-            raise ValidationFailure(stage)
+        exit_code = result.stdout.strip()
+        if result.returncode != 0 or exit_code != "0":
+            suffix = exit_code if exit_code.isdigit() else "unknown"
+            raise ValidationFailure(f"{stage}-exit-{suffix}")
 
     def _stop_conductor_graceful(self) -> None:
         self._stop_workload_graceful(
@@ -2232,7 +2531,9 @@ class Validator:
 
     def _stop_scheduler_graceful(self) -> None:
         self._stop_workload_graceful(
-            "stop-scheduler-graceful", self.resources.scheduler_main, 15
+            "stop-scheduler-graceful",
+            self.resources.scheduler_main,
+            SCHEDULER_STOP_TIMEOUT,
         )
 
     def _stop_transfer_cron_graceful(self) -> None:
@@ -2247,7 +2548,14 @@ class Validator:
 
     def _stop_deployer_manager_graceful(self) -> None:
         self._stop_workload_graceful(
-            "stop-deployer-manager-graceful", self.resources.deployer_manager_main, 15
+            "stop-deployer-manager-graceful",
+            self.resources.deployer_manager_main,
+            DEPLOYER_MANAGER_STOP_TIMEOUT,
+        )
+
+    def _stop_worker_graceful(self) -> None:
+        self._stop_workload_graceful(
+            "stop-worker-graceful", self.resources.worker_main, WORKER_STOP_TIMEOUT
         )
 
     def _start_conductor_again(self) -> None:
@@ -2280,6 +2588,11 @@ class Validator:
             self._docker("start", self.resources.deployer_manager_main),
         )
 
+    def _start_worker_again(self) -> None:
+        self._checked(
+            "start-worker-again", self._docker("start", self.resources.worker_main)
+        )
+
     def _container_id(self, stage: str, name: str) -> str:
         try:
             result = self.runner(
@@ -2303,6 +2616,7 @@ class Validator:
             (self.resources.transfer_cron_main, "transfer-cron-identity"),
             (self.resources.minion_manager_main, "minion-manager-identity"),
             (self.resources.deployer_manager_main, "deployer-manager-identity"),
+            (self.resources.worker_main, "worker-identity"),
         )
         recreated_stages = {
             self.resources.conductor_main: "conductor-recreated-on-rabbitmq-restart",
@@ -2316,6 +2630,7 @@ class Validator:
             self.resources.deployer_manager_main: (
                 "deployer-manager-recreated-on-rabbitmq-restart"
             ),
+            self.resources.worker_main: "worker-recreated-on-rabbitmq-restart",
         }
         before = {name: self._container_id(stage, name) for name, stage in identities}
         self._stage("restart-rabbitmq", self._restart_rabbitmq)
@@ -2334,9 +2649,17 @@ class Validator:
         self._stage(
             "gate-messaging-probe-rabbitmq-recovery",
             lambda: self._poll_messaging_probe(
-                "gate-messaging-probe-rabbitmq-recovery"
+                "gate-messaging-probe-rabbitmq-recovery", expect_worker=True
             ),
         )
+        self._stage(
+            "gate-worker-probe-rabbitmq-recovery",
+            lambda: self._poll_worker_probe("gate-worker-probe-rabbitmq-recovery"),
+        )
+        if self.worker_service_uuid != self._worker_service_uuid(
+            "worker-service-identity-rabbitmq"
+        ):
+            raise ValidationFailure("worker-service-identity-rabbitmq")
         for name, stage in identities:
             if self._container_id(stage, name) != before[name]:
                 raise ValidationFailure(recreated_stages[name])
@@ -2429,6 +2752,13 @@ class Validator:
             "gate-messaging-probe",
             lambda: self._poll_messaging_probe("gate-messaging-probe"),
         )
+        self._stage("start-worker", self._start_worker)
+        self._stage("inspect-worker", self._inspect_worker_runtime)
+        self._stage(
+            "gate-worker-probe",
+            lambda: self._poll_worker_probe("gate-worker-probe"),
+        )
+        self.worker_service_uuid = self._worker_service_uuid("worker-service-identity")
         self._stage("workload-stability", self._workload_stability)
         self._stage(
             "gate-conductor-rpc-after-stability",
@@ -2436,16 +2766,28 @@ class Validator:
         )
         self._stage(
             "gate-messaging-probe-after-stability",
-            lambda: self._poll_messaging_probe("gate-messaging-probe-after-stability"),
+            lambda: self._poll_messaging_probe(
+                "gate-messaging-probe-after-stability", expect_worker=True
+            ),
         )
         self._shutdown_restart_evidence()
+        if self.worker_service_uuid != self._worker_service_uuid(
+            "worker-service-identity-restart"
+        ):
+            raise ValidationFailure("worker-service-identity-restart")
         self._stage(
             "gate-conductor-rpc-after-restart",
             lambda: self._gate_conductor_rpc("gate-conductor-rpc-after-restart"),
         )
         self._stage(
             "gate-messaging-probe-after-restart",
-            lambda: self._poll_messaging_probe("gate-messaging-probe-after-restart"),
+            lambda: self._poll_messaging_probe(
+                "gate-messaging-probe-after-restart", expect_worker=True
+            ),
+        )
+        self._stage(
+            "gate-worker-probe-after-restart",
+            lambda: self._poll_worker_probe("gate-worker-probe-after-restart"),
         )
         self._rabbitmq_recovery_evidence()
 
@@ -2453,6 +2795,7 @@ class Validator:
         self._stage(
             "stop-deployer-manager-graceful", self._stop_deployer_manager_graceful
         )
+        self._stage("stop-worker-graceful", self._stop_worker_graceful)
         self._stage("stop-minion-manager-graceful", self._stop_minion_manager_graceful)
         self._stage("stop-transfer-cron-graceful", self._stop_transfer_cron_graceful)
         self._stage("stop-scheduler-graceful", self._stop_scheduler_graceful)
@@ -2462,6 +2805,7 @@ class Validator:
         self._stage("start-transfer-cron-again", self._start_transfer_cron_again)
         self._stage("start-minion-manager-again", self._start_minion_manager_again)
         self._stage("start-deployer-manager-again", self._start_deployer_manager_again)
+        self._stage("start-worker-again", self._start_worker_again)
 
     def _cleanup_resources(self) -> None:
         resources: list[tuple[str, str]] = [
@@ -2485,9 +2829,11 @@ class Validator:
             ("container", self.resources.transfer_cron_main),
             ("container", self.resources.minion_manager_main),
             ("container", self.resources.deployer_manager_main),
+            ("container", self.resources.worker_main),
             ("container", self.resources.api_main),
             ("container", self.resources.rpc_probe),
             ("container", self.resources.messaging_probe),
+            ("container", self.resources.worker_probe),
             ("network", self.resources.network),
             ("volume", self.resources.runtime_volume),
             ("volume", self.resources.data_volume),
@@ -2576,6 +2922,7 @@ class Validator:
             ("scheduler-image-available", SCHEDULER_IMAGE),
             ("transfer-cron-image-available", TRANSFER_CRON_IMAGE),
             ("minion-manager-image-available", MINION_MANAGER_IMAGE),
+            ("worker-image-available", WORKER_IMAGE),
             ("deployer-manager-image-available", DEPLOYER_MANAGER_IMAGE),
             ("mariadb-image-available", MARIADB_IMAGE),
             ("keystone-image-available", KEYSTONE_IMAGE),
@@ -2595,6 +2942,11 @@ class Validator:
         )
         self._stage(
             "minion-manager-image-contract", self._verify_minion_manager_image_contract
+        )
+        self._stage("worker-image-contract", self._verify_worker_image_contract)
+        self._stage(
+            "worker-provider-image-contract",
+            self._verify_worker_provider_image_contract,
         )
         self._stage(
             "deployer-manager-image-contract",
