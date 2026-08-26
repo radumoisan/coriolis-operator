@@ -39,6 +39,25 @@ def test_role_grants_only_required_service_verbs() -> None:
     assert "resourceNames:" not in service_rule
 
 
+def test_role_grants_only_required_ingress_verbs() -> None:
+    role = (Path(__file__).parents[2] / "helm/templates/role.yaml").read_text()
+
+    ingress_rule = next(
+        block for block in role.split("  - apiGroups:") if "      - ingresses" in block
+    )
+    assert re.findall(r"^      - ([\w.]+)$", ingress_rule, flags=re.MULTILINE) == [
+        "networking.k8s.io",
+        "ingresses",
+        "get",
+        "create",
+        "patch",
+    ]
+    assert "resourceNames:" not in ingress_rule
+    assert "delete" not in ingress_rule
+    assert "list" not in ingress_rule
+    assert "watch" not in ingress_rule
+
+
 def test_role_grants_only_required_mariadb_and_memcached_workload_verbs() -> None:
     role = (Path(__file__).parents[2] / "helm/templates/role.yaml").read_text()
 

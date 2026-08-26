@@ -109,11 +109,11 @@ The development stack through MariaDB reconciliation and anonymous-account preve
 
 The schema and pure `IngressSettings` resolver are frozen. Defaults are host `coriolis.app.cloudbase.wiki`, ingress class `nginx`, `certManager` mode, issuer `letsencrypt`, and derived TLS Secret `<host>-tls`.
 
-- `certManager` mode always derives and references `<host>-tls` and annotates the ready defaulted or explicit `ClusterIssuer`.
-- `existingSecret` mode alone accepts `tlsSecretName`; it requires that same-namespace external TLS Secret and emits no issuer or cert-manager annotation.
-- The future operator owns only its Ingress resources. It never installs ingress-nginx and never creates, mutates, or deletes certificate Secret material.
+- `certManager` mode always derives and references `<host>-tls`; only the primary web Ingress annotates the ready defaulted or explicit `ClusterIssuer`.
+- `existingSecret` mode alone accepts `tlsSecretName`; it requires that same-namespace external TLS Secret and no Ingress emits an issuer or cert-manager annotation.
+- The operator owns only its three Ingress resources. It never installs ingress-nginx and never creates, mutates, or deletes certificate Secret material.
 
-Ingress has not been reconciled. Community ingress-nginx is the short-term controller decision; see [ADR 0006](decisions/0006-kubernetes-network-ingress.md).
+Local source reconciles three owner-referenced `networking.k8s.io/v1` Ingresses after API and web Service/Deployment: `<appliance>-coriolis-web`, `<appliance>-keystone`, then `<appliance>-coriolis-api`, before the marker. It validates settings before API creation, pre-reads/classifies/preflights all three before mutation, fails collisions all-or-nothing without mutation, and uses resourceVersion-guarded SSA for managed repair. Failures are sanitized and skip later writes/marker; `spec.ingress` changes reconcile. RBAC adds only Ingress `get`/`create`/`patch`. Host uniqueness across CRs is an external deployment precondition and is not enforced with list-free RBAC; multi-CR route/certificate conflicts remain unvalidated. This is local-only, unreleased, and un-POC-tested; see [ADR 0006](decisions/0006-kubernetes-network-ingress.md).
 
 ### :material-application-edit-outline: Service And Exposure Policy
 
@@ -134,7 +134,7 @@ Only Ingress is externally exposed. RabbitMQ, Memcached, MariaDB, and Keystone S
 
 ### :material-application-edit-outline: Logical Route Map
 
-The public contract is one origin, `https://<host>`. It may use multiple ingress-nginx Ingress resources where per-path rewrites require them. CORS and preflight must allow exactly that origin, preserve authentication headers, and never use a wildcard origin. WebSocket support is required for `/log-stream`.
+The public contract is one origin, `https://<host>`. CORS and preflight allow exactly that origin, never a wildcard, allow `POST`, `GET`, `OPTIONS`, `DELETE`, `PUT`, and `PATCH`, preserve `X-Auth-Token` and `X-Subject-Token`, and expose `X-Subject-Token`. When the logger Service exists and a dedicated `/log-stream` route is implemented, it requires WebSocket support.
 
 | Public path | Backend and rewritten path |
 | --- | --- |
@@ -147,7 +147,7 @@ The public contract is one origin, `https://<host>`. It may use multiple ingress
 | `/licensing` | licensing server `/v2` |
 | `/metal-hub` | Metal Hub `/api/v1` |
 
-No future route may be emitted until its backend Service exists. RabbitMQ, Memcached, MariaDB, and Keystone Services are implemented. MariaDB, Memcached, and RabbitMQ workloads are released and POC-tested, and Keystone is released as `0.5.14` with accepted released-artifact POC evidence; no workload is currently deployed after cleanup. The API Service/Deployment is released and POC-accepted as `0.5.22`. The web Service/Deployment is released and POC-accepted as `0.5.33`: source `942557a0914b7455af6dbeac6ae5966417bd1223` passed CIXpress Default `opfrnr` at every expected step (`08:39:32Z`-`08:40:58Z`) and CI commit `9f7151af10e2275e15718a325a12e850601ec5f3` published chart/app/operator `0.5.33`. It owns the same-name owner-referenced ClusterIP Service TCP `3000`, ready EndpointSlice, and one `Recreate` replica after the API Service/Deployment and before the per-appliance operator-state marker; it uses `BIND=0.0.0.0`, `/api/config` probes, relative same-origin URLs, and omits `CA_FINGERPRINT`, Step CA, and web-proxy. The exact digest `sha256:32ebc391ac46fe627185694b3fd252afd7587b152f526dff38ae0a5b887c0db1` passed the 17-stage validator and accepted isolated POC, including collision recovery, Service-DNS validation, replacement, drift repair, no-write retained-state CR recreation, and normal cleanup. The released backend web gate is complete; Ingress and all remaining routes remain unimplemented, with logical-origin Ingress next for design and implementation.
+No dedicated backend route may target an absent Service. RabbitMQ, Memcached, MariaDB, and Keystone Services are implemented. MariaDB, Memcached, and RabbitMQ workloads are released and POC-tested, and Keystone is released as `0.5.14` with accepted released-artifact POC evidence; no workload is currently deployed after cleanup. The API Service/Deployment is released and POC-accepted as `0.5.22`. The web Service/Deployment is released and POC-accepted as `0.5.33`: source `942557a0914b7455af6dbeac6ae5966417bd1223` passed CIXpress Default `opfrnr` at every expected step (`08:39:32Z`-`08:40:58Z`) and CI commit `9f7151af10e2275e15718a325a12e850601ec5f3` published chart/app/operator `0.5.33`. Local Ingress implementation emits dedicated web `/`, Keystone `/identity`, and API `/coriolis` routes above. No dedicated backend route targets `/log-stream`, Barbican, logger, licensing, or Metal Hub while their Services are absent; unmatched paths use the web `/` `Prefix`/SPA fallback until a more-precedent route is implemented. The implementation is local-only, unreleased, and un-POC-tested; the next gates are publication/release evidence and the separately approved POC, not additional route claims.
 
 ## :material-book-open-page-variant-outline: Current Status And Accuracy
 

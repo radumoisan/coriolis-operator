@@ -76,6 +76,7 @@ from coriolis_operator.deployer_manager import (
     DEPLOYER_MANAGER_RUN_AS_ID,
     DEPLOYER_MANAGER_TERMINATION_GRACE_PERIOD_SECONDS,
 )
+from coriolis_operator.ingress import IngressSettings
 from coriolis_operator.keystone import (
     KEYSTONE_AUTH_REQUEST_PATH,
     KEYSTONE_BOOTSTRAP_PATH,
@@ -237,8 +238,8 @@ RECONCILED_MESSAGE = (
     "The foundational appliance resources, dependency Services, MariaDB, RabbitMQ, "
     "Memcached, Keystone, Coriolis-common bootstrap, Coriolis API, Coriolis "
     "conductor, Coriolis scheduler, Coriolis transfer-cron, Coriolis minion-manager, "
-    "Coriolis deployer-manager, Coriolis worker, Coriolis web, and controller state "
-    "marker were "
+    "Coriolis deployer-manager, Coriolis worker, Coriolis web, Coriolis web Ingress, "
+    "Keystone Ingress, Coriolis API Ingress, and controller state marker were "
     "reconciled in Kubernetes; runtime "
     "readiness is not implemented yet."
 )
@@ -392,6 +393,16 @@ class WebResourcePreflight:
 
     service_classification: OwnedClassification
     deployment_classification: OwnedClassification
+    manifests: tuple[dict[str, Any], ...] = field(repr=False)
+
+
+@dataclass(frozen=True)
+class IngressResourcePreflight:
+    """Pure preflight outcome and desired Coriolis Ingress resource bodies."""
+
+    web_classification: OwnedClassification
+    keystone_classification: OwnedClassification
+    api_classification: OwnedClassification
     manifests: tuple[dict[str, Any], ...] = field(repr=False)
 
 
@@ -1651,6 +1662,277 @@ def preflight_web_resources(
             ),
         ),
     )
+
+
+_INGRESS_HTTPS_REDIRECT_ANNOTATION = "nginx.ingress.kubernetes.io/ssl-redirect"
+_INGRESS_CORS_ENABLE_ANNOTATION = "nginx.ingress.kubernetes.io/enable-cors"
+_INGRESS_CORS_ALLOW_ORIGIN_ANNOTATION = "nginx.ingress.kubernetes.io/cors-allow-origin"
+_INGRESS_CORS_ALLOW_METHODS_ANNOTATION = (
+    "nginx.ingress.kubernetes.io/cors-allow-methods"
+)
+_INGRESS_CORS_ALLOW_HEADERS_ANNOTATION = (
+    "nginx.ingress.kubernetes.io/cors-allow-headers"
+)
+_INGRESS_CORS_ALLOW_CREDENTIALS_ANNOTATION = (
+    "nginx.ingress.kubernetes.io/cors-allow-credentials"
+)
+_INGRESS_CORS_EXPOSE_HEADERS_ANNOTATION = (
+    "nginx.ingress.kubernetes.io/cors-expose-headers"
+)
+_INGRESS_CORS_MAX_AGE_ANNOTATION = "nginx.ingress.kubernetes.io/cors-max-age"
+_INGRESS_USE_REGEX_ANNOTATION = "nginx.ingress.kubernetes.io/use-regex"
+_INGRESS_REWRITE_TARGET_ANNOTATION = "nginx.ingress.kubernetes.io/rewrite-target"
+
+
+def _ingress_annotations(
+    *, settings: IngressSettings, include_settings: bool, rewrite_target: str | None
+) -> dict[str, str]:
+    annotations = {
+        _INGRESS_HTTPS_REDIRECT_ANNOTATION: "true",
+        _INGRESS_CORS_ENABLE_ANNOTATION: "true",
+        _INGRESS_CORS_ALLOW_ORIGIN_ANNOTATION: f"https://{settings.host}",
+        _INGRESS_CORS_ALLOW_METHODS_ANNOTATION: (
+            "POST, GET, OPTIONS, DELETE, PUT, PATCH"
+        ),
+        _INGRESS_CORS_ALLOW_HEADERS_ANNOTATION: (
+            "x-requested-with, X-Auth-Token, X-Subject-Token, Content-Type, "
+            "origin, authorization, accept, client-security-token"
+        ),
+        _INGRESS_CORS_ALLOW_CREDENTIALS_ANNOTATION: "true",
+        _INGRESS_CORS_EXPOSE_HEADERS_ANNOTATION: "X-Subject-Token",
+        _INGRESS_CORS_MAX_AGE_ANNOTATION: "1000",
+    }
+    if include_settings:
+        annotations = dict(settings.annotations) | annotations
+    if rewrite_target is not None:
+        annotations[_INGRESS_USE_REGEX_ANNOTATION] = "true"
+        annotations[_INGRESS_REWRITE_TARGET_ANNOTATION] = rewrite_target
+    return annotations
+
+
+def _build_ingress(
+    *,
+    appliance_name: str,
+    namespace: str,
+    accepted_version: str,
+    owner: Mapping[str, Any],
+    settings: IngressSettings,
+    component: str,
+    port: int,
+    path: str,
+    path_type: str,
+    include_settings: bool,
+    rewrite_target: str | None,
+) -> dict[str, Any]:
+    resource_name = appliance_resource_name(appliance_name, component)
+    metadata = build_resource_metadata(
+        resource_name=resource_name,
+        namespace=namespace,
+        appliance_name=appliance_name,
+        component=component,
+        accepted_version=accepted_version,
+        owner=owner,
+    )
+    metadata["annotations"] = dict(metadata["annotations"]) | _ingress_annotations(
+        settings=settings,
+        include_settings=include_settings,
+        rewrite_target=rewrite_target,
+    )
+    return {
+        "apiVersion": "networking.k8s.io/v1",
+        "kind": "Ingress",
+        "metadata": metadata,
+        "spec": {
+            "ingressClassName": settings.ingress_class_name,
+            "tls": [{"hosts": [settings.host], "secretName": settings.tls_secret_name}],
+            "rules": [
+                {
+                    "host": settings.host,
+                    "http": {
+                        "paths": [
+                            {
+                                "path": path,
+                                "pathType": path_type,
+                                "backend": {
+                                    "service": {
+                                        "name": resource_name,
+                                        "port": {"number": port},
+                                    }
+                                },
+                            }
+                        ]
+                    },
+                }
+            ],
+        },
+    }
+
+
+def build_web_ingress(
+    *,
+    appliance_name: str,
+    namespace: str,
+    accepted_version: str,
+    owner: Mapping[str, Any],
+    settings: IngressSettings,
+) -> dict[str, Any]:
+    """Build the primary Ingress serving the Coriolis web application."""
+    return _build_ingress(
+        appliance_name=appliance_name,
+        namespace=namespace,
+        accepted_version=accepted_version,
+        owner=owner,
+        settings=settings,
+        component=WEB_COMPONENT,
+        port=WEB_PORT,
+        path="/",
+        path_type="Prefix",
+        include_settings=True,
+        rewrite_target=None,
+    )
+
+
+def build_keystone_ingress(
+    *,
+    appliance_name: str,
+    namespace: str,
+    accepted_version: str,
+    owner: Mapping[str, Any],
+    settings: IngressSettings,
+) -> dict[str, Any]:
+    """Build the prefixed Ingress routing public identity requests to Keystone."""
+    return _build_ingress(
+        appliance_name=appliance_name,
+        namespace=namespace,
+        accepted_version=accepted_version,
+        owner=owner,
+        settings=settings,
+        component="keystone",
+        port=KEYSTONE_PORT,
+        path="/identity(/|$)(.*)",
+        path_type="ImplementationSpecific",
+        include_settings=False,
+        rewrite_target="/v3/$2",
+    )
+
+
+def build_api_ingress(
+    *,
+    appliance_name: str,
+    namespace: str,
+    accepted_version: str,
+    owner: Mapping[str, Any],
+    settings: IngressSettings,
+) -> dict[str, Any]:
+    """Build the prefixed Ingress routing public requests to the Coriolis API."""
+    return _build_ingress(
+        appliance_name=appliance_name,
+        namespace=namespace,
+        accepted_version=accepted_version,
+        owner=owner,
+        settings=settings,
+        component="coriolis-api",
+        port=API_PORT,
+        path="/coriolis(/|$)(.*)",
+        path_type="ImplementationSpecific",
+        include_settings=False,
+        rewrite_target="/v1/$2",
+    )
+
+
+def _managed_ingress_manifest(
+    *, existing: Any, manifest: dict[str, Any]
+) -> dict[str, Any]:
+    resource_version = _field(_field(existing, "metadata"), "resourceVersion")
+    if type(resource_version) is not str or not resource_version:
+        raise ValueError("managed resource is missing resourceVersion")
+    manifest["metadata"]["resourceVersion"] = resource_version
+    return manifest
+
+
+def preflight_ingress_resources(
+    *,
+    appliance_name: str,
+    namespace: str,
+    accepted_version: str,
+    owner: Mapping[str, Any],
+    settings: IngressSettings,
+    web_ingress: Any | None,
+    keystone_ingress: Any | None,
+    api_ingress: Any | None,
+) -> IngressResourcePreflight:
+    """Classify all Ingresses before constructing guarded apply manifests."""
+    web_resource_name = appliance_resource_name(appliance_name, WEB_COMPONENT)
+    keystone_resource_name = appliance_resource_name(appliance_name, "keystone")
+    api_resource_name = appliance_resource_name(appliance_name, "coriolis-api")
+    web_classification = classify_owned_resource(
+        existing=web_ingress,
+        resource_name=web_resource_name,
+        namespace=namespace,
+        appliance_name=appliance_name,
+        component=WEB_COMPONENT,
+        accepted_version=accepted_version,
+        owner=owner,
+    )
+    keystone_classification = classify_owned_resource(
+        existing=keystone_ingress,
+        resource_name=keystone_resource_name,
+        namespace=namespace,
+        appliance_name=appliance_name,
+        component="keystone",
+        accepted_version=accepted_version,
+        owner=owner,
+    )
+    api_classification = classify_owned_resource(
+        existing=api_ingress,
+        resource_name=api_resource_name,
+        namespace=namespace,
+        appliance_name=appliance_name,
+        component="coriolis-api",
+        accepted_version=accepted_version,
+        owner=owner,
+    )
+    classifications = (
+        web_classification,
+        keystone_classification,
+        api_classification,
+    )
+    if OwnedClassification.COLLISION in classifications:
+        return IngressResourcePreflight(*classifications, ())
+
+    manifests = (
+        build_web_ingress(
+            appliance_name=appliance_name,
+            namespace=namespace,
+            accepted_version=accepted_version,
+            owner=owner,
+            settings=settings,
+        ),
+        build_keystone_ingress(
+            appliance_name=appliance_name,
+            namespace=namespace,
+            accepted_version=accepted_version,
+            owner=owner,
+            settings=settings,
+        ),
+        build_api_ingress(
+            appliance_name=appliance_name,
+            namespace=namespace,
+            accepted_version=accepted_version,
+            owner=owner,
+            settings=settings,
+        ),
+    )
+    existing_resources = (web_ingress, keystone_ingress, api_ingress)
+    guarded_manifests = tuple(
+        _managed_ingress_manifest(existing=existing, manifest=manifest)
+        if classification is OwnedClassification.MANAGED
+        else manifest
+        for classification, existing, manifest in zip(
+            classifications, existing_resources, manifests, strict=True
+        )
+    )
+    return IngressResourcePreflight(*classifications, guarded_manifests)
 
 
 def build_conductor_deployment(

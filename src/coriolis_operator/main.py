@@ -15,6 +15,7 @@ from coriolis_operator.configuration import (
     render_coriolis_config,
     render_sensitive_coriolis_config,
 )
+from coriolis_operator.ingress import resolve_ingress_settings
 from coriolis_operator.mariadb import (
     SensitiveMariaDBCredentials,
     resolve_mariadb_settings,
@@ -49,6 +50,7 @@ from coriolis_operator.reconcile import (
     preflight_conductor_resource,
     preflight_deployer_manager_resource,
     preflight_foundational_resources,
+    preflight_ingress_resources,
     preflight_keystone_resources,
     preflight_mariadb_resources,
     preflight_memcached_resource,
@@ -276,6 +278,7 @@ def reconcile_appliance(
     core_api: client.CoreV1Api | None = None,
     apps_api: client.AppsV1Api | None = None,
     batch_api: client.BatchV1Api | None = None,
+    networking_api: client.NetworkingV1Api | None = None,
 ) -> dict[str, Any]:
     """Reconcile foundational resources, dependency Services, and workloads."""
     name = str(meta["name"])
@@ -330,6 +333,7 @@ def reconcile_appliance(
         rabbitmq_settings = resolve_rabbitmq_settings(
             storage=spec.get("storage"), resources=spec.get("resources")
         )
+        ingress_settings = resolve_ingress_settings(spec.get("ingress"))
     except ValueError:
         return build_status(
             generation,
@@ -368,6 +372,7 @@ def reconcile_appliance(
         )
         coriolis_api_name = appliance_resource_name(name, "coriolis-api")
         coriolis_web_name = appliance_resource_name(name, "coriolis-web")
+        keystone_ingress_name = appliance_resource_name(name, "keystone")
         conductor_deployment_name = appliance_resource_name(name, "coriolis-conductor")
         scheduler_deployment_name = appliance_resource_name(name, "coriolis-scheduler")
         transfer_cron_deployment_name = appliance_resource_name(
@@ -415,6 +420,9 @@ def reconcile_appliance(
         api = core_api if core_api is not None else client.CoreV1Api()
         workloads_api = apps_api if apps_api is not None else client.AppsV1Api()
         batch_api = batch_api if batch_api is not None else client.BatchV1Api()
+        ingress_api = (
+            networking_api if networking_api is not None else client.NetworkingV1Api()
+        )
     except ReconcileRetry:
         raise
     except Exception:
@@ -679,6 +687,30 @@ def reconcile_appliance(
     coriolis_web_deployment_existing = _read_or_absent(
         workloads_api.read_namespaced_deployment,
         name=coriolis_web_name,
+        namespace=namespace,
+        generation=generation,
+        accepted_version=accepted_version,
+        status=status,
+    )
+    coriolis_web_ingress_existing = _read_or_absent(
+        ingress_api.read_namespaced_ingress,
+        name=coriolis_web_name,
+        namespace=namespace,
+        generation=generation,
+        accepted_version=accepted_version,
+        status=status,
+    )
+    keystone_ingress_existing = _read_or_absent(
+        ingress_api.read_namespaced_ingress,
+        name=keystone_ingress_name,
+        namespace=namespace,
+        generation=generation,
+        accepted_version=accepted_version,
+        status=status,
+    )
+    coriolis_api_ingress_existing = _read_or_absent(
+        ingress_api.read_namespaced_ingress,
+        name=coriolis_api_name,
         namespace=namespace,
         generation=generation,
         accepted_version=accepted_version,
@@ -1269,6 +1301,55 @@ def reconcile_appliance(
                 generation, accepted_version, status, "ResourceApplyFailed"
             )
 
+    try:
+        ingress_preflight = preflight_ingress_resources(
+            appliance_name=name,
+            namespace=namespace,
+            accepted_version=requested_version,
+            owner=owner,
+            settings=ingress_settings,
+            web_ingress=coriolis_web_ingress_existing,
+            keystone_ingress=keystone_ingress_existing,
+            api_ingress=coriolis_api_ingress_existing,
+        )
+    except ReconcileRetry:
+        raise
+    except Exception:
+        raise _retry_status(
+            generation, accepted_version, status, "ResourceApplyFailed"
+        ) from None
+    for resource_name, existing, classification in (
+        (
+            coriolis_web_name,
+            coriolis_web_ingress_existing,
+            ingress_preflight.web_classification,
+        ),
+        (
+            keystone_ingress_name,
+            keystone_ingress_existing,
+            ingress_preflight.keystone_classification,
+        ),
+        (
+            coriolis_api_name,
+            coriolis_api_ingress_existing,
+            ingress_preflight.api_classification,
+        ),
+    ):
+        if classification is OwnedClassification.COLLISION:
+            return build_status(
+                generation,
+                accepted_version=accepted_version,
+                conditions=collision_conditions(namespace, resource_name),
+                prior_conditions=_prior_conditions(status),
+            )
+        if (
+            classification is OwnedClassification.MANAGED
+            and _resource_version(existing) is None
+        ):
+            raise _retry_status(
+                generation, accepted_version, status, "ResourceApplyFailed"
+            )
+
     (
         mariadb_data_pvc_body,
         mariadb_config_map_body,
@@ -1290,6 +1371,11 @@ def reconcile_appliance(
     ) = keystone_preflight.manifests
     coriolis_api_service_body, coriolis_api_deployment_body = api_preflight.manifests
     coriolis_web_service_body, coriolis_web_deployment_body = web_preflight.manifests
+    (
+        coriolis_web_ingress_body,
+        keystone_ingress_body,
+        coriolis_api_ingress_body,
+    ) = ingress_preflight.manifests
     (conductor_deployment_body,) = conductor_preflight.manifests
     (scheduler_deployment_body,) = scheduler_preflight.manifests
     (transfer_cron_deployment_body,) = transfer_cron_preflight.manifests
@@ -1708,6 +1794,21 @@ def reconcile_appliance(
         accepted_version=accepted_version,
         status=status,
     )
+    for body, existing in (
+        (coriolis_web_ingress_body, coriolis_web_ingress_existing),
+        (keystone_ingress_body, keystone_ingress_existing),
+        (coriolis_api_ingress_body, coriolis_api_ingress_existing),
+    ):
+        _create_or_apply(
+            ingress_api,
+            kind="ingress",
+            body=body,
+            existing=existing,
+            category="ResourceApplyFailed",
+            generation=generation,
+            accepted_version=accepted_version,
+            status=status,
+        )
     _create_or_apply(
         api,
         kind="config_map",
@@ -1816,6 +1917,18 @@ def update_appliance_resources(
     **kwargs: Any,
 ) -> None:
     """Reconcile requested appliance resource changes."""
+    _handle_reconcile(spec, meta, patch, status, **kwargs)
+
+
+@kopf.on.field(GROUP, VERSION, PLURAL, field="spec.ingress")
+def update_appliance_ingress(
+    spec: Mapping[str, Any],
+    meta: Mapping[str, Any],
+    patch: kopf.Patch,
+    status: Mapping[str, Any] | None = None,
+    **kwargs: Any,
+) -> None:
+    """Reconcile requested appliance ingress changes."""
     _handle_reconcile(spec, meta, patch, status, **kwargs)
 
 

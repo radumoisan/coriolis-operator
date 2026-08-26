@@ -17,6 +17,7 @@ from coriolis_operator.common import (
     CONDUCTOR_IMAGE,
     render_bootstrap_script,
 )
+from coriolis_operator.ingress import resolve_ingress_settings
 from coriolis_operator.main import _bootstrap_job_state, reconcile_appliance
 from coriolis_operator.mariadb import (
     SensitiveMariaDBCredentials,
@@ -43,6 +44,7 @@ from coriolis_operator.reconcile import (
     blocked_conditions,
     bootstrap_running_conditions,
     build_api_deployment,
+    build_api_ingress,
     build_api_service,
     build_common_bootstrap_config_map,
     build_common_bootstrap_job,
@@ -53,6 +55,7 @@ from coriolis_operator.reconcile import (
     build_dependency_service,
     build_deployer_manager_deployment,
     build_infrastructure_credentials_secret,
+    build_keystone_ingress,
     build_memcached_deployment,
     build_minion_manager_deployment,
     build_resource_metadata,
@@ -61,6 +64,7 @@ from coriolis_operator.reconcile import (
     build_status,
     build_transfer_cron_deployment,
     build_web_deployment,
+    build_web_ingress,
     build_web_service,
     build_worker_deployment,
     classify_existing_marker,
@@ -297,6 +301,20 @@ def make_apps_api(existing=None) -> MagicMock:
 
     api.read_namespaced_stateful_set.side_effect = read_stateful_set
     api.read_namespaced_deployment.side_effect = _api_exception(404)
+    return api
+
+
+def make_networking_api(existing: dict[str, object] | None = None) -> MagicMock:
+    api = MagicMock()
+    api.api_client.default_headers = {}
+
+    def read_ingress(*, name: str, namespace: str) -> object:
+        assert namespace == "operators"
+        if existing is not None and name in existing:
+            return existing[name]
+        raise _api_exception(404)
+
+    api.read_namespaced_ingress.side_effect = read_ingress
     return api
 
 
@@ -548,6 +566,34 @@ def rabbitmq_bodies() -> dict[str, dict]:
     }
 
 
+def ingress_bodies() -> dict[str, dict]:
+    settings = resolve_ingress_settings(None)
+    manifests = (
+        build_web_ingress(
+            appliance_name="example",
+            namespace="operators",
+            accepted_version="2603.4",
+            owner=OWNER,
+            settings=settings,
+        ),
+        build_keystone_ingress(
+            appliance_name="example",
+            namespace="operators",
+            accepted_version="2603.4",
+            owner=OWNER,
+            settings=settings,
+        ),
+        build_api_ingress(
+            appliance_name="example",
+            namespace="operators",
+            accepted_version="2603.4",
+            owner=OWNER,
+            settings=settings,
+        ),
+    )
+    return {body["metadata"]["name"]: copy.deepcopy(body) for body in manifests}
+
+
 def keystone_bodies() -> dict[str, dict]:
     preflight = preflight_keystone_resources(
         appliance_name="example",
@@ -681,6 +727,7 @@ def api_writes(api: MagicMock) -> list:
 def stub_apps_api(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(main.client, "AppsV1Api", make_apps_api)
     monkeypatch.setattr(main.client, "BatchV1Api", make_batch_api)
+    monkeypatch.setattr(main.client, "NetworkingV1Api", make_networking_api)
 
 
 def desired_body(meta=None) -> dict:
@@ -779,6 +826,8 @@ def assert_no_api_instantiation(monkeypatch: pytest.MonkeyPatch) -> None:
 
     monkeypatch.setattr(main.client, "CoreV1Api", fail)
     monkeypatch.setattr(main.client, "AppsV1Api", fail)
+    monkeypatch.setattr(main.client, "BatchV1Api", fail)
+    monkeypatch.setattr(main.client, "NetworkingV1Api", fail)
 
 
 def test_state_config_map_name_is_deterministic() -> None:
@@ -1531,7 +1580,8 @@ def test_build_status_reports_accepted_api_only_slice() -> None:
                 "RabbitMQ, Memcached, Keystone, Coriolis-common bootstrap, Coriolis "
                 "API, Coriolis conductor, Coriolis scheduler, Coriolis transfer-cron, "
                 "Coriolis minion-manager, Coriolis deployer-manager, Coriolis worker, "
-                "Coriolis web, and controller state marker were reconciled in "
+                "Coriolis web, Coriolis web Ingress, Keystone Ingress, Coriolis API "
+                "Ingress, and controller state marker were reconciled in "
                 "Kubernetes; runtime "
                 "readiness is not "
                 "implemented yet.",
@@ -1634,11 +1684,13 @@ def test_status_preserves_transition_time_across_reason_change() -> None:
 
 def test_reconcile_appliance_server_side_applies_state_and_returns_status() -> None:
     core_api = make_core_api()
+    networking_api = make_networking_api()
 
     status = reconcile_appliance(
         spec=valid_spec(),
         meta=sample_meta(),
         core_api=core_api,
+        networking_api=networking_api,
     )
 
     assert core_api.method_calls == [
@@ -1725,6 +1777,18 @@ def test_reconcile_appliance_server_side_applies_state_and_returns_status() -> N
     ]
     assert status["observedGeneration"] == 7
     assert status["acceptedVersion"] == "2603.4"
+    assert networking_api.method_calls == [
+        call.read_namespaced_ingress(
+            name="example-coriolis-web", namespace="operators"
+        ),
+        call.read_namespaced_ingress(name="example-keystone", namespace="operators"),
+        call.read_namespaced_ingress(
+            name="example-coriolis-api", namespace="operators"
+        ),
+        call.create_namespaced_ingress(namespace="operators", body=ANY),
+        call.create_namespaced_ingress(namespace="operators", body=ANY),
+        call.create_namespaced_ingress(namespace="operators", body=ANY),
+    ]
     created_credentials = [
         call.kwargs["body"]
         for call in core_api.create_namespaced_secret.call_args_list
@@ -2150,6 +2214,29 @@ def test_profile_field_handler_routes_through_reconcile(
     patch = MagicMock()
 
     result = main.update_appliance_profile(
+        spec=valid_spec(),
+        meta={"name": "example"},
+        patch=patch,
+        status={"conditions": []},
+    )
+
+    assert result is None
+    handled.assert_called_once_with(
+        valid_spec(),
+        {"name": "example"},
+        patch,
+        {"conditions": []},
+    )
+
+
+def test_ingress_field_handler_routes_through_reconcile(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    handled = MagicMock()
+    monkeypatch.setattr(main, "_handle_reconcile", handled)
+    patch = MagicMock()
+
+    result = main.update_appliance_ingress(
         spec=valid_spec(),
         meta={"name": "example"},
         patch=patch,
@@ -3763,6 +3850,8 @@ def test_invalid_mariadb_configuration_preserves_accepted_version(
 def test_mariadb_reads_and_writes_follow_the_frozen_cross_api_order() -> None:
     core_api = make_core_api()
     apps_api = make_apps_api()
+    batch_api = make_batch_api()
+    networking_api = make_networking_api()
     events: list[tuple[str, str, str]] = []
 
     def absent_read(resource: str):
@@ -3786,6 +3875,15 @@ def test_mariadb_reads_and_writes_follow_the_frozen_cross_api_order() -> None:
     core_api.read_namespaced_persistent_volume_claim.side_effect = absent_read("pvc")
     apps_api.read_namespaced_stateful_set.side_effect = absent_read("statefulset")
     apps_api.read_namespaced_deployment.side_effect = absent_read("deployment")
+    networking_api.read_namespaced_ingress.side_effect = absent_read("ingress")
+
+    def succeeded_job_read(*, name: str, namespace: str) -> dict:
+        assert name == "example-common-bootstrap-v2"
+        assert namespace == "operators"
+        events.append(("read", "job", name))
+        return succeeded_bootstrap_job()
+
+    batch_api.read_namespaced_job.side_effect = succeeded_job_read
     core_api.create_namespaced_config_map.side_effect = successful_create("configmap")
     core_api.create_namespaced_secret.side_effect = successful_create("secret")
     core_api.create_namespaced_service.side_effect = successful_create("service")
@@ -3796,12 +3894,15 @@ def test_mariadb_reads_and_writes_follow_the_frozen_cross_api_order() -> None:
         "statefulset"
     )
     apps_api.create_namespaced_deployment.side_effect = successful_create("deployment")
+    networking_api.create_namespaced_ingress.side_effect = successful_create("ingress")
 
     status = reconcile_appliance(
         spec=valid_spec(),
         meta=sample_meta(),
         core_api=core_api,
         apps_api=apps_api,
+        batch_api=batch_api,
+        networking_api=networking_api,
     )
 
     assert [event for event in events if event[0] == "read"] == [
@@ -3837,8 +3938,12 @@ def test_mariadb_reads_and_writes_follow_the_frozen_cross_api_order() -> None:
         ("read", "deployment", "example-coriolis-deployer-manager"),
         ("read", "deployment", "example-coriolis-worker"),
         ("read", "configmap", "example-common-bootstrap-v2"),
+        ("read", "job", "example-common-bootstrap-v2"),
         ("read", "service", "example-coriolis-web"),
         ("read", "deployment", "example-coriolis-web"),
+        ("read", "ingress", "example-coriolis-web"),
+        ("read", "ingress", "example-keystone"),
+        ("read", "ingress", "example-coriolis-api"),
     ]
     assert [event for event in events if event[0] == "write"] == [
         ("write", "secret", "example-coriolis-credentials"),
@@ -3874,11 +3979,239 @@ def test_mariadb_reads_and_writes_follow_the_frozen_cross_api_order() -> None:
         ("write", "deployment", "example-coriolis-api"),
         ("write", "service", "example-coriolis-web"),
         ("write", "deployment", "example-coriolis-web"),
+        ("write", "ingress", "example-coriolis-web"),
+        ("write", "ingress", "example-keystone"),
+        ("write", "ingress", "example-coriolis-api"),
         ("write", "configmap", "example-operator-state"),
     ]
+    first_write = next(
+        index for index, event in enumerate(events) if event[0] == "write"
+    )
+    assert all(event[0] == "read" for event in events[:first_write])
     assert status["acceptedVersion"] == "2603.4"
     assert status["conditions"][2]["reason"] == "Reconciled"
     assert status["conditions"][3]["reason"] == "RuntimeNotImplemented"
+
+
+@pytest.mark.parametrize(
+    "resource_name",
+    ["example-coriolis-web", "example-keystone", "example-coriolis-api"],
+)
+def test_ingress_collision_at_each_name_is_mutation_free(resource_name: str) -> None:
+    core_api = make_core_api()
+    apps_api = make_apps_api()
+    batch_api = make_batch_api()
+    collided = ingress_bodies()[resource_name]
+    collided["metadata"]["labels"]["coriolis.cloudbase.it/component"] = "other"
+    networking_api = make_networking_api({resource_name: collided})
+
+    status = reconcile_appliance(
+        spec=valid_spec(),
+        meta=sample_meta(),
+        core_api=core_api,
+        apps_api=apps_api,
+        batch_api=batch_api,
+        networking_api=networking_api,
+    )
+
+    assert status["conditions"][2]["reason"] == "ResourceCollision"
+    assert f"operators/{resource_name}" in status["conditions"][2]["message"]
+    assert api_writes(core_api) == []
+    assert api_writes(apps_api) == []
+    assert api_writes(batch_api) == []
+    assert api_writes(networking_api) == []
+
+
+@pytest.mark.parametrize(
+    "resource_name",
+    ["example-coriolis-web", "example-keystone", "example-coriolis-api"],
+)
+def test_managed_ingress_uses_guarded_ssa(resource_name: str) -> None:
+    existing = ingress_bodies()[resource_name]
+    existing["metadata"]["resourceVersion"] = "31"
+    networking_api = make_networking_api({resource_name: existing})
+    networking_api.api_client.default_headers["Content-Type"] = "application/json"
+
+    reconcile_appliance(
+        spec=valid_spec(),
+        meta=sample_meta(),
+        core_api=make_core_api(),
+        networking_api=networking_api,
+    )
+
+    applied = networking_api.patch_namespaced_ingress.call_args.kwargs
+    assert applied["name"] == resource_name
+    assert applied["body"]["metadata"]["resourceVersion"] == "31"
+    assert applied["field_manager"] == "coriolis-operator"
+    assert applied["force"] is True
+    assert (
+        networking_api.api_client.default_headers["Content-Type"] == "application/json"
+    )
+
+
+def test_missing_ingresses_are_created_in_frozen_order_before_marker() -> None:
+    core_api = make_core_api()
+    networking_api = make_networking_api()
+
+    reconcile_appliance(
+        spec=valid_spec(),
+        meta=sample_meta(),
+        core_api=core_api,
+        networking_api=networking_api,
+    )
+
+    assert [
+        call.kwargs["body"]["metadata"]["name"]
+        for call in networking_api.create_namespaced_ingress.call_args_list
+    ] == ["example-coriolis-web", "example-keystone", "example-coriolis-api"]
+    assert core_api.method_calls[-1] == call.create_namespaced_config_map(
+        namespace="operators", body=ANY
+    )
+
+
+def test_managed_ingress_without_resource_version_retries_before_writes() -> None:
+    networking_api = make_networking_api(
+        {"example-coriolis-web": ingress_bodies()["example-coriolis-web"]}
+    )
+    core_api = make_core_api()
+    apps_api = make_apps_api()
+    batch_api = make_batch_api()
+
+    with pytest.raises(main.ReconcileRetry) as excinfo:
+        reconcile_appliance(
+            spec=valid_spec(),
+            meta=sample_meta(),
+            core_api=core_api,
+            apps_api=apps_api,
+            batch_api=batch_api,
+            networking_api=networking_api,
+        )
+
+    assert excinfo.value.status["conditions"][2]["reason"] == "ResourceApplyFailed"
+    assert api_writes(core_api) == []
+    assert api_writes(apps_api) == []
+    assert api_writes(batch_api) == []
+    assert api_writes(networking_api) == []
+
+
+def test_ingress_read_failure_is_sanitized_before_writes() -> None:
+    core_api = make_core_api()
+    apps_api = make_apps_api()
+    networking_api = make_networking_api()
+    networking_api.read_namespaced_ingress.side_effect = client.ApiException(
+        status=403, reason="ingress-read-sentinel"
+    )
+
+    with pytest.raises(main.ReconcileRetry) as excinfo:
+        reconcile_appliance(
+            spec=valid_spec(),
+            meta=sample_meta(),
+            core_api=core_api,
+            apps_api=apps_api,
+            networking_api=networking_api,
+        )
+
+    assert excinfo.value.status["conditions"][2]["reason"] == "ResourceReadFailed"
+    assert "ingress-read-sentinel" not in repr(excinfo.value.status)
+    assert api_writes(core_api) == []
+    assert api_writes(apps_api) == []
+    assert api_writes(networking_api) == []
+
+
+def test_ingress_apply_failure_is_sanitized_and_skips_later_ingresses_and_marker() -> (
+    None
+):
+    core_api = make_core_api()
+    networking_api = make_networking_api()
+
+    def fail_keystone(*, namespace: str, body: dict) -> None:
+        assert namespace == "operators"
+        if body["metadata"]["name"] == "example-keystone":
+            raise client.ApiException(status=409, reason="ingress-apply-sentinel")
+
+    networking_api.create_namespaced_ingress.side_effect = fail_keystone
+
+    with pytest.raises(main.ReconcileRetry) as excinfo:
+        reconcile_appliance(
+            spec=valid_spec(),
+            meta=sample_meta(),
+            core_api=core_api,
+            networking_api=networking_api,
+        )
+
+    assert excinfo.value.status["conditions"][2]["reason"] == "ResourceApplyFailed"
+    assert "ingress-apply-sentinel" not in repr(excinfo.value.status)
+    assert [
+        call.kwargs["body"]["metadata"]["name"]
+        for call in networking_api.create_namespaced_ingress.call_args_list
+    ] == ["example-coriolis-web", "example-keystone"]
+    assert "example-operator-state" not in [
+        call.kwargs["body"]["metadata"]["name"]
+        for call in core_api.create_namespaced_config_map.call_args_list
+    ]
+
+
+def test_backend_failure_prevents_all_ingress_writes() -> None:
+    core_api = make_core_api()
+    apps_api = make_apps_api()
+    networking_api = make_networking_api()
+
+    def fail_web(*, namespace: str, body: dict) -> None:
+        assert namespace == "operators"
+        if body["metadata"]["name"] == "example-coriolis-web":
+            raise client.ApiException(status=409)
+
+    apps_api.create_namespaced_deployment.side_effect = fail_web
+
+    with pytest.raises(main.ReconcileRetry) as excinfo:
+        reconcile_appliance(
+            spec=valid_spec(),
+            meta=sample_meta(),
+            core_api=core_api,
+            apps_api=apps_api,
+            networking_api=networking_api,
+        )
+
+    assert excinfo.value.status["conditions"][2]["reason"] == "ResourceApplyFailed"
+    networking_api.create_namespaced_ingress.assert_not_called()
+    networking_api.patch_namespaced_ingress.assert_not_called()
+    assert "example-operator-state" not in [
+        call.kwargs["body"]["metadata"]["name"]
+        for call in core_api.create_namespaced_config_map.call_args_list
+    ]
+
+
+def test_invalid_ingress_configuration_returns_before_api_instantiation(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    assert_no_api_instantiation(monkeypatch)
+    spec = valid_spec()
+    spec["ingress"] = {"host": "INVALID"}
+
+    status = reconcile_appliance(spec=spec, meta=sample_meta())
+
+    assert status["conditions"][2]["reason"] == "InvalidRuntimeConfiguration"
+
+
+def test_existing_tls_secret_is_not_read_or_mutated() -> None:
+    core_api = make_core_api()
+    networking_api = make_networking_api()
+    spec = valid_spec()
+    spec["ingress"] = {
+        "tls": {"mode": "existingSecret", "tlsSecretName": "external-tls"}
+    }
+
+    reconcile_appliance(
+        spec=spec,
+        meta=sample_meta(),
+        core_api=core_api,
+        networking_api=networking_api,
+    )
+
+    assert all("external-tls" not in repr(method) for method in core_api.method_calls)
+    assert not [
+        method for method in networking_api.method_calls if "secret" in method[0]
+    ]
 
 
 @pytest.mark.parametrize(
