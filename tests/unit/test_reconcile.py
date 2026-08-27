@@ -5763,6 +5763,101 @@ def test_runtime_health_checks_make_the_required_value_safe_requests() -> None:
     assert [response.close_calls for response in opened_responses] == [1, 1, 1, 1]
 
 
+def test_runtime_health_checks_accept_additional_config_values_without_leakage(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    requests = []
+    opened_responses = _successful_health_responses()
+    config_payload = json.loads(opened_responses[1].body)
+    config_payload["config"]["servicesUrls"]["additionalConfig"] = "body-sentinel"
+    opened_responses[1].body = json.dumps(config_payload).encode()
+    responses = iter(opened_responses)
+
+    def opener(request, **_: object) -> _HealthResponse:
+        requests.append(request)
+        return next(responses)
+
+    assert main._runtime_health_checks(
+        namespace="operators",
+        web_service="example-coriolis-web",
+        keystone_service="example-keystone",
+        coriolis_api_service="example-coriolis-api",
+        coriolis_keystone_password="credential-sentinel",
+        opener=opener,
+    )
+    assert len(requests) == 4
+    assert [response.close_calls for response in opened_responses] == [1, 1, 1, 1]
+    assert "credential-sentinel" not in caplog.text
+    assert "token-sentinel" not in caplog.text
+    assert "body-sentinel" not in caplog.text
+
+
+@pytest.mark.parametrize(
+    ("service_name", "value"),
+    [("keystone", None), ("barbican", "body-sentinel")],
+)
+def test_runtime_health_checks_reject_required_config_values_before_auth(
+    service_name: str, value: str | None, caplog: pytest.LogCaptureFixture
+) -> None:
+    requests = []
+    opened_responses = _successful_health_responses()
+    config_payload = json.loads(opened_responses[1].body)
+    services_urls = config_payload["config"]["servicesUrls"]
+    if value is None:
+        del services_urls[service_name]
+    else:
+        services_urls[service_name] = value
+    opened_responses[1].body = json.dumps(config_payload).encode()
+    responses = iter(opened_responses)
+
+    def opener(request, **_: object) -> _HealthResponse:
+        requests.append(request)
+        return next(responses)
+
+    assert not main._runtime_health_checks(
+        namespace="operators",
+        web_service="example-coriolis-web",
+        keystone_service="example-keystone",
+        coriolis_api_service="example-coriolis-api",
+        coriolis_keystone_password="credential-sentinel",
+        opener=opener,
+    )
+    assert len(requests) == 2
+    assert [response.close_calls for response in opened_responses] == [1, 1, 0, 0]
+    assert "credential-sentinel" not in caplog.text
+    assert "token-sentinel" not in caplog.text
+    assert "body-sentinel" not in caplog.text
+
+
+def test_runtime_health_checks_reject_non_mapping_services_before_auth(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    requests = []
+    opened_responses = _successful_health_responses()
+    config_payload = json.loads(opened_responses[1].body)
+    config_payload["config"]["servicesUrls"] = []
+    opened_responses[1].body = json.dumps(config_payload).encode()
+    responses = iter(opened_responses)
+
+    def opener(request, **_: object) -> _HealthResponse:
+        requests.append(request)
+        return next(responses)
+
+    assert not main._runtime_health_checks(
+        namespace="operators",
+        web_service="example-coriolis-web",
+        keystone_service="example-keystone",
+        coriolis_api_service="example-coriolis-api",
+        coriolis_keystone_password="credential-sentinel",
+        opener=opener,
+    )
+    assert len(requests) == 2
+    assert [response.close_calls for response in opened_responses] == [1, 1, 0, 0]
+    assert "credential-sentinel" not in caplog.text
+    assert "token-sentinel" not in caplog.text
+    assert "body-sentinel" not in caplog.text
+
+
 def test_runtime_health_checks_close_opened_responses_before_early_return() -> None:
     opened_responses = [_HealthResponse(200), _HealthResponse(503)]
     responses = iter(opened_responses)

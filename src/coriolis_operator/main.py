@@ -245,7 +245,10 @@ def _runtime_health_checks(
         if not isinstance(config, Mapping):
             return False
         services_urls = config.get("servicesUrls")
-        if services_urls != expected_services_urls:
+        if not isinstance(services_urls, Mapping) or any(
+            services_urls.get(key) != value
+            for key, value in expected_services_urls.items()
+        ):
             return False
         if not isinstance(config_payload.get("isFirstLaunch"), bool):
             return False
