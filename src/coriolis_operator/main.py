@@ -2289,8 +2289,11 @@ def retry_resource_collision(
     retry: int = 0,
     **kwargs: Any,
 ) -> None:
-    """Retry only stable collisions, so removed conflicts converge without a watch."""
-    if _has_resource_collision(status) or retry > 0:
+    """Recover uninitialized resources and converge stable collisions.
+
+    This is not broad periodic self-healing.
+    """
+    if status is None or not status or _has_resource_collision(status) or retry > 0:
         _handle_reconcile(spec, meta, patch, status, **kwargs)
 
 

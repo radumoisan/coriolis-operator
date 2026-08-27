@@ -2105,6 +2105,22 @@ def test_collision_timer_noops_without_stable_collision(
     handled.assert_not_called()
 
 
+@pytest.mark.parametrize("status", [None, {}])
+def test_collision_timer_reconciles_uninitialized_status(
+    monkeypatch: pytest.MonkeyPatch,
+    status: dict[str, object] | None,
+) -> None:
+    handled = MagicMock()
+    monkeypatch.setattr(main, "_handle_reconcile", handled)
+    spec = valid_spec()
+    meta = {"name": "example"}
+    patch = MagicMock()
+
+    main.retry_resource_collision(spec, meta, patch, status)
+
+    handled.assert_called_once_with(spec, meta, patch, status)
+
+
 def test_collision_timer_routes_stable_collision_through_reconcile(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
