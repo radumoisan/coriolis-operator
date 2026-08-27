@@ -1,13 +1,46 @@
 # Backlog
 
-## Readiness 0.5.38 POC Partially Accepted; Same-Name Recreation Open
+## Completed: Milestone 5 Lifecycle Gate Closure
+
+- Automatic same-name `CoriolisAppliance` recreation is accepted for the bounded single-node POC; no operational exception is needed. Source `1f4f4250b0e0716a2aa40e6e4e50f2866e8fd2d8` (`Recover uninitialized appliance reconciliation`) released as `0.5.40` at operator digest `sha256:a095f1e443e39ecf3c1fc2d312de042ed879fc3369308b1c501e2cde7ebad67b` by CI commit/tag `280d74dc76c05c63e6845ab5bcbb3a8adee5b9d4`/`0.5.40`.
+- Local gate passed 707 unit tests in 15.61s, focused collision timer 6 plus a 3-test sanity check, Ruff check, 70-file Ruff format, strict mypy/18 source files, Helm lint/template, and `git diff --check`. CIXpress Default exact-commit pipeline `yxf23` was top-level `SUCCEEDED` from `2026-08-27T08:31:44+00:00` to `08:32:59+00:00`; its five-character ID failed approved six-character monitor validation, so per-step confirmation is unavailable and it is not claimed fully successful.
+- In approved `virt-infra-dev-buc-hq`/`default`, namespace/Application `coriolis-recreation-validation-20260827`, chart `0.5.40`/`skipCrds`, CR `readiness-validation`, exact digest, and host `coriolis.app.cloudbase.wiki`, released `0.5.40` naturally deleted old `c717...` and 31 children in 29s; new UID `e405b201-5bad-4757-a77d-706a5f265262` reached `RuntimeReady` in about 110s and held 245s. It had exact retained Secret/PVC/PV identity baselines, 31 solely new-owned children, ready zero-restart workloads/endpoints, no old references, and unchanged zero-restart operator. Normal cleanup removed CR/children, Application, namespace, and Delete-policy PVs without force or individual retained/PVC/PV deletion. This does not expand production/HA/storage/backup/provider/browser/write acceptance or broad periodic drift self-healing.
+
+## Open: Milestone 6 OpenStack Provider Qualification
+
+- Qualify connection schemas and authentication for two distinct OpenStack environments; keep credentials out of repository, status, events, logs, and captured evidence.
+- Qualify a disposable Cinder-backed Linux source with working Cinder backup-to-Swift using `source_environment.replica_export_mechanism: swift_backups`, plus target `migr_image`, `migr_flavor_name`, `migr_network`, network/storage mappings, quotas, worker dependencies, and connectivity. This is the next gate.
+
+## Open: Milestone 7 API-Driven OpenStack-to-OpenStack Migration POC
+
+- With Milestone 5 closed, create both Coriolis endpoint definitions from scratch through the API with inline `connection_info`, then run one-shot `live_migration` with `clone_disks: true`, `skip_os_morphing: true`, `shutdown_instances: true`, and `auto_deploy: true`.
+- Poll the transfer and auto-created deployment; verify destination `ACTIVE` and reachable; clean up normally. The scenario's internal replica-provider calls permit the source Swift-backup setting.
+
+## Open: Milestone 8 Kubernetes-Native Logging
+
+- Use stdout/stderr and Kubernetes collection while implementing the `/logs` and WebSocket `/log-stream` UI compatibility contracts; verify value-safe log handling.
+
+## Open: Milestone 9 Secure UI Endpoint Prerequisites
+
+- Deliver a Barbican-backed UI credential model and browser login, retaining cert-manager/Ingress. Step CA, web-proxy, compressor, and console editor remain omitted or superseded.
+- Keep licensing and Metal Hub deferred: absent `LICENSING_SERVER_BASE_URL` skips OSS licensing enforcement.
+
+## Open: Milestone 10 UI-Driven OpenStack-to-OpenStack Migration POC
+
+- After Milestones 7, 8, and 9, execute and observe the qualified two-endpoint `live_migration` POC through the browser UI, including transfer/deployment polling, destination verification, and cleanup.
+
+## Open: Milestone 11 Later Hardening
+
+- Plan separate evidence for production readiness, HA, storage, backup/restore, drift recovery, and multi-CR/host routing. Do not broaden the bounded `Ready=True` claim.
+
+## Historical: Readiness 0.5.38 POC Partially Accepted
 
 - Source `9a223667cebeb3094baa86c21dd517cb5ca38809` (`Fix runtime readiness web config validation`) released chart/app/operator `0.5.38` through CIXpress Default `82ggo8` (`2026-08-27 05:11:19Z`-`05:12:22Z`), with top-level and `git-clone`/`kaniko-build`/`helm-update`/`cleanup` `SUCCEEDED`. CI release `7c7b7b70d678bfba98d045834c1cb0ab541c233f` published chart digest `sha256:fb6dae233cc752959c1758db59054ebbcce37671f349e20e926078af724ecda8` and operator digest `sha256:8533a05aaceee5fe6c0da93887ed859d7df14993f97442fe55eaf13b7d06200f`. The prior `0.5.37` equality failure from one unrelated `servicesUrls` key is historical and superseded.
 - The `virt-infra-dev-buc-hq`/`default` POC used namespace/Application `coriolis-readiness-validation-20260826`, chart `0.5.38` with `skipCrds`, CR `readiness-validation`, and host `coriolis.app.cloudbase.wiki`. Fresh preflight found the node healthy twice and target/PVs/host absent; shared `0.5.38` was healthy. Corrected Application source and isolated exact-digest operator (`1/1`, zero restart) passed. Pull-Secret values were copied into target Kubernetes Secrets through value-silent in-memory handling; no payload was exposed in workspace/tool output, and the target copies were removed with the namespace. A redundant later local `oras` recheck returned `401` without deployment effect.
 - Starting-to-ready is accepted: first CR UID `bdce6ce6-30bb-40e7-8987-6121343cb15f` reached `RuntimeReady` at `05:26:38.843332Z`, 109.843s after creation, with `acceptedVersion=2603.4`, generation/observed `1`, inactive successful bootstrap, two Bound PVCs, exact StatefulSets, ten `1/1` Deployments, six Services, 12 ready zero-restart Pods, and three expected Ingresses. Value-safe web-root/config `200`, Keystone auth `201`, Coriolis endpoints `200`, and overall true passed; identities/status/revisions/restarts held for 65s.
 - No-repair/manual recovery is accepted: scaling API to zero retained Deployment UID `ad8c181b-a472-4a96-88da-c9071a6941d3`, generation/observed `2`, zero counters/no Pod, and the intended `Ready=False/RuntimeStarting`, `Progressing=True/RuntimeStarting`, `Degraded=False`, `Reconciled=True` state from `05:34:56.060062Z` for 8m05s. `RuntimeStarting` denotes structural unavailability; `RuntimeHealthCheckFailed` applies only after structural gates pass. Manual restore at `05:43:12Z` produced exact-digest zero-restart API `1/1` in 13s, then `RuntimeReady` at `05:43:36.566440Z` (24.6s) and more than 65s stable.
-- Recreation is not wholly accepted. Normal deletion removed 28 non-Secret old-owner resources in 103s while five retained Secrets and two PVCs/PVs stayed exact. New same-name CR UID `c092ccf0-d7e8-44cf-9cf9-c30a493d8590` was finalized without status/children for 20m despite a healthy operator and timers, so automatic same-name recreation remains unaccepted. After an explicitly approved normal isolated operator replacement, resume reached `RuntimeReady` in 158s at `06:33:14.732632Z`; retained baselines remained exact and 31 direct resources belonged only to the new UID, with zero old refs/restarts and 65s stability. The duplicate post-recreation manual trace was tooling-inconclusive, but the production observer retained `RuntimeReady` and the initial clean trace passed; two checker stops were tooling-only, and corrected per-resource comparisons passed.
-- Normal cleanup removed final CR/Application/namespace in 23s/16s/68s and PVs in 10s without force, grace-zero, finalizer/owner edits, or individual child/Secret/PVC/PV/Ingress/Certificate deletion. Final target/App/namespace/CR/PVs/host are absent; shared exact `0.5.38` and node are healthy. `Ready=True` is accepted only for selected single-replica internal-core health, not production readiness, HA, storage, backup/restore, external/browser/provider/write workflows. Next gate: investigate/fix or operationally define automatic same-name CR recreation, then execute a fresh targeted recreation retest.
+- Recreation was not wholly accepted in this historical run. Normal deletion removed 28 non-Secret old-owner resources in 103s while five retained Secrets and two PVCs/PVs stayed exact. New same-name CR UID `c092ccf0-d7e8-44cf-9cf9-c30a493d8590` was finalized without status/children for 20m despite a healthy operator and timers. After an explicitly approved normal isolated operator replacement, resume reached `RuntimeReady` in 158s at `06:33:14.732632Z`; retained baselines remained exact and 31 direct resources belonged only to the new UID, with zero old refs/restarts and 65s stability. The duplicate post-recreation manual trace was tooling-inconclusive, but the production observer retained `RuntimeReady` and the initial clean trace passed; two checker stops were tooling-only, and corrected per-resource comparisons passed. The historical failure is real and nondeterministic, and is superseded for the lifecycle gate by the fresh automatic `0.5.40` acceptance above.
+- Normal cleanup removed final CR/Application/namespace in 23s/16s/68s and PVs in 10s without force, grace-zero, finalizer/owner edits, or individual child/Secret/PVC/PV/Ingress/Certificate deletion. Final target/App/namespace/CR/PVs/host are absent; shared exact `0.5.38` and node are healthy. `Ready=True` is accepted only for selected single-replica internal-core health, not production readiness, HA, storage, backup/restore, external/browser/provider/write workflows.
 
 ## Completed: Released Logical-Origin Ingress 0.5.35 POC
 

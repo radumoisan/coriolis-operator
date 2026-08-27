@@ -42,11 +42,50 @@
 
 - The marker-plus-four foundational runtime gate and four-Service slice are included in the development stack published on `origin/dev` at `55212b0` and released operator `0.5.6`. The slice adds exactly four owner-referenced ClusterIP plaintext Services in frozen order: RabbitMQ `5672`, Memcached `11211`, MariaDB `3306`, and Keystone `5000`. It preserves the marker-plus-four read prefix, pre-reads those Services before all preflight/rendering/manifest construction completes, uses resourceVersion-guarded SSA for managed Services, writes the four foundational resources then the Services in that order, and applies the marker last. Service RBAC is exactly `get`/`create`/`patch`; `Ready=False/RuntimeNotImplemented` remains expected. Validation passed: 252 unit tests, Ruff lint, Ruff format check, mypy, Helm lint/template, and `git diff --check`. No workload remains after POC cleanup.
 
-## Later Milestones
+## Milestone 5: Lifecycle Gate Closure (Accepted)
+
+- Source `1f4f4250b0e0716a2aa40e6e4e50f2866e8fd2d8` (`Recover uninitialized appliance reconciliation`) released as chart/app/operator `0.5.40` by CI commit/tag `280d74dc76c05c63e6845ab5bcbb3a8adee5b9d4`/`0.5.40`, operator digest `sha256:a095f1e443e39ecf3c1fc2d312de042ed879fc3369308b1c501e2cde7ebad67b`. The 60-second per-object collision timer retries only wholly absent/empty status, stable collisions, or in-flight Kopf retry, not broad periodic drift.
+- Local gate passed 707 unit tests in 15.61s, focused collision timer 6 plus a 3-test sanity check, Ruff check, 70-file Ruff format, strict mypy/18 source files, Helm lint/template, and `git diff --check`. CIXpress Default exact-commit `yxf23` was top-level `SUCCEEDED` (`2026-08-27T08:31:44+00:00`-`08:32:59+00:00`), but its five-character ID failed approved six-character monitor validation: per-step confirmation is unavailable and it is not claimed fully successful.
+- The fresh isolated `virt-infra-dev-buc-hq`/`default` acceptance in namespace/Application `coriolis-recreation-validation-20260827`, chart `0.5.40`/`skipCrds`, CR `readiness-validation`, exact digest, and host `coriolis.app.cloudbase.wiki` automatically deleted old `c717...` and 31 children in 29s. New UID `e405b201-5bad-4757-a77d-706a5f265262` reached `RuntimeReady` in about 110s and held 245s; 31 solely new-owned children, ready zero-restart workloads/endpoints, retained Secret/PVC/PV identities, no old references, and unchanged operator passed. Normal cleanup was force-free and complete. Milestone 5 is accepted for this bounded single-node POC with no operational exception; `Ready=True` remains bounded to selected single-replica internal-core health.
+
+## Milestone 6: OpenStack Provider Qualification
+
+- Qualify the connection schema and authentication for two distinct OpenStack environments, keeping credentials out of the repository, CR status, events, logs, and captured evidence.
+- Use a disposable Cinder-backed Linux source with working Cinder backup-to-Swift (`source_environment.replica_export_mechanism: swift_backups`), and qualify target `migr_image`, `migr_flavor_name`, `migr_network`, required network/storage mappings, quotas, worker dependencies, and connectivity.
+- Acceptance gate: source and target provider operations and mappings are value-safe and ready for the API POC. This is the next gate.
+
+## Milestone 7: API-Driven OpenStack-to-OpenStack Migration POC
+
+- With Milestone 5 closed, create both Coriolis endpoint definitions from scratch through the API with inline `connection_info`, then execute the one-shot `live_migration` scenario. Its internal replica-provider calls make the source Swift-backup setting valid.
+- First complete POC flags are transfer `clone_disks: true`, `skip_os_morphing: true`, and execution `shutdown_instances: true`, `auto_deploy: true`.
+- Acceptance gate: poll both the transfer and its auto-created deployment; verify the destination is `ACTIVE` and reachable; remove temporary migration resources, endpoint definitions, and disposable cloud resources normally without exposing credentials.
+
+## Milestone 8: Kubernetes-Native Logging
+
+- Move runtime logging to stdout/stderr and Kubernetes collection while implementing the UI compatibility contracts for `/logs` and WebSocket `/log-stream`.
+- Acceptance gate: collected logs remain value-safe and both legacy log interfaces work against the Kubernetes-native backend.
+
+## Milestone 9: Secure UI Endpoint Prerequisites
+
+- Establish a Barbican-backed UI credential model and browser login before a UI migration POC. Retain cert-manager and Ingress.
+- Step CA, web-proxy, compressor, and console editor remain omitted or superseded. Licensing and Metal Hub remain deferred because absent `LICENSING_SERVER_BASE_URL` skips OSS licensing enforcement.
+- Acceptance gate: browser authentication and secret handling are proven without credential values entering repository, status, events, or logs.
+
+## Milestone 10: UI-Driven OpenStack-to-OpenStack Migration POC
+
+- Repeat the qualified OpenStack-to-OpenStack path through the browser UI only after Milestones 7, 8, and 9 close.
+- Acceptance gate: the UI creates and observes the same two-endpoint `live_migration` POC, including transfer/deployment polling, destination `ACTIVE`/reachability verification, and cleanup.
+
+## Milestone 11: Later Hardening
+
+- Address production readiness boundaries, HA, storage, backup/restore, drift recovery, and multi-CR/host-routing evidence without expanding the bounded `Ready=True` claim prematurely.
+- Acceptance gate: each hardening claim has its own explicit contract and evidence; licensing and Metal Hub stay deferred until separately planned.
+
+## Historical Release Evidence and Deferred Baseline
 
 - **Readiness `0.5.38` POC partially accepted:** Source `9a223667cebeb3094baa86c21dd517cb5ca38809` passed fully successful CIXpress Default `82ggo8` (`2026-08-27 05:11:19Z`-`05:12:22Z`); CI release `7c7b7b70d678bfba98d045834c1cb0ab541c233f` published chart/app/operator `0.5.38`, chart digest `sha256:fb6dae233cc752959c1758db59054ebbcce37671f349e20e926078af724ecda8`, and operator digest `sha256:8533a05aaceee5fe6c0da93887ed859d7df14993f97442fe55eaf13b7d06200f`. Local validation recorded 705 tests/21.98s, 17 focused, Ruff, 70-file format, strict mypy/18, Helm, diff, and removed Docker image. It supersedes the `0.5.37` failure caused by rejecting an unrelated upstream `servicesUrls` key.
 - **Accepted readiness behaviors:** The isolated `virt-infra-dev-buc-hq`/`default` POC in `coriolis-readiness-validation-20260826` at chart `0.5.38`/`skipCrds` passed fresh preflight, corrected Application source, isolated exact-digest zero-restart operator, starting-to-ready, value-safe four-stage internal checks, and 65s stability. The first CR reached `RuntimeReady` in 109.843s. API scale-to-zero remained deliberately unrepaired for 8m05s with `RuntimeStarting`, then manual restore reached stable `RuntimeReady` in 24.6s. This uses `RuntimeStarting` for structural unavailability and `RuntimeHealthCheckFailed` only for internal-check failures after structural gates pass.
-- **Open lifecycle gate:** Normal old-CR deletion retained five Secrets and two PVCs/PVs exactly, but a same-name new CR was finalized without status/children for 20m while the operator was healthy: automatic same-name CR recreation is unaccepted. An explicitly approved normal isolated operator replacement resumed it to `RuntimeReady` in 158s; retained no-write reuse and new-UID ownership transfer of 31 direct resources are accepted after resume. Normal cleanup was complete. The next gate is to investigate/fix or operationally define automatic same-name CR recreation, then run a fresh targeted recreation retest. `Ready=True` remains only selected single-replica internal-core health, not production readiness, HA, storage, backup/restore, external/browser/provider/write workflows.
+- **Historical `0.5.38` lifecycle evidence, superseded for the gate:** Normal old-CR deletion retained five Secrets and two PVCs/PVs exactly, but a same-name new CR was finalized without status/children for 20m while the operator was healthy. An explicitly approved normal isolated operator replacement resumed it to `RuntimeReady` in 158s; retained no-write reuse and new-UID ownership transfer of 31 direct resources are accepted after resume. This nondeterministic failure remains real history. Fresh pre-fix `0.5.38` retest then automatically deleted old UID `0c7e6100-6d58-476c-ad11-543a01d46454` and 31 children in 38s; new UID `c717a978-2e0a-4a6f-b4c7-37b124cbba77` reached `RuntimeReady` in 121s and held 83s with exact retained identities and no operator restart. Released `0.5.40` acceptance closes Milestone 5 above. `Ready=True` remains only selected single-replica internal-core health, not production readiness, HA, storage, backup/restore, external/browser/provider/write workflows.
 
 - The Coriolis web slice is released and POC-accepted as `0.5.33`. Source `942557a0914b7455af6dbeac6ae5966417bd1223` was published by fully successful CIXpress Default `opfrnr`; CI commit `9f7151af10e2275e15718a325a12e850601ec5f3` published chart/app/operator `0.5.33` with chart digest `sha256:0e0452229c22c2a4067c55df25c6e09c1ffeefcc8e92eb3fba77ab477713e27e` and operator digest `sha256:8f3e80f3c6ea2a79c83feff5078ca45ef8d8615b060ae91b1fae235428a31273`. The accepted isolated POC proved mutation-free Service and Deployment collision handling, recovery after deleting only the fixture, the CR-owned TCP `3000` Service/ready EndpointSlice and one-replica `Recreate` Deployment at exact web digest `sha256:32ebc391ac46fe627185694b3fd252afd7587b152f526dff38ae0a5b887c0db1`, fixed-output Service-DNS verification, Pod replacement/reset, in-place drift repair, retained no-write CR recreation, and normal cleanup. The user explicitly waived credential rotation for this work and accepted the residual risk; it remains recorded without remediation claim.
 
