@@ -6,14 +6,15 @@
 - Local gate passed 707 unit tests in 15.61s, focused collision timer 6 plus a 3-test sanity check, Ruff check, 70-file Ruff format, strict mypy/18 source files, Helm lint/template, and `git diff --check`. CIXpress Default exact-commit pipeline `yxf23` was top-level `SUCCEEDED` from `2026-08-27T08:31:44+00:00` to `08:32:59+00:00`; its five-character ID failed approved six-character monitor validation, so per-step confirmation is unavailable and it is not claimed fully successful.
 - In approved `virt-infra-dev-buc-hq`/`default`, namespace/Application `coriolis-recreation-validation-20260827`, chart `0.5.40`/`skipCrds`, CR `readiness-validation`, exact digest, and host `coriolis.app.cloudbase.wiki`, released `0.5.40` naturally deleted old `c717...` and 31 children in 29s; new UID `e405b201-5bad-4757-a77d-706a5f265262` reached `RuntimeReady` in about 110s and held 245s. It had exact retained Secret/PVC/PV identity baselines, 31 solely new-owned children, ready zero-restart workloads/endpoints, no old references, and unchanged zero-restart operator. Normal cleanup removed CR/children, Application, namespace, and Delete-policy PVs without force or individual retained/PVC/PV deletion. This does not expand production/HA/storage/backup/provider/browser/write acceptance or broad periodic drift self-healing.
 
-## Open: Milestone 6 OpenStack Provider Qualification
+## Completed: Milestone 6 OpenStack Provider Qualification
 
-- Qualify connection schemas and authentication for two distinct OpenStack environments; keep credentials out of repository, status, events, logs, and captured evidence.
-- Qualify a disposable Cinder-backed Linux source with working Cinder backup-to-Swift using `source_environment.replica_export_mechanism: swift_backups`, plus target `migr_image`, `migr_flavor_name`, `migr_network`, network/storage mappings, quotas, worker dependencies, and connectivity. This is the next gate.
+- Isolated `0.5.42` qualification accepted password authentication with canonical name/domain scope; the live schema exposed no application-credential fields. No credential values were recorded.
+- Disposable source/destination endpoints validated twice after a 30-second hold. The source exposed `replica_export_mechanism: swift_backups`, and direct Cinder-to-Swift backup proof qualified that cloud prerequisite; destination image/flavor/network, floating-IP pool, volume-type mappings, independent inventory, and quota headroom for exactly two `c1.small` temporary workers passed. Runtime remained healthy with zero restarts, and endpoint/cloud/runtime cleanup completed normally.
+- Accepted limits: no transfer, migration, deployment, target write, worker VM creation, browser/UI, Barbican, `live_migration`, production readiness, HA, or Kubernetes runtime backup/restore.
 
-## Open: Milestone 7 API-Driven OpenStack-to-OpenStack Migration POC
+## Open: Milestone 7 API-Driven OpenStack-to-OpenStack Migration POC (Current Gate)
 
-- With Milestone 5 closed, create both Coriolis endpoint definitions from scratch through the API with inline `connection_info`, then run one-shot `live_migration` with `clone_disks: true`, `skip_os_morphing: true`, `shutdown_instances: true`, and `auto_deploy: true`.
+- With Milestones 5 and 6 closed, create both Coriolis endpoint definitions from scratch through the API with inline `connection_info`, then run one-shot `live_migration` with `clone_disks: true`, `skip_os_morphing: true`, `shutdown_instances: true`, and `auto_deploy: true`.
 - Poll the transfer and auto-created deployment; verify destination `ACTIVE` and reachable; clean up normally. The scenario's internal replica-provider calls permit the source Swift-backup setting.
 
 ## Open: Milestone 8 Kubernetes-Native Logging

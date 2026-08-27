@@ -48,15 +48,15 @@
 - Local gate passed 707 unit tests in 15.61s, focused collision timer 6 plus a 3-test sanity check, Ruff check, 70-file Ruff format, strict mypy/18 source files, Helm lint/template, and `git diff --check`. CIXpress Default exact-commit `yxf23` was top-level `SUCCEEDED` (`2026-08-27T08:31:44+00:00`-`08:32:59+00:00`), but its five-character ID failed approved six-character monitor validation: per-step confirmation is unavailable and it is not claimed fully successful.
 - The fresh isolated `virt-infra-dev-buc-hq`/`default` acceptance in namespace/Application `coriolis-recreation-validation-20260827`, chart `0.5.40`/`skipCrds`, CR `readiness-validation`, exact digest, and host `coriolis.app.cloudbase.wiki` automatically deleted old `c717...` and 31 children in 29s. New UID `e405b201-5bad-4757-a77d-706a5f265262` reached `RuntimeReady` in about 110s and held 245s; 31 solely new-owned children, ready zero-restart workloads/endpoints, retained Secret/PVC/PV identities, no old references, and unchanged operator passed. Normal cleanup was force-free and complete. Milestone 5 is accepted for this bounded single-node POC with no operational exception; `Ready=True` remains bounded to selected single-replica internal-core health.
 
-## Milestone 6: OpenStack Provider Qualification
+## Milestone 6: OpenStack Provider Qualification (Accepted)
 
-- Qualify the connection schema and authentication for two distinct OpenStack environments, keeping credentials out of the repository, CR status, events, logs, and captured evidence.
-- Use a disposable Cinder-backed Linux source with working Cinder backup-to-Swift (`source_environment.replica_export_mechanism: swift_backups`), and qualify target `migr_image`, `migr_flavor_name`, `migr_network`, required network/storage mappings, quotas, worker dependencies, and connectivity.
-- Acceptance gate: source and target provider operations and mappings are value-safe and ready for the API POC. This is the next gate.
+- Isolated `0.5.42` validation accepted password authentication with canonical name/domain scope; the live schema exposed no application-credential fields, and no credentials were recorded.
+- Disposable source/destination endpoint definitions validated through Coriolis twice, with a 30-second stability hold. The source exposed `replica_export_mechanism: swift_backups`, while a successful direct Cinder backup and dedicated Swift objects qualified that cloud prerequisite; destination image/flavor/network, floating-IP pool, volume-type mappings, independent inventory, and quota headroom for exactly two `c1.small` temporary workers passed.
+- Runtime stayed `Synced/Healthy` and `RuntimeReady` with 11 ready Deployments, 2 ready StatefulSets, successful bootstrap, and zero restarts. Normal endpoint, cloud-resource, and isolated-runtime cleanup completed. This accepts provider qualification only, not migration, target writes, worker VM creation, browser/UI, Barbican, `live_migration`, production readiness, HA, or Kubernetes runtime backup/restore.
 
-## Milestone 7: API-Driven OpenStack-to-OpenStack Migration POC
+## Milestone 7: API-Driven OpenStack-to-OpenStack Migration POC (Current Gate)
 
-- With Milestone 5 closed, create both Coriolis endpoint definitions from scratch through the API with inline `connection_info`, then execute the one-shot `live_migration` scenario. Its internal replica-provider calls make the source Swift-backup setting valid.
+- With Milestones 5 and 6 closed, create both Coriolis endpoint definitions from scratch through the API with inline `connection_info`, then execute the one-shot `live_migration` scenario. Its internal replica-provider calls make the qualified source Swift-backup setting valid.
 - First complete POC flags are transfer `clone_disks: true`, `skip_os_morphing: true`, and execution `shutdown_instances: true`, `auto_deploy: true`.
 - Acceptance gate: poll both the transfer and its auto-created deployment; verify the destination is `ACTIVE` and reachable; remove temporary migration resources, endpoint definitions, and disposable cloud resources normally without exposing credentials.
 
