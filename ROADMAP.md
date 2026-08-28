@@ -59,6 +59,7 @@
 - With Milestones 5 and 6 closed, create both Coriolis endpoint definitions from scratch through the API with inline `connection_info`, then execute the one-shot `live_migration` scenario. Its internal replica-provider calls make the qualified source Swift-backup setting valid.
 - First complete POC flags are transfer `clone_disks: true`, `skip_os_morphing: true`, and execution `shutdown_instances: true`, `auto_deploy: true`.
 - Acceptance gate: poll both the transfer and its auto-created deployment; verify the destination is `ACTIVE` and reachable; remove temporary migration resources, endpoint definitions, and disposable cloud resources normally without exposing credentials.
+- The 2026-08-27/28 attempt validated the runtime and live API contract and created/validated source/destination endpoints, but every execution stopped in `VALIDATE_TRANSFER_DESTINATION_INPUTS`: the first used the FIP display composite instead of a subnet-ID composite, the second used a source-UUID network_map key where installed code indexes by source NIC network name. During cleanup diagnosis one API list output exposed both OpenStack passwords, so both are considered compromised and rotation is mandatory before retry. No Coriolis export/shutdown/worker/target write occurred; normal cloud and runtime cleanup restored baselines and shared Argo/operator health, with no operator or migration product defect established. Milestone 7 remains the current unaccepted gate; Milestone 8 is not advanced.
 
 ## Milestone 8: Kubernetes-Native Logging
 

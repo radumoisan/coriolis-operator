@@ -16,6 +16,7 @@
 
 - With Milestones 5 and 6 closed, create both Coriolis endpoint definitions from scratch through the API with inline `connection_info`, then run one-shot `live_migration` with `clone_disks: true`, `skip_os_morphing: true`, `shutdown_instances: true`, and `auto_deploy: true`.
 - Poll the transfer and auto-created deployment; verify destination `ACTIVE` and reachable; clean up normally. The scenario's internal replica-provider calls permit the source Swift-backup setting.
+- The 2026-08-27/28 attempt validated runtime/API contract and endpoints but every execution stopped in `VALIDATE_TRANSFER_DESTINATION_INPUTS` before any Coriolis write, and a cleanup-diagnosis API list output exposed both OpenStack passwords. Both executions failed input validation (first: FIP display composite instead of subnet-ID composite; second: source-UUID network_map key where installed code indexes by source NIC network name); neither shut down, exported, created workers, or wrote target resources, and normal `204`/cloud/runtime cleanup restored baselines. Both passwords are considered exposed, so credential rotation and re-qualification precede retry (use FIP composite IDs and the network_map source-name key). Milestone 7 remains the current unaccepted gate; Milestone 8 is not advanced.
 
 ## Open: Milestone 8 Kubernetes-Native Logging
 
