@@ -12,13 +12,12 @@
 - Disposable source/destination endpoints validated twice after a 30-second hold. The source exposed `replica_export_mechanism: swift_backups`, and direct Cinder-to-Swift backup proof qualified that cloud prerequisite; destination image/flavor/network, floating-IP pool, volume-type mappings, independent inventory, and quota headroom for exactly two `c1.small` temporary workers passed. Runtime remained healthy with zero restarts, and endpoint/cloud/runtime cleanup completed normally.
 - Accepted limits: no transfer, migration, deployment, target write, worker VM creation, browser/UI, Barbican, `live_migration`, production readiness, HA, or Kubernetes runtime backup/restore.
 
-## Open: Milestone 7 API-Driven OpenStack-to-OpenStack Migration POC (Current Gate)
+## Completed: Milestone 7 API-Driven OpenStack-to-OpenStack Migration POC
 
-- With Milestones 5 and 6 closed, create both Coriolis endpoint definitions from scratch through the API with inline `connection_info`, then run one-shot `live_migration` with `clone_disks: true`, `skip_os_morphing: true`, `shutdown_instances: true`, and `auto_deploy: true`.
-- Poll the transfer and auto-created deployment; verify destination `ACTIVE` and reachable; clean up normally. The scenario's internal replica-provider calls permit the source Swift-backup setting.
-- The 2026-08-27/28 attempt validated runtime/API contract and endpoints but every execution stopped in `VALIDATE_TRANSFER_DESTINATION_INPUTS` before any Coriolis write, and a cleanup-diagnosis API list output exposed both OpenStack passwords. Both executions failed input validation (first: FIP display composite instead of subnet-ID composite; second: source-UUID network_map key where installed code indexes by source NIC network name); neither shut down, exported, created workers, or wrote target resources, and normal `204`/cloud/runtime cleanup restored baselines. Both passwords are considered exposed, so credential rotation and re-qualification precede retry (use FIP composite IDs and the network_map source-name key). Milestone 7 remains the current unaccepted gate; Milestone 8 is not advanced.
+- Resumed run `coriolis-m7-20260828T031125Z` accepted the bounded API-first POC in `virt-infra-dev-buc-hq`/`default`, namespace/Application `coriolis-m7-20260828-031125`, chart/operator `0.5.42`/`skipCrds`, accepted `2603.4`: `RuntimeReady`/`Synced`/`Healthy`, 11 Deployments, 2 StatefulSets, successful bootstrap, zero restarts. Corrected inert transfer `1942d5ad-5363-4cc2-8f1d-3001627899de` and exactly-once execution `9d180471-885e-44a6-82bf-58ce8719df84` completed, as did correlated deployment `74e88cbe-acf0-4378-9d34-d78dfd534a75`; source was `SHUTOFF`, destination `ACTIVE` and SSH-verified.
+- Normal API delete and delete-disks cleanup returned baseline state without force or Kubernetes finalizer/owner/cascade changes. The 2026-08-27/28 failed input-validation/credential-exposure attempt remains history: rotation was its stop condition, but the later explicit user instruction `do not rotate and continue` waived rotation for this run. No remediation is claimed and residual credential risk remains accepted. Milestone 8 is current; UI/browser, Barbican, production, HA, storage, and backup/restore remain open.
 
-## Open: Milestone 8 Kubernetes-Native Logging
+## Open: Milestone 8 Kubernetes-Native Logging (Current Gate)
 
 - Use stdout/stderr and Kubernetes collection while implementing the `/logs` and WebSocket `/log-stream` UI compatibility contracts; verify value-safe log handling.
 
