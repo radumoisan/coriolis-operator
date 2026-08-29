@@ -20,6 +20,29 @@ from coriolis_operator.configuration import (
     render_sensitive_coriolis_config,
 )
 from coriolis_operator.ingress import resolve_ingress_settings
+from coriolis_operator.logging import (
+    LOGGING_ADAPTOR_DEPLOYMENT_KEY,
+    LOGGING_ADAPTOR_INGRESS_KEY,
+    LOGGING_ADAPTOR_INGRESS_PHASE_KEYS,
+    LOGGING_ADAPTOR_PHASE_KEYS,
+    LOGGING_ADAPTOR_SERVICE_KEY,
+    LOGGING_ALLOY_CONFIG_KEY,
+    LOGGING_ALLOY_DEPLOYMENT_KEY,
+    LOGGING_ALLOY_PHASE_KEYS,
+    LOGGING_ALLOY_ROLE_BINDING_KEY,
+    LOGGING_ALLOY_ROLE_KEY,
+    LOGGING_ALLOY_SERVICE_ACCOUNT_KEY,
+    LOGGING_CREDENTIALS_KEY,
+    LOGGING_GATEWAY_CONFIG_SECRET_KEY,
+    LOGGING_GATEWAY_SERVICE_KEY,
+    LOGGING_LOKI_CONFIG_KEY,
+    LOGGING_LOKI_PHASE_KEYS,
+    LOGGING_LOKI_PVC_KEY,
+    LOGGING_LOKI_STATEFUL_SET_KEY,
+    LoggingExistingResources,
+    preflight_logging_resources,
+    resolve_logging_settings,
+)
 from coriolis_operator.mariadb import (
     SensitiveMariaDBCredentials,
     resolve_mariadb_settings,
@@ -31,9 +54,12 @@ from coriolis_operator.reconcile import (
     MARKER_COLLISION,
     SUPPORTED_INITIAL_VERSION,
     SUPPORTED_PROFILE,
+    Condition,
+    LoggingReadinessState,
     OwnedClassification,
     RetainedClassification,
     RuntimeReadinessState,
+    _deployment_ready,
     accepted_conditions,
     appliance_resource_name,
     blocked_conditions,
@@ -52,6 +78,7 @@ from coriolis_operator.reconcile import (
     evaluate_runtime_readiness,
     invalid_runtime_configuration_conditions,
     kubernetes_coriolis_render_inputs,
+    logging_readiness_condition,
     preflight_api_resources,
     preflight_common_bootstrap_resources,
     preflight_conductor_resource,
@@ -323,6 +350,7 @@ def observe_runtime_readiness(
     core_api: client.CoreV1Api | None = None,
     apps_api: client.AppsV1Api | None = None,
     batch_api: client.BatchV1Api | None = None,
+    networking_api: client.NetworkingV1Api | None = None,
     opener: Any = urlopen,
 ) -> dict[str, Any]:
     """Observe runtime readiness through exact Kubernetes reads and internal HTTP."""
@@ -330,10 +358,16 @@ def observe_runtime_readiness(
     namespace = str(meta["namespace"])
     generation = int(meta["generation"])
     accepted_version = _accepted_version(status)
+    api: client.CoreV1Api | None = None
+    workloads_api: client.AppsV1Api | None = None
+    ingress_api: client.NetworkingV1Api | None = None
     try:
         api = core_api if core_api is not None else client.CoreV1Api()
         workloads_api = apps_api if apps_api is not None else client.AppsV1Api()
         jobs_api = batch_api if batch_api is not None else client.BatchV1Api()
+        ingress_api = (
+            networking_api if networking_api is not None else client.NetworkingV1Api()
+        )
         bootstrap_job = _read_for_runtime_readiness(
             jobs_api.read_namespaced_job,
             name=appliance_resource_name(name, BOOTSTRAP_COMPONENT),
@@ -434,12 +468,90 @@ def observe_runtime_readiness(
                     services=services,
                     health_checks_passed=health_checks_passed,
                 )
+    if api is None or workloads_api is None or ingress_api is None:
+        logging_condition = logging_readiness_condition(
+            LoggingReadinessState.OBSERVATION_FAILED
+        )
+    else:
+        logging_condition = _observe_logging_readiness(
+            name=name,
+            namespace=namespace,
+            core_api=api,
+            apps_api=workloads_api,
+            ingress_api=ingress_api,
+        )
     return build_status(
         generation,
         accepted_version=accepted_version,
-        conditions=runtime_readiness_conditions(readiness_state),
+        conditions=(
+            *runtime_readiness_conditions(readiness_state),
+            logging_condition,
+        ),
         prior_conditions=_prior_conditions(status),
     )
+
+
+def _observe_logging_readiness(
+    *,
+    name: str,
+    namespace: str,
+    core_api: client.CoreV1Api,
+    apps_api: client.AppsV1Api,
+    ingress_api: client.NetworkingV1Api,
+) -> Condition:
+    """Observe logging operational resources and return one LoggingReady condition."""
+    try:
+        loki_pvc = _read_for_runtime_readiness(
+            core_api.read_namespaced_persistent_volume_claim,
+            name=appliance_resource_name(name, "loki-data"),
+            namespace=namespace,
+        )
+        gateway_service = _read_for_runtime_readiness(
+            core_api.read_namespaced_service,
+            name=appliance_resource_name(name, "gateway"),
+            namespace=namespace,
+        )
+        loki_stateful_set = _read_for_runtime_readiness(
+            apps_api.read_namespaced_stateful_set,
+            name=appliance_resource_name(name, "loki"),
+            namespace=namespace,
+        )
+        alloy_deployment = _read_for_runtime_readiness(
+            apps_api.read_namespaced_deployment,
+            name=appliance_resource_name(name, "alloy"),
+            namespace=namespace,
+        )
+        adaptor_deployment = _read_for_runtime_readiness(
+            apps_api.read_namespaced_deployment,
+            name=appliance_resource_name(name, "adaptor"),
+            namespace=namespace,
+        )
+        adaptor_service = _read_for_runtime_readiness(
+            core_api.read_namespaced_service,
+            name=appliance_resource_name(name, "adaptor"),
+            namespace=namespace,
+        )
+        adaptor_ingress = _read_for_runtime_readiness(
+            ingress_api.read_namespaced_ingress,
+            name=appliance_resource_name(name, "adaptor"),
+            namespace=namespace,
+        )
+    except _ReadinessObservationFailed:
+        return logging_readiness_condition(LoggingReadinessState.OBSERVATION_FAILED)
+    except Exception:
+        return logging_readiness_condition(LoggingReadinessState.OBSERVATION_FAILED)
+    resources = LoggingExistingResources(
+        loki_pvc=loki_pvc,
+        gateway_service=gateway_service,
+        loki_stateful_set=loki_stateful_set,
+        alloy_deployment=alloy_deployment,
+        adaptor_deployment=adaptor_deployment,
+        adaptor_service=adaptor_service,
+        adaptor_ingress=adaptor_ingress,
+    )
+    if resources.operational_ready():
+        return logging_readiness_condition(LoggingReadinessState.READY)
+    return logging_readiness_condition(LoggingReadinessState.STARTING)
 
 
 def _is_reconciled_for_runtime_observation(
@@ -627,6 +739,7 @@ def reconcile_appliance(
     apps_api: client.AppsV1Api | None = None,
     batch_api: client.BatchV1Api | None = None,
     networking_api: client.NetworkingV1Api | None = None,
+    rbac_api: client.RbacAuthorizationV1Api | None = None,
 ) -> dict[str, Any]:
     """Reconcile foundational resources, dependency Services, and workloads."""
     name = str(meta["name"])
@@ -682,6 +795,7 @@ def reconcile_appliance(
             storage=spec.get("storage"), resources=spec.get("resources")
         )
         ingress_settings = resolve_ingress_settings(spec.get("ingress"))
+        _logging_settings = resolve_logging_settings(spec.get("logging"))
     except ValueError:
         return build_status(
             generation,
@@ -758,6 +872,24 @@ def reconcile_appliance(
         )
         keystone_deployment_name = appliance_resource_name(name, "keystone")
         bootstrap_resource_name = appliance_resource_name(name, BOOTSTRAP_COMPONENT)
+        logging_credentials_secret_name = appliance_resource_name(
+            name, "logging-credentials"
+        )
+        logging_loki_pvc_name = appliance_resource_name(name, "loki-data")
+        logging_loki_config_name = appliance_resource_name(name, "loki-config")
+        logging_gateway_config_secret_name = appliance_resource_name(
+            name, "gateway-config"
+        )
+        logging_gateway_service_name = appliance_resource_name(name, "gateway")
+        logging_loki_stateful_set_name = appliance_resource_name(name, "loki")
+        logging_alloy_config_name = appliance_resource_name(name, "alloy-config")
+        logging_alloy_sa_name = appliance_resource_name(name, "alloy-sa")
+        logging_alloy_role_name = appliance_resource_name(name, "alloy-role")
+        logging_alloy_role_binding_name = appliance_resource_name(name, "alloy-rb")
+        logging_alloy_deployment_name = appliance_resource_name(name, "alloy")
+        logging_adaptor_deployment_name = appliance_resource_name(name, "adaptor")
+        logging_adaptor_service_name = appliance_resource_name(name, "adaptor")
+        logging_adaptor_ingress_name = appliance_resource_name(name, "adaptor")
     except ReconcileRetry:
         raise
     except Exception:
@@ -771,6 +903,7 @@ def reconcile_appliance(
         ingress_api = (
             networking_api if networking_api is not None else client.NetworkingV1Api()
         )
+        rbac_api = rbac_api if rbac_api is not None else client.RbacAuthorizationV1Api()
     except ReconcileRetry:
         raise
     except Exception:
@@ -1059,6 +1192,118 @@ def reconcile_appliance(
     coriolis_api_ingress_existing = _read_or_absent(
         ingress_api.read_namespaced_ingress,
         name=coriolis_api_name,
+        namespace=namespace,
+        generation=generation,
+        accepted_version=accepted_version,
+        status=status,
+    )
+    logging_credentials_secret_existing = _read_or_absent(
+        api.read_namespaced_secret,
+        name=logging_credentials_secret_name,
+        namespace=namespace,
+        generation=generation,
+        accepted_version=accepted_version,
+        status=status,
+    )
+    logging_loki_pvc_existing = _read_or_absent(
+        api.read_namespaced_persistent_volume_claim,
+        name=logging_loki_pvc_name,
+        namespace=namespace,
+        generation=generation,
+        accepted_version=accepted_version,
+        status=status,
+    )
+    logging_loki_config_existing = _read_or_absent(
+        api.read_namespaced_config_map,
+        name=logging_loki_config_name,
+        namespace=namespace,
+        generation=generation,
+        accepted_version=accepted_version,
+        status=status,
+    )
+    logging_gateway_config_secret_existing = _read_or_absent(
+        api.read_namespaced_secret,
+        name=logging_gateway_config_secret_name,
+        namespace=namespace,
+        generation=generation,
+        accepted_version=accepted_version,
+        status=status,
+    )
+    logging_gateway_service_existing = _read_or_absent(
+        api.read_namespaced_service,
+        name=logging_gateway_service_name,
+        namespace=namespace,
+        generation=generation,
+        accepted_version=accepted_version,
+        status=status,
+    )
+    logging_loki_stateful_set_existing = _read_or_absent(
+        workloads_api.read_namespaced_stateful_set,
+        name=logging_loki_stateful_set_name,
+        namespace=namespace,
+        generation=generation,
+        accepted_version=accepted_version,
+        status=status,
+    )
+    logging_alloy_config_existing = _read_or_absent(
+        api.read_namespaced_config_map,
+        name=logging_alloy_config_name,
+        namespace=namespace,
+        generation=generation,
+        accepted_version=accepted_version,
+        status=status,
+    )
+    logging_alloy_sa_existing = _read_or_absent(
+        api.read_namespaced_service_account,
+        name=logging_alloy_sa_name,
+        namespace=namespace,
+        generation=generation,
+        accepted_version=accepted_version,
+        status=status,
+    )
+    logging_alloy_role_existing = _read_or_absent(
+        rbac_api.read_namespaced_role,
+        name=logging_alloy_role_name,
+        namespace=namespace,
+        generation=generation,
+        accepted_version=accepted_version,
+        status=status,
+    )
+    logging_alloy_role_binding_existing = _read_or_absent(
+        rbac_api.read_namespaced_role_binding,
+        name=logging_alloy_role_binding_name,
+        namespace=namespace,
+        generation=generation,
+        accepted_version=accepted_version,
+        status=status,
+    )
+    logging_alloy_deployment_existing = _read_or_absent(
+        workloads_api.read_namespaced_deployment,
+        name=logging_alloy_deployment_name,
+        namespace=namespace,
+        generation=generation,
+        accepted_version=accepted_version,
+        status=status,
+    )
+    logging_adaptor_deployment_existing = _read_or_absent(
+        workloads_api.read_namespaced_deployment,
+        name=logging_adaptor_deployment_name,
+        namespace=namespace,
+        generation=generation,
+        accepted_version=accepted_version,
+        status=status,
+    )
+    logging_adaptor_service_existing = _read_or_absent(
+        api.read_namespaced_service,
+        name=logging_adaptor_service_name,
+        namespace=namespace,
+        generation=generation,
+        accepted_version=accepted_version,
+        status=status,
+    )
+    logging_adaptor_ingress_existing = _read_or_absent(
+        ingress_api.read_namespaced_ingress,
+        name=logging_adaptor_ingress_name,
         namespace=namespace,
         generation=generation,
         accepted_version=accepted_version,
@@ -1698,6 +1943,202 @@ def reconcile_appliance(
                 generation, accepted_version, status, "ResourceApplyFailed"
             )
 
+    logging_existing = LoggingExistingResources(
+        credentials_secret=logging_credentials_secret_existing,
+        loki_pvc=logging_loki_pvc_existing,
+        loki_config_map=logging_loki_config_existing,
+        gateway_config_secret=logging_gateway_config_secret_existing,
+        gateway_service=logging_gateway_service_existing,
+        loki_stateful_set=logging_loki_stateful_set_existing,
+        alloy_config_map=logging_alloy_config_existing,
+        alloy_service_account=logging_alloy_sa_existing,
+        alloy_role=logging_alloy_role_existing,
+        alloy_role_binding=logging_alloy_role_binding_existing,
+        alloy_deployment=logging_alloy_deployment_existing,
+        adaptor_deployment=logging_adaptor_deployment_existing,
+        adaptor_service=logging_adaptor_service_existing,
+        adaptor_ingress=logging_adaptor_ingress_existing,
+    )
+    try:
+        logging_preflight = preflight_logging_resources(
+            appliance_name=name,
+            namespace=namespace,
+            accepted_version=requested_version,
+            owner=owner,
+            cr_uid=str(meta["uid"]),
+            settings=_logging_settings,
+            ingress_settings=ingress_settings,
+            existing=logging_existing,
+        )
+    except ReconcileRetry:
+        raise
+    except Exception:
+        raise _retry_status(
+            generation, accepted_version, status, "ResourceApplyFailed"
+        ) from None
+    if logging_preflight.collision_resource_name is not None:
+        return build_status(
+            generation,
+            accepted_version=accepted_version,
+            conditions=collision_conditions(
+                namespace, logging_preflight.collision_resource_name
+            ),
+            prior_conditions=_prior_conditions(status),
+        )
+    logging_owned_rv = (
+        (
+            logging_loki_config_existing,
+            logging_preflight.classifications[LOGGING_LOKI_CONFIG_KEY],
+        ),
+        (
+            logging_gateway_config_secret_existing,
+            logging_preflight.classifications[LOGGING_GATEWAY_CONFIG_SECRET_KEY],
+        ),
+        (
+            logging_gateway_service_existing,
+            logging_preflight.classifications[LOGGING_GATEWAY_SERVICE_KEY],
+        ),
+        (
+            logging_loki_stateful_set_existing,
+            logging_preflight.classifications[LOGGING_LOKI_STATEFUL_SET_KEY],
+        ),
+        (
+            logging_alloy_config_existing,
+            logging_preflight.classifications[LOGGING_ALLOY_CONFIG_KEY],
+        ),
+        (
+            logging_alloy_sa_existing,
+            logging_preflight.classifications[LOGGING_ALLOY_SERVICE_ACCOUNT_KEY],
+        ),
+        (
+            logging_alloy_role_existing,
+            logging_preflight.classifications[LOGGING_ALLOY_ROLE_KEY],
+        ),
+        (
+            logging_alloy_role_binding_existing,
+            logging_preflight.classifications[LOGGING_ALLOY_ROLE_BINDING_KEY],
+        ),
+        (
+            logging_alloy_deployment_existing,
+            logging_preflight.classifications[LOGGING_ALLOY_DEPLOYMENT_KEY],
+        ),
+        (
+            logging_adaptor_deployment_existing,
+            logging_preflight.classifications[LOGGING_ADAPTOR_DEPLOYMENT_KEY],
+        ),
+        (
+            logging_adaptor_service_existing,
+            logging_preflight.classifications[LOGGING_ADAPTOR_SERVICE_KEY],
+        ),
+        (
+            logging_adaptor_ingress_existing,
+            logging_preflight.classifications[LOGGING_ADAPTOR_INGRESS_KEY],
+        ),
+    )
+    for existing, classification in logging_owned_rv:
+        if (
+            classification is OwnedClassification.MANAGED
+            and _resource_version(existing) is None
+        ):
+            raise _retry_status(
+                generation, accepted_version, status, "ResourceApplyFailed"
+            )
+    logging_apply_spec = {
+        LOGGING_CREDENTIALS_KEY: (
+            api,
+            "secret",
+            logging_credentials_secret_existing,
+        ),
+        LOGGING_LOKI_PVC_KEY: (
+            api,
+            "persistent_volume_claim",
+            logging_loki_pvc_existing,
+        ),
+        LOGGING_LOKI_CONFIG_KEY: (
+            api,
+            "config_map",
+            logging_loki_config_existing,
+        ),
+        LOGGING_GATEWAY_CONFIG_SECRET_KEY: (
+            api,
+            "secret",
+            logging_gateway_config_secret_existing,
+        ),
+        LOGGING_GATEWAY_SERVICE_KEY: (
+            api,
+            "service",
+            logging_gateway_service_existing,
+        ),
+        LOGGING_LOKI_STATEFUL_SET_KEY: (
+            workloads_api,
+            "stateful_set",
+            logging_loki_stateful_set_existing,
+        ),
+        LOGGING_ALLOY_CONFIG_KEY: (
+            api,
+            "config_map",
+            logging_alloy_config_existing,
+        ),
+        LOGGING_ALLOY_SERVICE_ACCOUNT_KEY: (
+            api,
+            "service_account",
+            logging_alloy_sa_existing,
+        ),
+        LOGGING_ALLOY_ROLE_KEY: (
+            rbac_api,
+            "role",
+            logging_alloy_role_existing,
+        ),
+        LOGGING_ALLOY_ROLE_BINDING_KEY: (
+            rbac_api,
+            "role_binding",
+            logging_alloy_role_binding_existing,
+        ),
+        LOGGING_ALLOY_DEPLOYMENT_KEY: (
+            workloads_api,
+            "deployment",
+            logging_alloy_deployment_existing,
+        ),
+        LOGGING_ADAPTOR_DEPLOYMENT_KEY: (
+            workloads_api,
+            "deployment",
+            logging_adaptor_deployment_existing,
+        ),
+        LOGGING_ADAPTOR_SERVICE_KEY: (
+            api,
+            "service",
+            logging_adaptor_service_existing,
+        ),
+        LOGGING_ADAPTOR_INGRESS_KEY: (
+            ingress_api,
+            "ingress",
+            logging_adaptor_ingress_existing,
+        ),
+    }
+    retained_logging_keys = frozenset({LOGGING_CREDENTIALS_KEY, LOGGING_LOKI_PVC_KEY})
+
+    def apply_logging_phase(keys: tuple[str, ...]) -> None:
+        for key in keys:
+            if key not in logging_preflight.manifests:
+                continue
+            classification = logging_preflight.classifications[key]
+            if (
+                key in retained_logging_keys
+                and classification is RetainedClassification.REUSE
+            ):
+                continue
+            resource_api, kind, existing = logging_apply_spec[key]
+            _create_or_apply(
+                resource_api,
+                kind=kind,
+                body=logging_preflight.manifests[key],
+                existing=existing,
+                category="ResourceApplyFailed",
+                generation=generation,
+                accepted_version=accepted_version,
+                status=status,
+            )
+
     (
         mariadb_data_pvc_body,
         mariadb_config_map_body,
@@ -1797,6 +2238,12 @@ def reconcile_appliance(
         raise _retry_status(
             generation, accepted_version, status, "ResourceApplyFailed"
         ) from None
+    apply_logging_phase(LOGGING_LOKI_PHASE_KEYS)
+    if not logging_existing.loki_phase_ready():
+        raise _retry_status(generation, accepted_version, status, "ResourceApplyFailed")
+    apply_logging_phase(LOGGING_ALLOY_PHASE_KEYS)
+    if not logging_existing.alloy_phase_ready():
+        raise _retry_status(generation, accepted_version, status, "ResourceApplyFailed")
     resources = (
         (
             "secret",
@@ -2157,6 +2604,12 @@ def reconcile_appliance(
             accepted_version=accepted_version,
             status=status,
         )
+    if not _deployment_ready(keystone_deployment_existing):
+        raise _retry_status(generation, accepted_version, status, "ResourceApplyFailed")
+    apply_logging_phase(LOGGING_ADAPTOR_PHASE_KEYS)
+    if not logging_existing.adaptor_phase_ready():
+        raise _retry_status(generation, accepted_version, status, "ResourceApplyFailed")
+    apply_logging_phase(LOGGING_ADAPTOR_INGRESS_PHASE_KEYS)
     _create_or_apply(
         api,
         kind="config_map",

@@ -44,7 +44,7 @@ def test_crd_defines_core_profile_with_enum_and_default() -> None:
 def test_crd_keeps_version_required_non_empty_without_enum() -> None:
     schema = _load_schema()
     spec = schema["properties"]["spec"]
-    assert spec["required"] == ["version"]
+    assert spec["required"] == ["version", "logging"]
     version = spec["properties"]["version"]
     assert version["type"] == "string"
     assert version["minLength"] == 1
@@ -103,7 +103,7 @@ def test_crd_adds_optional_storage_and_resources_without_defaults() -> None:
     schema = _load_schema()
     spec = schema["properties"]["spec"]
 
-    assert spec["required"] == ["version"]
+    assert spec["required"] == ["version", "logging"]
     assert spec["properties"]["storage"] == {
         "type": "object",
         "properties": {
@@ -170,4 +170,87 @@ def test_sample_uses_explicit_dev_cert_manager_ingress_settings() -> None:
         "host": "coriolis.app.cloudbase.wiki",
         "ingressClassName": "nginx",
         "tls": {"mode": "certManager", "clusterIssuer": "letsencrypt"},
+    }
+
+
+def _logging_component_resources_schema() -> dict:
+    return {
+        resource_type: {
+            "type": "object",
+            "required": ["cpu", "memory"],
+            "properties": {
+                "cpu": {"type": "string", "minLength": 1},
+                "memory": {"type": "string", "minLength": 1},
+            },
+        }
+        for resource_type in ("requests", "limits")
+    }
+
+
+def test_crd_requires_logging_without_defaults() -> None:
+    schema = _load_schema()
+    spec = schema["properties"]["spec"]
+
+    assert spec["required"] == ["version", "logging"]
+    logging = spec["properties"]["logging"]
+    assert logging["type"] == "object"
+    assert logging["required"] == ["retentionHours", "storage", "resources"]
+    assert logging.get("default") is None
+    assert logging["properties"]["retentionHours"] == {
+        "type": "integer",
+        "minimum": 1,
+    }
+    assert logging["properties"]["storage"] == {
+        "type": "object",
+        "required": ["loki"],
+        "properties": {
+            "loki": {
+                "type": "object",
+                "required": ["storageClassName", "size"],
+                "properties": {
+                    "storageClassName": {"type": "string", "minLength": 1},
+                    "size": {"type": "string", "minLength": 1},
+                },
+            },
+        },
+    }
+    assert logging["properties"]["resources"] == {
+        "type": "object",
+        "required": ["loki", "gateway", "alloy", "adaptor"],
+        "properties": {
+            component: {
+                "type": "object",
+                "required": ["requests", "limits"],
+                "properties": _logging_component_resources_schema(),
+            }
+            for component in ("loki", "gateway", "alloy", "adaptor")
+        },
+    }
+
+
+def test_sample_uses_explicit_logging_settings() -> None:
+    with SAMPLE_PATH.open() as sample_file:
+        sample = yaml.safe_load(sample_file)
+
+    assert sample["spec"]["logging"] == {
+        "retentionHours": 24,
+        "storage": {"loki": {"storageClassName": "local-path", "size": "10Gi"}},
+        "resources": {
+            "loki": {
+                "requests": {"cpu": "250m", "memory": "512Mi"},
+                "limits": {"cpu": "1", "memory": "1Gi"},
+            },
+            "gateway": {
+                "requests": {"cpu": "25m", "memory": "32Mi"},
+                "limits": {"cpu": "100m", "memory": "64Mi"},
+            },
+            "alloy": {
+                "requests": {"cpu": "100m", "memory": "128Mi"},
+                "limits": {"cpu": "500m", "memory": "512Mi"},
+            },
+            "adaptor": {
+                "requests": {"cpu": "100m", "memory": "128Mi"},
+                "limits": {"cpu": "500m", "memory": "512Mi"},
+            },
+        },
     }

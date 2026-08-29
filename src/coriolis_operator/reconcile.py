@@ -235,6 +235,9 @@ RUNTIME_STARTING_MESSAGE = "The appliance runtime is starting."
 RUNTIME_READY_MESSAGE = "The appliance runtime is ready."
 RUNTIME_HEALTH_CHECK_FAILED_MESSAGE = "Runtime health checks failed."
 RUNTIME_OBSERVATION_FAILED_MESSAGE = "Runtime observation failed."
+LOGGING_READY_MESSAGE = "The logging stack is ready."
+LOGGING_STARTING_MESSAGE = "The logging stack is starting."
+LOGGING_OBSERVATION_FAILED_MESSAGE = "Logging observation failed."
 NOT_DEGRADED_MESSAGE = "The appliance is not degraded."
 NOT_RECONCILED_MESSAGE = "No resources were applied to Kubernetes."
 RECONCILED_MESSAGE = (
@@ -247,8 +250,7 @@ RECONCILED_MESSAGE = (
 )
 UPGRADE_NOT_SUPPORTED_MESSAGE = "The core profile has no supported upgrade path."
 INVALID_RUNTIME_CONFIGURATION_MESSAGE = (
-    "Complete valid MariaDB and RabbitMQ storage and resource configuration is "
-    "required."
+    "Complete valid MariaDB, RabbitMQ, and logging configuration is required."
 )
 RESOURCE_COLLISION_MESSAGE = (
     "The existing resource '{namespace}/{name}' conflicts with operator-managed "
@@ -346,6 +348,14 @@ class RuntimeReadinessState(Enum):
     STARTING = "starting"
     READY = "ready"
     HEALTH_CHECK_FAILED = "health_check_failed"
+    OBSERVATION_FAILED = "observation_failed"
+
+
+class LoggingReadinessState(Enum):
+    """The current logging operational-readiness outcome."""
+
+    READY = "ready"
+    STARTING = "starting"
     OBSERVATION_FAILED = "observation_failed"
 
 
@@ -4495,6 +4505,32 @@ def runtime_readiness_conditions(state: RuntimeReadinessState) -> list[Condition
         degraded,
         ("Upgradeable", "False", "UpgradeNotSupported", UPGRADE_NOT_SUPPORTED_MESSAGE),
     ]
+
+
+def logging_readiness_condition(state: LoggingReadinessState) -> Condition:
+    """Return the single LoggingReady condition for a logging-readiness state."""
+    state_conditions = {
+        LoggingReadinessState.READY: (
+            "True",
+            "LoggingReady",
+            LOGGING_READY_MESSAGE,
+        ),
+        LoggingReadinessState.STARTING: (
+            "False",
+            "LoggingStarting",
+            LOGGING_STARTING_MESSAGE,
+        ),
+        LoggingReadinessState.OBSERVATION_FAILED: (
+            "Unknown",
+            "LoggingObservationFailed",
+            LOGGING_OBSERVATION_FAILED_MESSAGE,
+        ),
+    }
+    try:
+        condition_status, reason, message = state_conditions[state]
+    except KeyError:
+        raise ValueError("invalid logging readiness state") from None
+    return ("LoggingReady", condition_status, reason, message)
 
 
 def rejected_conditions(reason: str, message: str) -> list[Condition]:

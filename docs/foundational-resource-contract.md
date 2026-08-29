@@ -128,13 +128,13 @@ Only Ingress is externally exposed. RabbitMQ, Memcached, MariaDB, and Keystone S
 | barbican | 9311 |
 | api | 7667 |
 | web | 3000 |
-| logger | 9998 |
+| logger (legacy, deferred) | 9998 |
 | licensing-server | 37667 |
 | metal-hub | 9900 |
 
 ### :material-application-edit-outline: Logical Route Map
 
-The public contract is one origin, `https://<host>`. CORS and preflight allow exactly that origin, never a wildcard, allow `POST`, `GET`, `OPTIONS`, `DELETE`, `PUT`, and `PATCH`, preserve `X-Auth-Token` and `X-Subject-Token`, and expose `X-Subject-Token`. When the logger Service exists and a dedicated `/log-stream` route is implemented, it requires WebSocket support.
+The public contract is one origin, `https://<host>`. CORS and preflight allow exactly that origin, never a wildcard, allow `POST`, `GET`, `OPTIONS`, `DELETE`, `PUT`, and `PATCH`, preserve `X-Auth-Token` and `X-Subject-Token`, and expose `X-Subject-Token`. When the logging adaptor Service exists and its dedicated routes are implemented, the `/log-stream` route requires WebSocket support. The legacy logger service and its `/logs`/`/log-stream` mapping are historical/deferred, never active.
 
 | Public path | Backend and rewritten path |
 | --- | --- |
@@ -142,12 +142,22 @@ The public contract is one origin, `https://<host>`. CORS and preflight allow ex
 | `/identity` | Keystone `/v3` |
 | `/barbican` | Barbican |
 | `/coriolis` | API `/v1` |
-| `/logs` | logger `/api/v1/logs` |
-| `/log-stream` | logger `/api/v1/ws` (WebSocket) |
+| `/logs` | logging adaptor (dedicated Ingress) |
+| `/log-stream` | logging adaptor WebSocket (dedicated Ingress) |
 | `/licensing` | licensing server `/v2` |
 | `/metal-hub` | Metal Hub `/api/v1` |
 
-No dedicated backend route may target an absent Service. RabbitMQ, Memcached, MariaDB, and Keystone Services are implemented. MariaDB, Memcached, and RabbitMQ workloads are released and POC-tested, and Keystone is released as `0.5.14` with accepted released-artifact POC evidence; no workload is currently deployed after cleanup. The API Service/Deployment is released and POC-accepted as `0.5.22`. The web Service/Deployment is released and POC-accepted as `0.5.33`: source `942557a0914b7455af6dbeac6ae5966417bd1223` passed CIXpress Default `opfrnr` at every expected step (`08:39:32Z`-`08:40:58Z`) and CI commit `9f7151af10e2275e15718a325a12e850601ec5f3` published chart/app/operator `0.5.33`. Logical-origin Ingress is released and POC-accepted as `0.5.35`: CIXpress `4srgi9` completed all expected steps `SUCCEEDED`, and CI release `a9a594bcdcdc5532e7b676067d55edb9566d81a4` published chart/app/operator `0.5.35` and operator digest `sha256:43e5787aa6bb96bbffc895fc792727afd85be5aa4aeae7fbcde0cb2386257a4f`. It emits the dedicated web `/`, Keystone `/identity`, and API `/coriolis` routes above. No dedicated backend route targets `/log-stream`, Barbican, logger, licensing, or Metal Hub while their Services are absent; unmatched paths use the web `/` `Prefix`/SPA fallback until a more-precedent route is implemented.
+No dedicated backend route may target an absent Service. RabbitMQ, Memcached, MariaDB, and Keystone Services are implemented. MariaDB, Memcached, and RabbitMQ workloads are released and POC-tested, and Keystone is released as `0.5.14` with accepted released-artifact POC evidence; no workload is currently deployed after cleanup. The API Service/Deployment is released and POC-accepted as `0.5.22`. The web Service/Deployment is released and POC-accepted as `0.5.33`: source `942557a0914b7455af6dbeac6ae5966417bd1223` passed CIXpress Default `opfrnr` at every expected step (`08:39:32Z`-`08:40:58Z`) and CI commit `9f7151af10e2275e15718a325a12e850601ec5f3` published chart/app/operator `0.5.33`. Logical-origin Ingress is released and POC-accepted as `0.5.35`: CIXpress `4srgi9` completed all expected steps `SUCCEEDED`, and CI release `a9a594bcdcdc5532e7b676067d55edb9566d81a4` published chart/app/operator `0.5.35` and operator digest `sha256:43e5787aa6bb96bbffc895fc792727afd85be5aa4aeae7fbcde0cb2386257a4f`. It emits the dedicated web `/`, Keystone `/identity`, and API `/coriolis` routes above. [ADR 0007](decisions/0007-kubernetes-native-logging.md) selects an operator-managed per-CR logging stack: the operator owns the retained ownerless Loki RWO PVC and logging-credentials Secret, the Loki ConfigMap and gateway-config Secret/Service, the Loki plus unprivileged-NGINX StatefulSet, the Alloy ConfigMap/ServiceAccount/Role/RoleBinding/Deployment, and the adaptor Deployment/Service/dedicated Ingress. The tenant is exactly `coriolis-<CR UID>`, `spec.logging` is required, `retentionHours` accepts any positive integer, and each logging component has explicit requests/limits. `/logs` and `/log-stream` route directly to the adaptor through its dedicated Ingress after its Deployment and Service are ready; the implementation is local and pending isolated dev-cluster qualification and released-operator-artifact testing.
+
+### :material-application-edit-outline: Operator-Managed Logging Stack
+
+The per-CR logging ownership, ordering, routing, tenant, retention, and required-spec contract is frozen as follows.
+
+- **Ownership and identity.** The operator owns the retained ownerless Loki RWO PVC and logging-credentials Secret, the owned Loki ConfigMap and gateway-config Secret/Service, the Loki plus unprivileged-NGINX StatefulSet, the Alloy ConfigMap/ServiceAccount/Role/RoleBinding/Deployment, and the owned adaptor Deployment/Service/dedicated Ingress. The tenant is exactly `coriolis-<CR UID>`; same-name CR recreation reuses the credentials/PVC but derives a new tenant and cannot query old tenant records.
+- **Exposure.** Loki binds loopback only. NGINX is the sole internal exposure, with exact path/method read/write Basic-auth allowlists, tenant overwrite, upstream Authorization stripping, disabled access logs, and WebSocket tail support. Alloy uses the namespaced Kubernetes API and is ephemeral and unprivileged (no PVC, hostPath, DaemonSet, privilege, node metadata, Events, or cluster-scoped RBAC), uses an exact component allowlist, and holds only the write credential. The adaptor mounts only the read credential and is exposed directly at `/logs` and `/log-stream` through a dedicated Ingress after its Deployment and Service are ready. The legacy logger port/routes are historical/deferred, never active.
+- **Spec and retention.** `spec.logging` is required; `retentionHours` accepts any positive integer (sample 24); sample Loki storage is `local-path`/`10Gi`; each logging component has explicit requests/limits.
+- **Ordering.** All logging reads and the unified preflight precede writes. Stages are Loki/gateway readiness, then Alloy readiness before existing core writes, then the adaptor after Keystone/bootstrap; Ingress follows adaptor readiness; the completion marker is final. Periodic observation appends an independent `LoggingReady` while the six core conditions and core `Ready` semantics remain unchanged.
+- **Retention nuance.** Without a running Loki compactor, physical expiration pauses while the stack is absent; records remain tenant-inaccessible and cleanup resumes after same-name stack reuse/recreation, or storage disappears with namespace/PV removal.
 
 ## :material-book-open-page-variant-outline: Current Status And Accuracy
 

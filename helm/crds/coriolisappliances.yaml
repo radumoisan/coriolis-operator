@@ -33,6 +33,7 @@ spec:
               type: object
               required:
                 - version
+                - logging
               properties:
                 profile:
                   type: string
@@ -161,6 +162,161 @@ spec:
                           type: string
                         tlsSecretName:
                           type: string
+                logging:
+                  type: object
+                  required:
+                    - retentionHours
+                    - storage
+                    - resources
+                  properties:
+                    retentionHours:
+                      type: integer
+                      minimum: 1
+                    storage:
+                      type: object
+                      required:
+                        - loki
+                      properties:
+                        loki:
+                          type: object
+                          required:
+                            - storageClassName
+                            - size
+                          properties:
+                            storageClassName:
+                              type: string
+                              minLength: 1
+                            size:
+                              type: string
+                              minLength: 1
+                    resources:
+                      type: object
+                      required:
+                        - loki
+                        - gateway
+                        - alloy
+                        - adaptor
+                      properties:
+                        loki:
+                          type: object
+                          required:
+                            - requests
+                            - limits
+                          properties:
+                            requests:
+                              type: object
+                              required:
+                                - cpu
+                                - memory
+                              properties:
+                                cpu:
+                                  type: string
+                                  minLength: 1
+                                memory:
+                                  type: string
+                                  minLength: 1
+                            limits:
+                              type: object
+                              required:
+                                - cpu
+                                - memory
+                              properties:
+                                cpu:
+                                  type: string
+                                  minLength: 1
+                                memory:
+                                  type: string
+                                  minLength: 1
+                        gateway:
+                          type: object
+                          required:
+                            - requests
+                            - limits
+                          properties:
+                            requests:
+                              type: object
+                              required:
+                                - cpu
+                                - memory
+                              properties:
+                                cpu:
+                                  type: string
+                                  minLength: 1
+                                memory:
+                                  type: string
+                                  minLength: 1
+                            limits:
+                              type: object
+                              required:
+                                - cpu
+                                - memory
+                              properties:
+                                cpu:
+                                  type: string
+                                  minLength: 1
+                                memory:
+                                  type: string
+                                  minLength: 1
+                        alloy:
+                          type: object
+                          required:
+                            - requests
+                            - limits
+                          properties:
+                            requests:
+                              type: object
+                              required:
+                                - cpu
+                                - memory
+                              properties:
+                                cpu:
+                                  type: string
+                                  minLength: 1
+                                memory:
+                                  type: string
+                                  minLength: 1
+                            limits:
+                              type: object
+                              required:
+                                - cpu
+                                - memory
+                              properties:
+                                cpu:
+                                  type: string
+                                  minLength: 1
+                                memory:
+                                  type: string
+                                  minLength: 1
+                        adaptor:
+                          type: object
+                          required:
+                            - requests
+                            - limits
+                          properties:
+                            requests:
+                              type: object
+                              required:
+                                - cpu
+                                - memory
+                              properties:
+                                cpu:
+                                  type: string
+                                  minLength: 1
+                                memory:
+                                  type: string
+                                  minLength: 1
+                            limits:
+                              type: object
+                              required:
+                                - cpu
+                                - memory
+                              properties:
+                                cpu:
+                                  type: string
+                                  minLength: 1
+                                memory:
+                                  type: string
+                                  minLength: 1
             status:
               type: object
               properties:

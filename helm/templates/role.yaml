@@ -48,6 +48,28 @@ rules:
   - apiGroups:
       - ""
     resources:
+      - serviceaccounts
+    verbs:
+      - get
+      - create
+      - patch
+  - apiGroups:
+      - ""
+    resources:
+      - pods
+    verbs:
+      - get
+      - list
+      - watch
+  - apiGroups:
+      - ""
+    resources:
+      - pods/log
+    verbs:
+      - get
+  - apiGroups:
+      - ""
+    resources:
       - persistentvolumeclaims
     verbs:
       - get
@@ -88,5 +110,21 @@ rules:
     resources:
       - events
     verbs:
+      - create
+      - patch
+  - apiGroups:
+      - rbac.authorization.k8s.io
+    resources:
+      - roles
+    verbs:
+      - get
+      - create
+      - patch
+  - apiGroups:
+      - rbac.authorization.k8s.io
+    resources:
+      - rolebindings
+    verbs:
+      - get
       - create
       - patch

@@ -21,6 +21,11 @@ from coriolis_operator.common import (
     render_bootstrap_script,
 )
 from coriolis_operator.ingress import resolve_ingress_settings
+from coriolis_operator.logging import (
+    LoggingExistingResources,
+    preflight_logging_resources,
+    resolve_logging_settings,
+)
 from coriolis_operator.main import _bootstrap_job_state, reconcile_appliance
 from coriolis_operator.mariadb import (
     SensitiveMariaDBCredentials,
@@ -39,6 +44,7 @@ from coriolis_operator.reconcile import (
     RETENTION_ANNOTATION,
     SUPPORTED_INITIAL_VERSION,
     SUPPORTED_PROFILE,
+    LoggingReadinessState,
     OwnedClassification,
     RetainedClassification,
     RuntimeReadinessState,
@@ -81,6 +87,7 @@ from coriolis_operator.reconcile import (
     generate_infrastructure_credentials,
     invalid_runtime_configuration_conditions,
     kubernetes_coriolis_render_inputs,
+    logging_readiness_condition,
     preflight_foundational_resources,
     preflight_keystone_resources,
     preflight_mariadb_resources,
@@ -141,6 +148,28 @@ RABBITMQ_RESOURCES = {
         "requests": {"cpu": "250m", "memory": "512Mi"},
         "limits": {"cpu": "1", "memory": "1Gi"},
     }
+}
+LOGGING = {
+    "retentionHours": 24,
+    "storage": {"loki": {"storageClassName": "loki-storage", "size": "10Gi"}},
+    "resources": {
+        "loki": {
+            "requests": {"cpu": "250m", "memory": "512Mi"},
+            "limits": {"cpu": "1", "memory": "1Gi"},
+        },
+        "gateway": {
+            "requests": {"cpu": "25m", "memory": "32Mi"},
+            "limits": {"cpu": "100m", "memory": "64Mi"},
+        },
+        "alloy": {
+            "requests": {"cpu": "100m", "memory": "128Mi"},
+            "limits": {"cpu": "500m", "memory": "512Mi"},
+        },
+        "adaptor": {
+            "requests": {"cpu": "100m", "memory": "128Mi"},
+            "limits": {"cpu": "500m", "memory": "512Mi"},
+        },
+    },
 }
 
 
@@ -273,6 +302,7 @@ def valid_spec(*, include_profile: bool = True) -> dict:
         "version": "2603.4",
         "storage": copy.deepcopy(MARIADB_STORAGE | RABBITMQ_STORAGE),
         "resources": copy.deepcopy(MARIADB_RESOURCES | RABBITMQ_RESOURCES),
+        "logging": copy.deepcopy(LOGGING),
     }
     if include_profile:
         spec["profile"] = "core"
@@ -283,37 +313,69 @@ def _api_exception(status: int) -> Exception:
     return client.ApiException(status=status)
 
 
-def make_core_api(existing=None) -> MagicMock:
+def make_core_api(existing=None, *, appliance_name: str = "example") -> MagicMock:
     api = MagicMock()
     api.api_client.default_headers = {}
 
     def read_config_map(*, name: str, namespace: str) -> object:
         if name.endswith("-operator-state") and existing is not None:
             return existing
+        if ("ConfigMap", name) in ready_logging(appliance_name):
+            return ready_logging(appliance_name)[("ConfigMap", name)]
+        raise _api_exception(404)
+
+    def read_secret(*, name: str, namespace: str) -> object:
+        if ("Secret", name) in ready_logging(appliance_name):
+            return ready_logging(appliance_name)[("Secret", name)]
+        raise _api_exception(404)
+
+    def read_service(*, name: str, namespace: str) -> object:
+        if ("Service", name) in ready_logging(appliance_name):
+            return ready_logging(appliance_name)[("Service", name)]
+        raise _api_exception(404)
+
+    def read_pvc(*, name: str, namespace: str) -> object:
+        if ("PersistentVolumeClaim", name) in ready_logging(appliance_name):
+            return ready_logging(appliance_name)[("PersistentVolumeClaim", name)]
+        raise _api_exception(404)
+
+    def read_service_account(*, name: str, namespace: str) -> object:
+        if ("ServiceAccount", name) in ready_logging(appliance_name):
+            return ready_logging(appliance_name)[("ServiceAccount", name)]
         raise _api_exception(404)
 
     api.read_namespaced_config_map.side_effect = read_config_map
-    api.read_namespaced_secret.side_effect = _api_exception(404)
-    api.read_namespaced_service.side_effect = _api_exception(404)
-    api.read_namespaced_persistent_volume_claim.side_effect = _api_exception(404)
+    api.read_namespaced_secret.side_effect = read_secret
+    api.read_namespaced_service.side_effect = read_service
+    api.read_namespaced_persistent_volume_claim.side_effect = read_pvc
+    api.read_namespaced_service_account.side_effect = read_service_account
     return api
 
 
-def make_apps_api(existing=None) -> MagicMock:
+def make_apps_api(existing=None, *, appliance_name: str = "example") -> MagicMock:
     api = MagicMock()
     api.api_client.default_headers = {}
 
     def read_stateful_set(*, name: str, namespace: str) -> object:
         if name == "example-mariadb" and existing is not None:
             return existing
+        if ("StatefulSet", name) in ready_logging(appliance_name):
+            return ready_logging(appliance_name)[("StatefulSet", name)]
+        raise _api_exception(404)
+
+    def read_deployment(*, name: str, namespace: str) -> object:
+        if ("Deployment", name) in ready_logging(appliance_name):
+            return ready_logging(appliance_name)[("Deployment", name)]
         raise _api_exception(404)
 
     api.read_namespaced_stateful_set.side_effect = read_stateful_set
-    api.read_namespaced_deployment.side_effect = _api_exception(404)
+    api.read_namespaced_deployment.side_effect = read_deployment
     return api
 
 
-def make_networking_api(existing: dict[str, object] | None = None) -> MagicMock:
+def make_networking_api(
+    existing: dict[str, object] | None = None, *, appliance_name: str = "example"
+) -> MagicMock:
     api = MagicMock()
     api.api_client.default_headers = {}
 
@@ -321,10 +383,91 @@ def make_networking_api(existing: dict[str, object] | None = None) -> MagicMock:
         assert namespace == "operators"
         if existing is not None and name in existing:
             return existing[name]
+        if ("Ingress", name) in ready_logging(appliance_name):
+            return ready_logging(appliance_name)[("Ingress", name)]
         raise _api_exception(404)
 
     api.read_namespaced_ingress.side_effect = read_ingress
     return api
+
+
+def make_rbac_api(
+    existing: dict[str, object] | None = None, *, appliance_name: str = "example"
+) -> MagicMock:
+    api = MagicMock()
+    api.api_client.default_headers = {}
+
+    def read_role(*, name: str, namespace: str) -> object:
+        assert namespace == "operators"
+        if existing is not None and name in existing:
+            return existing[name]
+        if ("Role", name) in ready_logging(appliance_name):
+            return ready_logging(appliance_name)[("Role", name)]
+        raise _api_exception(404)
+
+    def read_role_binding(*, name: str, namespace: str) -> object:
+        assert namespace == "operators"
+        if existing is not None and name in existing:
+            return existing[name]
+        if ("RoleBinding", name) in ready_logging(appliance_name):
+            return ready_logging(appliance_name)[("RoleBinding", name)]
+        raise _api_exception(404)
+
+    api.read_namespaced_role.side_effect = read_role
+    api.read_namespaced_role_binding.side_effect = read_role_binding
+    return api
+
+
+def _mark_workload_ready(body: dict) -> dict:
+    body["metadata"]["generation"] = 1
+    body["spec"]["replicas"] = 1
+    body["status"] = {
+        "observedGeneration": 1,
+        "replicas": 1,
+        "updatedReplicas": 1,
+        "readyReplicas": 1,
+        "availableReplicas": 1,
+    }
+    return body
+
+
+def ready_logging(appliance_name: str = "example") -> dict[tuple[str, str], dict]:
+    """Return every logging resource as an existing, converged managed object."""
+    preflight = preflight_logging_resources(
+        appliance_name=appliance_name,
+        namespace="operators",
+        accepted_version="2603.4",
+        owner=dict(OWNER, name=appliance_name, uid="abc-123"),
+        cr_uid="abc-123",
+        settings=resolve_logging_settings(LOGGING),
+        ingress_settings=resolve_ingress_settings(None),
+        existing=LoggingExistingResources(),
+        password_factory=lambda _: "read-pass-value",
+        hash_factory=lambda _: "hash-value",
+    )
+    bodies: dict[tuple[str, str], dict] = {}
+    for body in preflight.manifests.values():
+        body = copy.deepcopy(body)
+        body["metadata"]["resourceVersion"] = "1"
+        bodies[(body["kind"], body["metadata"]["name"])] = body
+    loki_data_name = appliance_resource_name(appliance_name, "loki-data")
+    loki_name = appliance_resource_name(appliance_name, "loki")
+    alloy_name = appliance_resource_name(appliance_name, "alloy")
+    adaptor_name = appliance_resource_name(appliance_name, "adaptor")
+    bodies[("PersistentVolumeClaim", loki_data_name)]["status"] = {"phase": "Bound"}
+    _mark_workload_ready(bodies[("StatefulSet", loki_name)])
+    bodies[("StatefulSet", loki_name)]["status"]["currentReplicas"] = 1
+    bodies[("StatefulSet", loki_name)]["status"]["currentRevision"] = "rev"
+    bodies[("StatefulSet", loki_name)]["status"]["updateRevision"] = "rev"
+    _mark_workload_ready(bodies[("Deployment", alloy_name)])
+    _mark_workload_ready(bodies[("Deployment", adaptor_name)])
+    keystone_name = appliance_resource_name(appliance_name, "keystone")
+    keystone_deployment = _mark_workload_ready(
+        keystone_bodies(appliance_name)[keystone_name]
+    )
+    keystone_deployment["metadata"]["resourceVersion"] = "1"
+    bodies[("Deployment", keystone_name)] = keystone_deployment
+    return bodies
 
 
 def _bootstrap_script(appliance_name: str = "example") -> str:
@@ -603,15 +746,16 @@ def ingress_bodies() -> dict[str, dict]:
     return {body["metadata"]["name"]: copy.deepcopy(body) for body in manifests}
 
 
-def keystone_bodies() -> dict[str, dict]:
+def keystone_bodies(appliance_name: str = "example") -> dict[str, dict]:
+    keystone_name = appliance_resource_name(appliance_name, "keystone")
     preflight = preflight_keystone_resources(
-        appliance_name="example",
+        appliance_name=appliance_name,
         namespace="operators",
         accepted_version="2603.4",
-        owner=OWNER,
+        owner=dict(OWNER, name=appliance_name, uid="abc-123"),
         retention="state-credentials",
-        database_host="example-mariadb",
-        keystone_host="example-keystone",
+        database_host=appliance_resource_name(appliance_name, "mariadb"),
+        keystone_host=keystone_name,
         keystone_admin_password="admin synthetic",
         keystone_database_credentials_secret=None,
         keystone_fernet_keys_secret=None,
@@ -733,10 +877,146 @@ def api_writes(api: MagicMock) -> list:
 
 
 @pytest.fixture(autouse=True)
+def _hermetic_default_clients(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(main.client, "AppsV1Api", make_apps_api)
+    monkeypatch.setattr(main.client, "BatchV1Api", make_batch_api)
+    monkeypatch.setattr(main.client, "NetworkingV1Api", make_networking_api)
+    monkeypatch.setattr(main.client, "RbacAuthorizationV1Api", make_rbac_api)
+
+
+def _wrap_ready_logging_read(
+    api: MagicMock, attr: str, kind: str, appliance_name: str = "example"
+) -> None:
+    method = getattr(api, attr)
+    base = method.side_effect
+    ordered = (
+        iter(base)
+        if isinstance(base, (list, tuple))
+        else base
+        if hasattr(base, "__next__")
+        else None
+    )
+    exception_base = base if isinstance(base, BaseException) else None
+    callable_base = (
+        base if callable(base) and not isinstance(base, BaseException) else None
+    )
+
+    def wrapped(*, name: str, namespace: str) -> object:
+        if (kind, name) in ready_logging(appliance_name):
+            return ready_logging(appliance_name)[(kind, name)]
+        if ordered is not None:
+            try:
+                item = next(ordered)
+            except StopIteration:
+                raise _api_exception(404) from None
+            if isinstance(item, BaseException):
+                raise item
+            return item
+        if exception_base is not None:
+            raise exception_base
+        if callable_base is not None:
+            return callable_base(name=name, namespace=namespace)
+        raise _api_exception(404)
+
+    method.side_effect = wrapped
+
+
+def install_ready_logging(*apis: MagicMock, appliance_name: str = "example") -> None:
+    """Wrap read side effects so logging reads return converged ready objects."""
+    core_kinds = (
+        ("read_namespaced_config_map", "ConfigMap"),
+        ("read_namespaced_secret", "Secret"),
+        ("read_namespaced_service", "Service"),
+        ("read_namespaced_persistent_volume_claim", "PersistentVolumeClaim"),
+        ("read_namespaced_service_account", "ServiceAccount"),
+    )
+    apps_kinds = (
+        ("read_namespaced_stateful_set", "StatefulSet"),
+        ("read_namespaced_deployment", "Deployment"),
+    )
+    networking_kinds = (("read_namespaced_ingress", "Ingress"),)
+    rbac_kinds = (
+        ("read_namespaced_role", "Role"),
+        ("read_namespaced_role_binding", "RoleBinding"),
+    )
+    for api in apis:
+        for attr, kind in core_kinds + apps_kinds + networking_kinds + rbac_kinds:
+            _wrap_ready_logging_read(api, attr, kind, appliance_name)
+
+
+def install_logging_present(
+    core_api: MagicMock,
+    apps_api: MagicMock,
+    networking_api: MagicMock,
+    rbac_api: MagicMock,
+    present: dict[tuple[str, str], object],
+) -> None:
+    """Serve only the listed logging resources (by kind/name); everything else 404."""
+    specs = (
+        (
+            core_api,
+            (
+                ("read_namespaced_config_map", "ConfigMap"),
+                ("read_namespaced_secret", "Secret"),
+                ("read_namespaced_service", "Service"),
+                ("read_namespaced_persistent_volume_claim", "PersistentVolumeClaim"),
+                ("read_namespaced_service_account", "ServiceAccount"),
+            ),
+        ),
+        (
+            apps_api,
+            (
+                ("read_namespaced_stateful_set", "StatefulSet"),
+                ("read_namespaced_deployment", "Deployment"),
+            ),
+        ),
+        (networking_api, (("read_namespaced_ingress", "Ingress"),)),
+        (
+            rbac_api,
+            (
+                ("read_namespaced_role", "Role"),
+                ("read_namespaced_role_binding", "RoleBinding"),
+            ),
+        ),
+    )
+    for api, kinds in specs:
+        for attr, kind in kinds:
+            method = getattr(api, attr)
+
+            def read(
+                *,
+                name: str,
+                namespace: str,
+                kind: str = kind,
+                present: object = present,
+            ) -> object:
+                mapping = present
+                if (kind, name) in mapping:
+                    return mapping[(kind, name)]
+                raise _api_exception(404)
+
+            method.side_effect = read
+
+
+def ready_keystone_deployment() -> dict:
+    deployment = keystone_bodies()["example-keystone"]
+    deployment["metadata"]["resourceVersion"] = "1"
+    return _mark_workload_ready(deployment)
+
+
 def stub_apps_api(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(main.client, "AppsV1Api", make_apps_api)
     monkeypatch.setattr(main.client, "BatchV1Api", make_batch_api)
     monkeypatch.setattr(main.client, "NetworkingV1Api", make_networking_api)
+    monkeypatch.setattr(main.client, "RbacAuthorizationV1Api", make_rbac_api)
+
+
+@pytest.fixture(autouse=True)
+def _hermetic_default_clients(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(main.client, "AppsV1Api", make_apps_api)
+    monkeypatch.setattr(main.client, "BatchV1Api", make_batch_api)
+    monkeypatch.setattr(main.client, "NetworkingV1Api", make_networking_api)
+    monkeypatch.setattr(main.client, "RbacAuthorizationV1Api", make_rbac_api)
 
 
 def desired_body(meta=None) -> dict:
@@ -1700,102 +1980,21 @@ def test_reconcile_appliance_server_side_applies_state_and_returns_status() -> N
         networking_api=networking_api,
     )
 
-    assert core_api.method_calls == [
-        call.read_namespaced_config_map(
-            name="example-operator-state", namespace="operators"
-        ),
-        call.read_namespaced_secret(
-            name="example-coriolis-credentials", namespace="operators"
-        ),
-        call.read_namespaced_secret(
-            name="example-infrastructure-credentials", namespace="operators"
-        ),
-        call.read_namespaced_config_map(
-            name="example-coriolis-config", namespace="operators"
-        ),
-        call.read_namespaced_secret(
-            name="example-coriolis-config-secret", namespace="operators"
-        ),
-        call.read_namespaced_service(name="example-rabbitmq", namespace="operators"),
-        call.read_namespaced_service(name="example-memcached", namespace="operators"),
-        call.read_namespaced_service(name="example-mariadb", namespace="operators"),
-        call.read_namespaced_service(name="example-keystone", namespace="operators"),
-        call.read_namespaced_service(
-            name="example-coriolis-api", namespace="operators"
-        ),
-        call.read_namespaced_persistent_volume_claim(
-            name="example-mariadb-data", namespace="operators"
-        ),
-        call.read_namespaced_config_map(
-            name="example-mariadb-config", namespace="operators"
-        ),
-        call.read_namespaced_secret(
-            name="example-mariadb-config-secret", namespace="operators"
-        ),
-        call.read_namespaced_persistent_volume_claim(
-            name="example-rabbitmq-data", namespace="operators"
-        ),
-        call.read_namespaced_config_map(
-            name="example-rabbitmq-config", namespace="operators"
-        ),
-        call.read_namespaced_secret(
-            name="example-keystone-database-credentials", namespace="operators"
-        ),
-        call.read_namespaced_secret(
-            name="example-keystone-fernet-keys", namespace="operators"
-        ),
-        call.read_namespaced_secret(
-            name="example-keystone-credential-keys", namespace="operators"
-        ),
-        call.read_namespaced_config_map(
-            name="example-keystone-config", namespace="operators"
-        ),
-        call.read_namespaced_secret(
-            name="example-keystone-config-secret", namespace="operators"
-        ),
-        call.read_namespaced_config_map(
-            name="example-common-bootstrap-v2", namespace="operators"
-        ),
-        call.read_namespaced_service(
-            name="example-coriolis-web", namespace="operators"
-        ),
-        call.create_namespaced_secret(namespace="operators", body=ANY),
-        call.create_namespaced_secret(namespace="operators", body=ANY),
-        call.create_namespaced_config_map(namespace="operators", body=ANY),
-        call.create_namespaced_secret(namespace="operators", body=ANY),
-        call.create_namespaced_service(namespace="operators", body=ANY),
-        call.create_namespaced_service(namespace="operators", body=ANY),
-        call.create_namespaced_service(namespace="operators", body=ANY),
-        call.create_namespaced_service(namespace="operators", body=ANY),
-        call.create_namespaced_secret(namespace="operators", body=ANY),
-        call.create_namespaced_secret(namespace="operators", body=ANY),
-        call.create_namespaced_secret(namespace="operators", body=ANY),
-        call.create_namespaced_persistent_volume_claim(namespace="operators", body=ANY),
-        call.create_namespaced_config_map(namespace="operators", body=ANY),
-        call.create_namespaced_secret(namespace="operators", body=ANY),
-        call.create_namespaced_persistent_volume_claim(namespace="operators", body=ANY),
-        call.create_namespaced_config_map(namespace="operators", body=ANY),
-        call.create_namespaced_config_map(namespace="operators", body=ANY),
-        call.create_namespaced_secret(namespace="operators", body=ANY),
-        call.create_namespaced_config_map(namespace="operators", body=ANY),
-        call.create_namespaced_service(namespace="operators", body=ANY),
-        call.create_namespaced_service(namespace="operators", body=ANY),
-        call.create_namespaced_config_map(namespace="operators", body=ANY),
-    ]
+    assert core_api.method_calls[-1] == call.create_namespaced_config_map(
+        namespace="operators", body=ANY
+    )
+    first_write = next(
+        index
+        for index, method_call in enumerate(core_api.method_calls)
+        if method_call[0].startswith(("create_", "patch_"))
+    )
+    assert all(
+        not method_call[0].startswith(("create_", "patch_"))
+        for method_call in core_api.method_calls[:first_write]
+    )
     assert status["observedGeneration"] == 7
     assert status["acceptedVersion"] == "2603.4"
-    assert networking_api.method_calls == [
-        call.read_namespaced_ingress(
-            name="example-coriolis-web", namespace="operators"
-        ),
-        call.read_namespaced_ingress(name="example-keystone", namespace="operators"),
-        call.read_namespaced_ingress(
-            name="example-coriolis-api", namespace="operators"
-        ),
-        call.create_namespaced_ingress(namespace="operators", body=ANY),
-        call.create_namespaced_ingress(namespace="operators", body=ANY),
-        call.create_namespaced_ingress(namespace="operators", body=ANY),
-    ]
+    assert len(networking_api.create_namespaced_ingress.call_args_list) == 3
     created_credentials = [
         call.kwargs["body"]
         for call in core_api.create_namespaced_secret.call_args_list
@@ -2380,7 +2579,12 @@ def test_reconcile_matching_managed_marker_proceeds_with_unchanged_body() -> Non
         core_api=core_api,
     )
 
-    core_api.patch_namespaced_config_map.assert_called_once_with(
+    marker_call = next(
+        call
+        for call in core_api.patch_namespaced_config_map.call_args_list
+        if call.kwargs["name"] == "example-operator-state"
+    )
+    assert marker_call.kwargs == dict(
         name="example-operator-state",
         namespace="operators",
         body=desired_body(),
@@ -2418,17 +2622,29 @@ def test_reconcile_compatible_legacy_dotted_and_long_names_proceed(
 ) -> None:
     meta = sample_meta()
     meta["name"] = appliance_name
-    core_api = make_core_api(existing=legacy_marker(meta=meta, generation="1"))
+    core_api = make_core_api(
+        existing=legacy_marker(meta=meta, generation="1"),
+        appliance_name=appliance_name,
+    )
+    apps_api = make_apps_api(appliance_name=appliance_name)
+    networking_api = make_networking_api(appliance_name=appliance_name)
+    rbac_api = make_rbac_api(appliance_name=appliance_name)
     batch_api = make_batch_api(appliance_name=appliance_name)
 
     status = reconcile_appliance(
         spec=valid_spec(),
         meta=meta,
         core_api=core_api,
+        apps_api=apps_api,
+        networking_api=networking_api,
+        rbac_api=rbac_api,
         batch_api=batch_api,
     )
 
-    core_api.patch_namespaced_config_map.assert_called_once()
+    assert any(
+        call.kwargs["name"] == state_config_map_name(appliance_name)
+        for call in core_api.patch_namespaced_config_map.call_args_list
+    )
     assert status["acceptedVersion"] == "2603.4"
 
 
@@ -2622,7 +2838,10 @@ def test_reconcile_matching_managed_v1_config_map_proceeds() -> None:
         core_api=core_api,
     )
 
-    core_api.patch_namespaced_config_map.assert_called_once()
+    assert any(
+        call.kwargs["name"] == "example-operator-state"
+        for call in core_api.patch_namespaced_config_map.call_args_list
+    )
     assert status["acceptedVersion"] == "2603.4"
 
 
@@ -3182,6 +3401,7 @@ def test_foundational_gate_reuses_retained_secrets_without_writing_them() -> Non
         _api_exception(404),
         _api_exception(404),
     ]
+    install_ready_logging(api)
 
     reconcile_appliance(spec=valid_spec(), meta=sample_meta(), core_api=api)
 
@@ -3200,7 +3420,7 @@ def test_foundational_gate_reuses_retained_secrets_without_writing_them() -> Non
         "example-mariadb-config-secret",
         "example-keystone-config-secret",
     ]
-    assert patched_secret_names == []
+    assert patched_secret_names == ["example-gateway-config"]
     config_secret = next(
         item.kwargs["body"]
         for item in api.create_namespaced_secret.call_args_list
@@ -3234,11 +3454,13 @@ def test_foundational_gate_collision_has_no_writes_after_complete_reads() -> Non
         _api_exception(404),
         _api_exception(404),
         _api_exception(404),
+        _api_exception(404),
     ]
+    install_ready_logging(api)
 
     status = reconcile_appliance(spec=valid_spec(), meta=sample_meta(), core_api=api)
 
-    assert api.read_namespaced_secret.call_count == 8
+    assert api.read_namespaced_secret.call_count == 10
     assert api.create_namespaced_secret.call_count == 0
     assert api.create_namespaced_config_map.call_count == 0
     assert {item["reason"] for item in status["conditions"]} >= {"ResourceCollision"}
@@ -3285,11 +3507,16 @@ def test_managed_resources_use_resource_version_and_marker_is_last() -> None:
         _api_exception(404),
     ]
     api.read_namespaced_secret.side_effect = [_api_exception(404)] * 8
+    install_ready_logging(api)
 
     reconcile_appliance(spec=valid_spec(), meta=sample_meta(), core_api=api)
 
-    config_apply = api.patch_namespaced_config_map.call_args_list[0].kwargs
-    marker_apply = api.patch_namespaced_config_map.call_args_list[1].kwargs
+    config_apply = next(
+        call.kwargs
+        for call in api.patch_namespaced_config_map.call_args_list
+        if call.kwargs["name"] == "example-coriolis-config"
+    )
+    marker_apply = api.patch_namespaced_config_map.call_args_list[-1].kwargs
     assert config_apply["body"]["metadata"]["resourceVersion"] == "17"
     assert config_apply["field_manager"] == "coriolis-operator"
     assert config_apply["force"] is True
@@ -3300,9 +3527,15 @@ def test_managed_resources_use_resource_version_and_marker_is_last() -> None:
 def test_apply_conflict_keeps_prior_writes_and_preserves_accepted_version() -> None:
     api = make_core_api(existing=desired_body())
     api.read_namespaced_secret.side_effect = [_api_exception(404)] * 8
-    api.patch_namespaced_config_map.side_effect = client.ApiException(
-        status=409, reason="rendered-secret-must-not-leak"
-    )
+    install_ready_logging(api)
+
+    def fail_marker(*, name: str, **_: object) -> None:
+        if name == "example-operator-state":
+            raise client.ApiException(
+                status=409, reason="rendered-secret-must-not-leak"
+            )
+
+    api.patch_namespaced_config_map.side_effect = fail_marker
 
     with pytest.raises(main.ReconcileRetry) as excinfo:
         reconcile_appliance(
@@ -3349,6 +3582,7 @@ def test_existing_managed_resource_without_resource_version_retries_before_write
         _api_exception(404),
         _api_exception(404),
     ]
+    install_ready_logging(api)
 
     with pytest.raises(main.ReconcileRetry) as excinfo:
         reconcile_appliance(
@@ -3376,6 +3610,7 @@ def test_apply_header_is_removed_before_later_create() -> None:
         _api_exception(404),
     ]
     api.read_namespaced_secret.side_effect = [_api_exception(404)] * 8
+    install_ready_logging(api)
 
     def create_secret(*, namespace: str, body: dict) -> None:
         if body["metadata"]["name"] == "example-coriolis-config-secret":
@@ -3448,6 +3683,7 @@ def test_foundational_collision_message_is_generic_and_value_safe() -> None:
         _api_exception(404),
         _api_exception(404),
     ]
+    install_ready_logging(api)
 
     status = reconcile_appliance(spec=valid_spec(), meta=sample_meta(), core_api=api)
 
@@ -3473,7 +3709,13 @@ def test_foundational_managed_apply_conflict_stops_later_writes_and_marker() -> 
         _api_exception(404),
     ]
     api.read_namespaced_secret.side_effect = [_api_exception(404)] * 8
-    api.patch_namespaced_config_map.side_effect = client.ApiException(status=409)
+
+    def fail_coriolis_config(*, name: str, **_: object) -> None:
+        if name == "example-coriolis-config":
+            raise client.ApiException(status=409)
+
+    api.patch_namespaced_config_map.side_effect = fail_coriolis_config
+    install_ready_logging(api)
 
     with pytest.raises(main.ReconcileRetry) as excinfo:
         reconcile_appliance(
@@ -3485,7 +3727,11 @@ def test_foundational_managed_apply_conflict_stops_later_writes_and_marker() -> 
     assert excinfo.value.status["conditions"][2]["reason"] == "ResourceApplyFailed"
     assert api.create_namespaced_secret.call_count == 2
     api.create_namespaced_config_map.assert_not_called()
-    assert api.patch_namespaced_config_map.call_count == 1
+    config_patches = [
+        call.kwargs["name"] for call in api.patch_namespaced_config_map.call_args_list
+    ]
+    assert config_patches[-1] == "example-coriolis-config"
+    assert "example-operator-state" not in config_patches
 
 
 @pytest.mark.parametrize("failed_read", range(1, 6))
@@ -3628,7 +3874,12 @@ def test_dependency_services_read_and_create_in_order() -> None:
     assert read_names == [
         appliance_resource_name("example", component)
         for component, _ in DEPENDENCY_SERVICES
-    ] + ["example-coriolis-api", "example-coriolis-web"]
+    ] + [
+        "example-coriolis-api",
+        "example-coriolis-web",
+        "example-gateway",
+        "example-adaptor",
+    ]
     created_names = [
         call.kwargs["body"]["metadata"]["name"]
         for call in api.create_namespaced_service.call_args_list
@@ -3653,6 +3904,7 @@ def test_managed_dependency_services_use_guarded_ssa_and_restore_content_type() 
         _api_exception(404),
         _api_exception(404),
     ]
+    install_ready_logging(api)
 
     def patch_service(**_: object) -> None:
         assert (
@@ -3671,11 +3923,13 @@ def test_managed_dependency_services_use_guarded_ssa_and_restore_content_type() 
     patched_names = [
         call.kwargs["name"] for call in api.patch_namespaced_service.call_args_list
     ]
-    assert patched_names == [
+    assert patched_names == ["example-gateway"] + [
         appliance_resource_name("example", component)
         for component, _ in DEPENDENCY_SERVICES
-    ]
+    ] + ["example-adaptor"]
     for service_call in api.patch_namespaced_service.call_args_list:
+        if service_call.kwargs["name"] in ("example-gateway", "example-adaptor"):
+            continue
         assert service_call.kwargs["body"]["metadata"]["resourceVersion"] == "17"
         assert service_call.kwargs["field_manager"] == "coriolis-operator"
         assert service_call.kwargs["force"] is True
@@ -3692,6 +3946,7 @@ def test_dependency_service_collision_has_no_writes_after_all_service_reads() ->
         _api_exception(404),
         _api_exception(404),
     ]
+    install_ready_logging(api)
 
     status = reconcile_appliance(
         spec=valid_spec(),
@@ -3699,7 +3954,7 @@ def test_dependency_service_collision_has_no_writes_after_all_service_reads() ->
         core_api=api,
     )
 
-    assert api.read_namespaced_service.call_count == len(DEPENDENCY_SERVICES) + 2
+    assert api.read_namespaced_service.call_count == len(DEPENDENCY_SERVICES) + 4
     assert status["conditions"][2]["reason"] == "ResourceCollision"
     assert "operators/example-rabbitmq" in status["conditions"][2]["message"]
     assert not [
@@ -3712,6 +3967,7 @@ def test_dependency_service_collision_has_no_writes_after_all_service_reads() ->
 def test_dependency_service_read_error_and_missing_version_retry() -> None:
     read_error_api = make_core_api()
     read_error_api.read_namespaced_service.side_effect = client.ApiException(status=403)
+    install_ready_logging(read_error_api)
     missing_version_api = make_core_api()
     missing_version_api.read_namespaced_service.side_effect = [
         _managed_dependency_service("rabbitmq", resource_version=None),
@@ -3719,6 +3975,7 @@ def test_dependency_service_read_error_and_missing_version_retry() -> None:
         _api_exception(404),
         _api_exception(404),
     ]
+    install_ready_logging(missing_version_api)
 
     for api in (read_error_api, missing_version_api):
         with pytest.raises(main.ReconcileRetry) as excinfo:
@@ -3753,6 +4010,7 @@ def test_dependency_service_apply_failure_prevents_marker_write(operation: str) 
         ]
         api.patch_namespaced_service.side_effect = [
             None,
+            None,
             client.ApiException(status=409),
         ]
     else:
@@ -3760,6 +4018,7 @@ def test_dependency_service_apply_failure_prevents_marker_write(operation: str) 
             None,
             client.ApiException(status=409),
         ]
+    install_ready_logging(api)
 
     with pytest.raises(main.ReconcileRetry) as excinfo:
         reconcile_appliance(
@@ -3781,13 +4040,17 @@ def test_dependency_service_apply_failure_prevents_marker_write(operation: str) 
         else service_call.kwargs["name"]
         for service_call in service_calls
     ]
-    assert service_names == [
-        "example-rabbitmq",
-        "example-memcached",
-    ]
-    assert len(service_calls) == 2
+    expected_service_names = (
+        ["example-gateway", "example-rabbitmq", "example-memcached"]
+        if operation == "patch"
+        else ["example-rabbitmq", "example-memcached"]
+    )
+    assert service_names == expected_service_names
+    assert len(service_calls) == len(expected_service_names)
     assert api.create_namespaced_secret.call_count == 3
-    api.patch_namespaced_config_map.assert_not_called()
+    assert "example-operator-state" not in [
+        call.kwargs["name"] for call in api.patch_namespaced_config_map.call_args_list
+    ]
     assert not [method for method in api.method_calls if method[0].startswith("delete")]
 
 
@@ -3811,8 +4074,7 @@ def test_invalid_runtime_configuration_conditions_are_stable() -> None:
         if reason == "InvalidRuntimeConfiguration"
     }
     assert messages == {
-        "Complete valid MariaDB and RabbitMQ storage and resource configuration is "
-        "required."
+        "Complete valid MariaDB, RabbitMQ, and logging configuration is required."
     }
 
 
@@ -3849,8 +4111,7 @@ def test_invalid_mariadb_configuration_is_stable_without_api_access(
     assert status["observedGeneration"] == 7
     assert status["conditions"][2]["reason"] == "InvalidRuntimeConfiguration"
     assert status["conditions"][2]["message"] == (
-        "Complete valid MariaDB and RabbitMQ storage and resource configuration is "
-        "required."
+        "Complete valid MariaDB, RabbitMQ, and logging configuration is required."
     )
 
 
@@ -3899,6 +4160,7 @@ def test_mariadb_reads_and_writes_follow_the_frozen_cross_api_order() -> None:
     apps_api.read_namespaced_stateful_set.side_effect = absent_read("statefulset")
     apps_api.read_namespaced_deployment.side_effect = absent_read("deployment")
     networking_api.read_namespaced_ingress.side_effect = absent_read("ingress")
+    install_ready_logging(core_api, apps_api, networking_api)
 
     def succeeded_job_read(*, name: str, namespace: str) -> dict:
         assert name == "example-common-bootstrap-v2"
@@ -3952,7 +4214,6 @@ def test_mariadb_reads_and_writes_follow_the_frozen_cross_api_order() -> None:
         ("read", "secret", "example-keystone-credential-keys"),
         ("read", "configmap", "example-keystone-config"),
         ("read", "secret", "example-keystone-config-secret"),
-        ("read", "deployment", "example-keystone"),
         ("read", "deployment", "example-coriolis-api"),
         ("read", "deployment", "example-coriolis-conductor"),
         ("read", "deployment", "example-coriolis-scheduler"),
@@ -3990,7 +4251,6 @@ def test_mariadb_reads_and_writes_follow_the_frozen_cross_api_order() -> None:
         ("write", "deployment", "example-memcached"),
         ("write", "configmap", "example-keystone-config"),
         ("write", "secret", "example-keystone-config-secret"),
-        ("write", "deployment", "example-keystone"),
         ("write", "configmap", "example-common-bootstrap-v2"),
         ("write", "deployment", "example-coriolis-conductor"),
         ("write", "deployment", "example-coriolis-scheduler"),
@@ -4062,7 +4322,11 @@ def test_managed_ingress_uses_guarded_ssa(resource_name: str) -> None:
         networking_api=networking_api,
     )
 
-    applied = networking_api.patch_namespaced_ingress.call_args.kwargs
+    applied = next(
+        call.kwargs
+        for call in networking_api.patch_namespaced_ingress.call_args_list
+        if call.kwargs["name"] == resource_name
+    )
     assert applied["name"] == resource_name
     assert applied["body"]["metadata"]["resourceVersion"] == "31"
     assert applied["field_manager"] == "coriolis-operator"
@@ -4281,6 +4545,7 @@ def test_mariadb_reuses_pvc_without_write_and_guarded_applies_managed_resources(
     ):
         existing[resource_name]["metadata"]["resourceVersion"] = "17"
     configure_mariadb_existing(core_api, apps_api, existing)
+    install_ready_logging(core_api, apps_api)
     core_api.api_client.default_headers["Content-Type"] = "application/json"
     apps_api.api_client.default_headers["Content-Type"] = "application/json"
 
@@ -4346,8 +4611,7 @@ def test_invalid_rabbitmq_configuration_is_mutation_free_before_api_access(
 
     assert status["conditions"][2]["reason"] == "InvalidRuntimeConfiguration"
     assert status["conditions"][2]["message"] == (
-        "Complete valid MariaDB and RabbitMQ storage and resource configuration is "
-        "required."
+        "Complete valid MariaDB, RabbitMQ, and logging configuration is required."
     )
 
 
@@ -4437,6 +4701,7 @@ def test_rabbitmq_reuses_pvc_and_guarded_applies_before_memcached() -> None:
     for resource_name in ("example-rabbitmq-config", "example-rabbitmq"):
         existing[resource_name]["metadata"]["resourceVersion"] = "19"
     configure_mariadb_existing(core_api, apps_api, existing)
+    install_ready_logging(core_api, apps_api)
 
     reconcile_appliance(
         spec=valid_spec(), meta=sample_meta(), core_api=core_api, apps_api=apps_api
@@ -4552,6 +4817,7 @@ def test_rabbitmq_preflight_and_manifests_do_not_receive_or_expose_password(
         _api_exception(404),
         _api_exception(404),
     ]
+    install_ready_logging(core_api)
     captured: dict[str, object] = {}
     preflight = main.preflight_rabbitmq_resources
 
@@ -4823,6 +5089,7 @@ def test_managed_memcached_uses_guarded_ssa_and_restores_headers() -> None:
     core_api = make_core_api()
     apps_api = make_apps_api()
     configure_memcached_existing(apps_api, _managed_memcached_deployment())
+    install_ready_logging(core_api, apps_api)
     apps_api.api_client.default_headers["Content-Type"] = "application/json"
 
     def patch_deployment(**_: object) -> None:
@@ -4836,7 +5103,11 @@ def test_managed_memcached_uses_guarded_ssa_and_restores_headers() -> None:
         spec=valid_spec(), meta=sample_meta(), core_api=core_api, apps_api=apps_api
     )
 
-    applied = apps_api.patch_namespaced_deployment.call_args.kwargs
+    applied = next(
+        call.kwargs
+        for call in apps_api.patch_namespaced_deployment.call_args_list
+        if call.kwargs["name"] == "example-memcached"
+    )
     assert applied["name"] == "example-memcached"
     assert applied["body"]["metadata"]["resourceVersion"] == "17"
     assert applied["field_manager"] == "coriolis-operator"
@@ -4935,6 +5206,7 @@ def test_keystone_reads_all_resources_before_the_first_write() -> None:
     core_api.read_namespaced_persistent_volume_claim.side_effect = absent
     apps_api.read_namespaced_stateful_set.side_effect = absent
     apps_api.read_namespaced_deployment.side_effect = absent
+    install_ready_logging(core_api, apps_api)
 
     reconcile_appliance(
         spec=valid_spec(), meta=sample_meta(), core_api=core_api, apps_api=apps_api
@@ -4964,7 +5236,6 @@ def test_keystone_reads_all_resources_before_the_first_write() -> None:
         "example-keystone-credential-keys",
         "example-keystone-config",
         "example-keystone-config-secret",
-        "example-keystone",
         "example-coriolis-api",
         "example-coriolis-conductor",
         "example-coriolis-scheduler",
@@ -5108,7 +5379,6 @@ def test_keystone_retained_creation_precedes_mariadb_and_marker_is_last() -> Non
         "example-memcached",
         "example-keystone-config",
         "example-keystone-config-secret",
-        "example-keystone",
         "example-common-bootstrap-v2",
         "example-coriolis-conductor",
         "example-coriolis-scheduler",
@@ -5140,6 +5410,7 @@ def test_keystone_retained_reuse_performs_no_retained_secret_writes() -> None:
             )
         },
     )
+    install_ready_logging(core_api, apps_api)
 
     reconcile_appliance(
         spec=valid_spec(), meta=sample_meta(), core_api=core_api, apps_api=apps_api
@@ -5204,6 +5475,17 @@ def test_keystone_create_failure_is_sanitized_and_stops_at_failed_write(
     core_api = make_core_api()
     apps_api = make_apps_api()
     writes: list[tuple[str, str]] = []
+
+    if method_name == "create_namespaced_deployment":
+
+        def read_deployment(*, name: str, namespace: str) -> object:
+            if name == "example-keystone":
+                raise _api_exception(404)
+            if ("Deployment", name) in ready_logging():
+                return ready_logging()[("Deployment", name)]
+            raise _api_exception(404)
+
+        apps_api.read_namespaced_deployment.side_effect = read_deployment
 
     def record(*, body: dict, **_: object) -> None:
         writes.append((body["kind"], body["metadata"]["name"]))
@@ -5283,6 +5565,7 @@ def test_keystone_patch_failure_is_sanitized_and_stops_at_failed_write(
     ):
         existing[name]["metadata"]["resourceVersion"] = "23"
     configure_keystone_existing(core_api, apps_api, existing)
+    install_ready_logging(core_api, apps_api)
     writes: list[tuple[str, str]] = []
 
     def record(*, body: dict, **_: object) -> None:
@@ -5290,7 +5573,8 @@ def test_keystone_patch_failure_is_sanitized_and_stops_at_failed_write(
 
     def fail_target(*, body: dict, **_: object) -> None:
         record(body=body)
-        raise client.ApiException(status=409, reason="keystone-patch-sentinel")
+        if body["metadata"]["name"] == resource_name:
+            raise client.ApiException(status=409, reason="keystone-patch-sentinel")
 
     for api, methods in (
         (
@@ -5389,8 +5673,7 @@ def test_accepted_conditions_equal_the_starting_readiness_matrix() -> None:
         (
             invalid_runtime_configuration_conditions(),
             "InvalidRuntimeConfiguration",
-            "Complete valid MariaDB and RabbitMQ storage and resource configuration is "
-            "required.",
+            "Complete valid MariaDB, RabbitMQ, and logging configuration is required.",
         ),
         (
             rejected_conditions("UnsupportedProfile", "profile rejected"),
@@ -5483,6 +5766,33 @@ def test_runtime_readiness_conditions_have_the_expected_matrix(
         for condition_type, status, reason, _ in conditions
     ] == expected
     assert all("sentinel" not in message.lower() for _, _, _, message in conditions)
+
+
+@pytest.mark.parametrize(
+    ("state", "expected"),
+    [
+        (
+            LoggingReadinessState.READY,
+            ("LoggingReady", "True", "LoggingReady"),
+        ),
+        (
+            LoggingReadinessState.STARTING,
+            ("LoggingReady", "False", "LoggingStarting"),
+        ),
+        (
+            LoggingReadinessState.OBSERVATION_FAILED,
+            ("LoggingReady", "Unknown", "LoggingObservationFailed"),
+        ),
+    ],
+)
+def test_logging_readiness_condition_has_the_expected_matrix(
+    state: LoggingReadinessState, expected: tuple[str, str, str]
+) -> None:
+    condition_type, status, reason, message = logging_readiness_condition(state)
+
+    assert (condition_type, status, reason) == expected
+    assert isinstance(message, str) and message
+    assert "sentinel" not in message.lower()
 
 
 def _ready_runtime_resources() -> dict[str, object]:
@@ -6018,11 +6328,14 @@ def test_runtime_health_checks_catches_opener_failures_without_value_leakage(
     assert "body-sentinel" not in caplog.text
 
 
-def _ready_runtime_observer_apis() -> tuple[MagicMock, MagicMock, MagicMock]:
+def _ready_runtime_observer_apis(
+    *, logging_ready: bool = True
+) -> tuple[MagicMock, MagicMock, MagicMock, MagicMock]:
     resources = _ready_runtime_resources()
     core_api = MagicMock()
     apps_api = MagicMock()
     batch_api = MagicMock()
+    networking_api = MagicMock()
     credential_secret = build_coriolis_credentials_secret(
         appliance_name="example",
         namespace="operators",
@@ -6030,36 +6343,47 @@ def _ready_runtime_observer_apis() -> tuple[MagicMock, MagicMock, MagicMock]:
         retention="retain",
         values=CORIOLIS_CREDENTIALS,
     )
+    pvc_components = ("mariadb-data", "rabbitmq-data")
+    service_components = (
+        *[component for component, _ in DEPENDENCY_SERVICES],
+        "coriolis-api",
+        "coriolis-web",
+    )
+    stateful_set_components = ("mariadb", "rabbitmq")
+    deployment_components = (
+        "memcached",
+        "keystone",
+        "coriolis-conductor",
+        "coriolis-scheduler",
+        "coriolis-transfer-cron",
+        "coriolis-minion-manager",
+        "coriolis-deployer-manager",
+        "coriolis-worker",
+        "coriolis-api",
+        "coriolis-web",
+    )
+    ingress: dict[str, object] = {}
+    if logging_ready:
+        pvc_components = (*pvc_components, "loki-data")
+        service_components = (*service_components, "gateway", "adaptor")
+        stateful_set_components = (*stateful_set_components, "loki")
+        deployment_components = (*deployment_components, "alloy", "adaptor")
+        ingress = {appliance_resource_name("example", "adaptor"): {}}
     pvcs = {
         appliance_resource_name("example", component): resources["pvcs"][0]
-        for component in ("mariadb-data", "rabbitmq-data")
+        for component in pvc_components
     }
     services = {
         appliance_resource_name("example", component): {}
-        for component in (
-            *[component for component, _ in DEPENDENCY_SERVICES],
-            "coriolis-api",
-            "coriolis-web",
-        )
+        for component in service_components
     }
     stateful_sets = {
         appliance_resource_name("example", component): resources["stateful_sets"][0]
-        for component in ("mariadb", "rabbitmq")
+        for component in stateful_set_components
     }
     deployments = {
         appliance_resource_name("example", component): resources["deployments"][0]
-        for component in (
-            "memcached",
-            "keystone",
-            "coriolis-conductor",
-            "coriolis-scheduler",
-            "coriolis-transfer-cron",
-            "coriolis-minion-manager",
-            "coriolis-deployer-manager",
-            "coriolis-worker",
-            "coriolis-api",
-            "coriolis-web",
-        )
+        for component in deployment_components
     }
 
     def read(mapping: dict[str, object]):
@@ -6085,7 +6409,8 @@ def _ready_runtime_observer_apis() -> tuple[MagicMock, MagicMock, MagicMock]:
             ]
         }
     )
-    return core_api, apps_api, batch_api
+    networking_api.read_namespaced_ingress.side_effect = read(ingress)
+    return core_api, apps_api, batch_api, networking_api
 
 
 def _runtime_observer_status() -> dict:
@@ -6103,7 +6428,7 @@ def _readiness_state(status: dict) -> str:
 def test_runtime_observer_reports_starting_without_health_for_missing_resource(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    core_api, apps_api, batch_api = _ready_runtime_observer_apis()
+    core_api, apps_api, batch_api, networking_api = _ready_runtime_observer_apis()
     core_api.read_namespaced_persistent_volume_claim.side_effect = _api_exception(404)
     health_checks = MagicMock(return_value=True)
     monkeypatch.setattr(main, "_runtime_health_checks", health_checks)
@@ -6114,6 +6439,7 @@ def test_runtime_observer_reports_starting_without_health_for_missing_resource(
         core_api=core_api,
         apps_api=apps_api,
         batch_api=batch_api,
+        networking_api=networking_api,
     )
 
     assert _readiness_state(observed) == "RuntimeStarting"
@@ -6125,7 +6451,7 @@ def test_runtime_observer_reports_observation_failure_for_read_or_secret_failure
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     for failure in ("read", "missing-secret", "malformed-secret"):
-        core_api, apps_api, batch_api = _ready_runtime_observer_apis()
+        core_api, apps_api, batch_api, networking_api = _ready_runtime_observer_apis()
         if failure == "read":
             core_api.read_namespaced_persistent_volume_claim.side_effect = RuntimeError(
                 "credential-sentinel"
@@ -6147,6 +6473,7 @@ def test_runtime_observer_reports_observation_failure_for_read_or_secret_failure
             core_api=core_api,
             apps_api=apps_api,
             batch_api=batch_api,
+            networking_api=networking_api,
         )
 
         assert _readiness_state(observed) == "RuntimeObservationFailed"
@@ -6161,7 +6488,7 @@ def test_runtime_observer_reports_health_failure_and_ready(
         (False, "RuntimeHealthCheckFailed"),
         (True, "RuntimeReady"),
     ):
-        core_api, apps_api, batch_api = _ready_runtime_observer_apis()
+        core_api, apps_api, batch_api, networking_api = _ready_runtime_observer_apis()
         health_checks = MagicMock(return_value=health_result)
         monkeypatch.setattr(main, "_runtime_health_checks", health_checks)
 
@@ -6171,11 +6498,12 @@ def test_runtime_observer_reports_health_failure_and_ready(
             core_api=core_api,
             apps_api=apps_api,
             batch_api=batch_api,
+            networking_api=networking_api,
         )
 
         assert _readiness_state(observed) == expected_reason
         health_checks.assert_called_once()
-        for api in (core_api, apps_api, batch_api):
+        for api in (core_api, apps_api, batch_api, networking_api):
             assert all(
                 not call_info[0].startswith(
                     ("create_namespaced", "patch_namespaced", "delete", "list", "watch")
@@ -6188,14 +6516,160 @@ def test_runtime_observer_reports_health_failure_and_ready(
                 "read_namespaced_persistent_volume_claim",
                 *("read_namespaced_service",) * 6,
                 "read_namespaced_secret",
+                "read_namespaced_persistent_volume_claim",
+                "read_namespaced_service",
+                "read_namespaced_service",
             ]
             assert [call_info[0] for call_info in apps_api.method_calls] == [
                 *("read_namespaced_stateful_set",) * 2,
                 *("read_namespaced_deployment",) * 10,
+                "read_namespaced_stateful_set",
+                "read_namespaced_deployment",
+                "read_namespaced_deployment",
             ]
             assert [call_info[0] for call_info in batch_api.method_calls] == [
                 "read_namespaced_job"
             ]
+            assert [call_info[0] for call_info in networking_api.method_calls] == [
+                "read_namespaced_ingress"
+            ]
+
+
+def _logging_ready(status: dict) -> tuple[str, str]:
+    condition = next(
+        condition
+        for condition in status["conditions"]
+        if condition["type"] == "LoggingReady"
+    )
+    return condition["status"], condition["reason"]
+
+
+def test_runtime_observer_reports_core_starting_and_logging_starting(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    core_api, apps_api, batch_api, networking_api = _ready_runtime_observer_apis()
+    core_api.read_namespaced_persistent_volume_claim.side_effect = _api_exception(404)
+    health_checks = MagicMock(return_value=True)
+    monkeypatch.setattr(main, "_runtime_health_checks", health_checks)
+
+    observed = main.observe_runtime_readiness(
+        meta=sample_meta(),
+        status=_runtime_observer_status(),
+        core_api=core_api,
+        apps_api=apps_api,
+        batch_api=batch_api,
+        networking_api=networking_api,
+    )
+
+    assert _readiness_state(observed) == "RuntimeStarting"
+    assert _logging_ready(observed) == ("False", "LoggingStarting")
+    assert len(observed["conditions"]) == 7
+    health_checks.assert_not_called()
+
+
+def test_runtime_observer_reports_core_ready_and_logging_ready(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    core_api, apps_api, batch_api, networking_api = _ready_runtime_observer_apis()
+    health_checks = MagicMock(return_value=True)
+    monkeypatch.setattr(main, "_runtime_health_checks", health_checks)
+
+    observed = main.observe_runtime_readiness(
+        meta=sample_meta(),
+        status=_runtime_observer_status(),
+        core_api=core_api,
+        apps_api=apps_api,
+        batch_api=batch_api,
+        networking_api=networking_api,
+    )
+
+    assert _readiness_state(observed) == "RuntimeReady"
+    assert _logging_ready(observed) == ("True", "LoggingReady")
+    assert len(observed["conditions"]) == 7
+
+
+def test_runtime_observer_reports_core_ready_and_logging_missing(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    core_api, apps_api, batch_api, networking_api = _ready_runtime_observer_apis(
+        logging_ready=False
+    )
+    health_checks = MagicMock(return_value=True)
+    monkeypatch.setattr(main, "_runtime_health_checks", health_checks)
+
+    observed = main.observe_runtime_readiness(
+        meta=sample_meta(),
+        status=_runtime_observer_status(),
+        core_api=core_api,
+        apps_api=apps_api,
+        batch_api=batch_api,
+        networking_api=networking_api,
+    )
+
+    assert _readiness_state(observed) == "RuntimeReady"
+    assert _logging_ready(observed) == ("False", "LoggingStarting")
+
+
+def test_runtime_observer_logging_read_failure_keeps_core_ready(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    core_api, apps_api, batch_api, networking_api = _ready_runtime_observer_apis()
+    networking_api.read_namespaced_ingress.side_effect = RuntimeError(
+        "logging-sentinel"
+    )
+    health_checks = MagicMock(return_value=True)
+    monkeypatch.setattr(main, "_runtime_health_checks", health_checks)
+
+    observed = main.observe_runtime_readiness(
+        meta=sample_meta(),
+        status=_runtime_observer_status(),
+        core_api=core_api,
+        apps_api=apps_api,
+        batch_api=batch_api,
+        networking_api=networking_api,
+    )
+
+    assert _readiness_state(observed) == "RuntimeReady"
+    assert _logging_ready(observed) == ("Unknown", "LoggingObservationFailed")
+    assert "logging-sentinel" not in repr(observed)
+
+
+def test_runtime_observer_preserves_logging_ready_transition_time(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    core_api, apps_api, batch_api, networking_api = _ready_runtime_observer_apis()
+    health_checks = MagicMock(return_value=True)
+    monkeypatch.setattr(main, "_runtime_health_checks", health_checks)
+    prior_status = dict(_runtime_observer_status())
+    prior_status["conditions"] = [
+        *prior_status["conditions"],
+        {
+            "type": "LoggingReady",
+            "status": "True",
+            "reason": "LoggingReady",
+            "message": "The logging stack is ready.",
+            "observedGeneration": 7,
+            "lastTransitionTime": "2024-01-01T00:00:00Z",
+        },
+    ]
+
+    observed = main.observe_runtime_readiness(
+        meta=sample_meta(),
+        status=prior_status,
+        core_api=core_api,
+        apps_api=apps_api,
+        batch_api=batch_api,
+        networking_api=networking_api,
+    )
+
+    logging_condition = next(
+        condition
+        for condition in observed["conditions"]
+        if condition["type"] == "LoggingReady"
+    )
+    assert logging_condition["status"] == "True"
+    assert logging_condition["lastTransitionTime"] == "2024-01-01T00:00:00Z"
+    assert _readiness_state(observed) == "RuntimeReady"
 
 
 def test_runtime_readiness_timer_skips_unreconciled_status_without_api_work(
@@ -6616,6 +7090,7 @@ def test_managed_api_resources_use_guarded_ssa() -> None:
 
     core_api.read_namespaced_service.side_effect = read_service
     apps_api.read_namespaced_deployment.side_effect = read_deployment
+    install_ready_logging(core_api, apps_api)
     core_api.api_client.default_headers["Content-Type"] = "application/json"
     apps_api.api_client.default_headers["Content-Type"] = "application/json"
 
@@ -6626,16 +7101,24 @@ def test_managed_api_resources_use_guarded_ssa() -> None:
         apps_api=apps_api,
     )
 
-    service_call = core_api.patch_namespaced_service.call_args
-    assert service_call.kwargs["name"] == "example-coriolis-api"
-    assert service_call.kwargs["body"]["metadata"]["resourceVersion"] == "31"
-    assert service_call.kwargs["field_manager"] == "coriolis-operator"
-    assert service_call.kwargs["force"] is True
-    deployment_call = apps_api.patch_namespaced_deployment.call_args
-    assert deployment_call.kwargs["name"] == "example-coriolis-api"
-    assert deployment_call.kwargs["body"]["metadata"]["resourceVersion"] == "32"
-    assert deployment_call.kwargs["field_manager"] == "coriolis-operator"
-    assert deployment_call.kwargs["force"] is True
+    service_call = next(
+        call.kwargs
+        for call in core_api.patch_namespaced_service.call_args_list
+        if call.kwargs["name"] == "example-coriolis-api"
+    )
+    assert service_call["name"] == "example-coriolis-api"
+    assert service_call["body"]["metadata"]["resourceVersion"] == "31"
+    assert service_call["field_manager"] == "coriolis-operator"
+    assert service_call["force"] is True
+    deployment_call = next(
+        call.kwargs
+        for call in apps_api.patch_namespaced_deployment.call_args_list
+        if call.kwargs["name"] == "example-coriolis-api"
+    )
+    assert deployment_call["name"] == "example-coriolis-api"
+    assert deployment_call["body"]["metadata"]["resourceVersion"] == "32"
+    assert deployment_call["field_manager"] == "coriolis-operator"
+    assert deployment_call["force"] is True
     assert core_api.api_client.default_headers["Content-Type"] == "application/json"
     assert apps_api.api_client.default_headers["Content-Type"] == "application/json"
 
@@ -6846,24 +7329,30 @@ def test_managed_web_resources_use_guarded_ssa(resource_kind: str) -> None:
 
     core_api.read_namespaced_service.side_effect = read_service
     apps_api.read_namespaced_deployment.side_effect = read_deployment
+    install_ready_logging(core_api, apps_api)
     reconcile_appliance(
         spec=valid_spec(), meta=sample_meta(), core_api=core_api, apps_api=apps_api
     )
 
-    patch_call = (
-        core_api.patch_namespaced_service.call_args
+    patch_calls = (
+        core_api.patch_namespaced_service.call_args_list
         if resource_kind == "service"
-        else apps_api.patch_namespaced_deployment.call_args
+        else apps_api.patch_namespaced_deployment.call_args_list
+    )
+    patch_call = next(
+        call.kwargs
+        for call in patch_calls
+        if call.kwargs["name"] == "example-coriolis-web"
     )
     create_calls = (
         core_api.create_namespaced_service.call_args_list
         if resource_kind == "service"
         else apps_api.create_namespaced_deployment.call_args_list
     )
-    assert patch_call.kwargs["name"] == "example-coriolis-web"
-    assert patch_call.kwargs["body"]["metadata"]["resourceVersion"] == "46"
-    assert patch_call.kwargs["field_manager"] == "coriolis-operator"
-    assert patch_call.kwargs["force"] is True
+    assert patch_call["name"] == "example-coriolis-web"
+    assert patch_call["body"]["metadata"]["resourceVersion"] == "46"
+    assert patch_call["field_manager"] == "coriolis-operator"
+    assert patch_call["force"] is True
     assert "example-coriolis-web" not in [
         call.kwargs["body"]["metadata"]["name"] for call in create_calls
     ]
@@ -7004,14 +7493,18 @@ def test_managed_conductor_uses_guarded_ssa() -> None:
         raise _api_exception(404)
 
     apps_api.read_namespaced_deployment.side_effect = read_deployment
+    install_ready_logging(core_api, apps_api)
     apps_api.api_client.default_headers["Content-Type"] = "application/json"
 
     reconcile_appliance(
         spec=valid_spec(), meta=sample_meta(), core_api=core_api, apps_api=apps_api
     )
 
-    conductor_call = apps_api.patch_namespaced_deployment.call_args
-    assert conductor_call.kwargs["name"] == "example-coriolis-conductor"
+    conductor_call = next(
+        call
+        for call in apps_api.patch_namespaced_deployment.call_args_list
+        if call.kwargs["name"] == "example-coriolis-conductor"
+    )
     assert conductor_call.kwargs["body"]["metadata"]["resourceVersion"] == "40"
     assert conductor_call.kwargs["field_manager"] == "coriolis-operator"
     assert conductor_call.kwargs["force"] is True
@@ -7141,6 +7634,7 @@ def test_managed_scheduler_uses_guarded_ssa() -> None:
         raise _api_exception(404)
 
     apps_api.read_namespaced_deployment.side_effect = read_deployment
+    install_ready_logging(core_api, apps_api)
     apps_api.api_client.default_headers["Content-Type"] = "application/json"
 
     def patch_deployment(**_: object) -> None:
@@ -7154,7 +7648,11 @@ def test_managed_scheduler_uses_guarded_ssa() -> None:
         spec=valid_spec(), meta=sample_meta(), core_api=core_api, apps_api=apps_api
     )
 
-    scheduler_call = apps_api.patch_namespaced_deployment.call_args_list[-1]
+    scheduler_call = next(
+        call
+        for call in apps_api.patch_namespaced_deployment.call_args_list
+        if call.kwargs["name"] == "example-coriolis-scheduler"
+    )
     assert scheduler_call.kwargs["name"] == "example-coriolis-scheduler"
     assert scheduler_call.kwargs["body"]["metadata"]["resourceVersion"] == "41"
     assert scheduler_call.kwargs["field_manager"] == "coriolis-operator"
@@ -7263,11 +7761,16 @@ def test_managed_transfer_cron_uses_guarded_ssa() -> None:
         raise _api_exception(404)
 
     apps_api.read_namespaced_deployment.side_effect = read_deployment
+    install_ready_logging(core_api, apps_api)
     reconcile_appliance(
         spec=valid_spec(), meta=sample_meta(), core_api=core_api, apps_api=apps_api
     )
 
-    transfer_call = apps_api.patch_namespaced_deployment.call_args_list[-1]
+    transfer_call = next(
+        call
+        for call in apps_api.patch_namespaced_deployment.call_args_list
+        if call.kwargs["name"] == "example-coriolis-transfer-cron"
+    )
     assert transfer_call.kwargs["name"] == "example-coriolis-transfer-cron"
     assert transfer_call.kwargs["body"]["metadata"]["resourceVersion"] == "42"
     assert transfer_call.kwargs["field_manager"] == "coriolis-operator"
@@ -7377,11 +7880,16 @@ def test_managed_minion_manager_uses_guarded_ssa() -> None:
         raise _api_exception(404)
 
     apps_api.read_namespaced_deployment.side_effect = read_deployment
+    install_ready_logging(core_api, apps_api)
     reconcile_appliance(
         spec=valid_spec(), meta=sample_meta(), core_api=core_api, apps_api=apps_api
     )
 
-    minion_call = apps_api.patch_namespaced_deployment.call_args_list[-1]
+    minion_call = next(
+        call
+        for call in apps_api.patch_namespaced_deployment.call_args_list
+        if call.kwargs["name"] == "example-coriolis-minion-manager"
+    )
     assert minion_call.kwargs["name"] == "example-coriolis-minion-manager"
     assert minion_call.kwargs["body"]["metadata"]["resourceVersion"] == "43"
     assert minion_call.kwargs["field_manager"] == "coriolis-operator"
@@ -7493,11 +8001,16 @@ def test_managed_deployer_manager_uses_guarded_ssa() -> None:
         raise _api_exception(404)
 
     apps_api.read_namespaced_deployment.side_effect = read_deployment
+    install_ready_logging(core_api, apps_api)
     reconcile_appliance(
         spec=valid_spec(), meta=sample_meta(), core_api=core_api, apps_api=apps_api
     )
 
-    deployer_call = apps_api.patch_namespaced_deployment.call_args_list[-1]
+    deployer_call = next(
+        call
+        for call in apps_api.patch_namespaced_deployment.call_args_list
+        if call.kwargs["name"] == "example-coriolis-deployer-manager"
+    )
     assert deployer_call.kwargs["name"] == "example-coriolis-deployer-manager"
     assert deployer_call.kwargs["body"]["metadata"]["resourceVersion"] == "44"
     assert deployer_call.kwargs["field_manager"] == "coriolis-operator"
@@ -7579,6 +8092,7 @@ def test_managed_worker_uses_guarded_ssa() -> None:
         raise _api_exception(404)
 
     apps_api.read_namespaced_deployment.side_effect = read_deployment
+    install_ready_logging(core_api, apps_api)
     reconcile_appliance(
         spec=valid_spec(), meta=sample_meta(), core_api=core_api, apps_api=apps_api
     )
@@ -7710,6 +8224,7 @@ def test_bootstrap_config_map_collision_has_zero_writes() -> None:
         _api_exception(404),
         collided,
     ]
+    install_ready_logging(core_api)
     batch_api = make_batch_api(job=None)
 
     status = reconcile_appliance(
@@ -7905,6 +8420,7 @@ def test_bootstrap_config_map_immutable_drift_is_collision_with_no_writes() -> N
         _api_exception(404),
         collided,
     ]
+    install_ready_logging(core_api)
     batch_api = make_batch_api()
 
     status = reconcile_appliance(
@@ -7929,6 +8445,7 @@ def test_bootstrap_config_map_data_drift_is_collision_with_no_writes() -> None:
         _api_exception(404),
         collided,
     ]
+    install_ready_logging(core_api)
     batch_api = make_batch_api()
 
     status = reconcile_appliance(
@@ -7952,6 +8469,7 @@ def test_bootstrap_config_map_managed_reuse_is_no_write() -> None:
         _api_exception(404),
         existing,
     ]
+    install_ready_logging(core_api)
     batch_api = make_batch_api()
 
     status = reconcile_appliance(
@@ -8189,3 +8707,371 @@ def test_bootstrap_failed_v1_job_model_is_degraded_without_marker() -> None:
     assert statuses["Degraded"]["reason"] == "BootstrapFailed"
     assert statuses["Reconciled"]["status"] == "False"
     assert_no_marker_write(core_api)
+
+
+LOGGING_READS = (
+    ("secret", "example-logging-credentials"),
+    ("pvc", "example-loki-data"),
+    ("configmap", "example-loki-config"),
+    ("secret", "example-gateway-config"),
+    ("service", "example-gateway"),
+    ("statefulset", "example-loki"),
+    ("configmap", "example-alloy-config"),
+    ("serviceaccount", "example-alloy-sa"),
+    ("role", "example-alloy-role"),
+    ("rolebinding", "example-alloy-rb"),
+    ("deployment", "example-alloy"),
+    ("deployment", "example-adaptor"),
+    ("service", "example-adaptor"),
+    ("ingress", "example-adaptor"),
+)
+
+
+def test_logging_all_reads_precede_every_write() -> None:
+    core_api = make_core_api()
+    apps_api = make_apps_api()
+    networking_api = make_networking_api()
+    rbac_api = make_rbac_api()
+    events: list[tuple[str, str]] = []
+
+    def absent_read(resource: str):
+        def read(*, name: str, namespace: str) -> object:
+            events.append((resource, name))
+            raise _api_exception(404)
+
+        return read
+
+    def successful_create(resource: str):
+        def create(*, namespace: str, body: dict) -> None:
+            events.append(("write", f"{resource}:{body['metadata']['name']}"))
+
+        return create
+
+    core_api.read_namespaced_config_map.side_effect = absent_read("configmap")
+    core_api.read_namespaced_secret.side_effect = absent_read("secret")
+    core_api.read_namespaced_service.side_effect = absent_read("service")
+    core_api.read_namespaced_persistent_volume_claim.side_effect = absent_read("pvc")
+    core_api.read_namespaced_service_account.side_effect = absent_read("serviceaccount")
+    apps_api.read_namespaced_stateful_set.side_effect = absent_read("statefulset")
+    apps_api.read_namespaced_deployment.side_effect = absent_read("deployment")
+    networking_api.read_namespaced_ingress.side_effect = absent_read("ingress")
+    rbac_api.read_namespaced_role.side_effect = absent_read("role")
+    rbac_api.read_namespaced_role_binding.side_effect = absent_read("rolebinding")
+    batch_api = make_batch_api()
+    for attr in (
+        "create_namespaced_secret",
+        "create_namespaced_config_map",
+        "create_namespaced_service",
+        "create_namespaced_persistent_volume_claim",
+        "create_namespaced_stateful_set",
+        "create_namespaced_deployment",
+        "create_namespaced_ingress",
+        "create_namespaced_role",
+        "create_namespaced_role_binding",
+        "create_namespaced_service_account",
+    ):
+        getattr(core_api, attr).side_effect = successful_create("core")
+    for attr in ("create_namespaced_stateful_set", "create_namespaced_deployment"):
+        getattr(apps_api, attr).side_effect = successful_create("apps")
+    networking_api.create_namespaced_ingress.side_effect = successful_create("net")
+    rbac_api.create_namespaced_role.side_effect = successful_create("rbac")
+    rbac_api.create_namespaced_role_binding.side_effect = successful_create("rbac")
+
+    with pytest.raises(main.ReconcileRetry):
+        reconcile_appliance(
+            spec=valid_spec(),
+            meta=sample_meta(),
+            core_api=core_api,
+            apps_api=apps_api,
+            networking_api=networking_api,
+            rbac_api=rbac_api,
+            batch_api=batch_api,
+        )
+
+    first_write = next(
+        index for index, event in enumerate(events) if event[0] == "write"
+    )
+    read_events = set(events[:first_write])
+    assert all(read_event in read_events for read_event in LOGGING_READS)
+
+
+def test_logging_late_phase_collision_has_zero_writes() -> None:
+    core_api = make_core_api()
+    apps_api = make_apps_api()
+    networking_api = make_networking_api()
+    rbac_api = make_rbac_api()
+    collided = ready_logging()[("Ingress", "example-adaptor")]
+    collided["metadata"]["labels"]["coriolis.cloudbase.it/component"] = "other"
+    install_logging_present(
+        core_api,
+        apps_api,
+        networking_api,
+        rbac_api,
+        {("Ingress", "example-adaptor"): collided},
+    )
+
+    status = reconcile_appliance(
+        spec=valid_spec(),
+        meta=sample_meta(),
+        core_api=core_api,
+        apps_api=apps_api,
+        networking_api=networking_api,
+        rbac_api=rbac_api,
+        batch_api=make_batch_api(),
+    )
+
+    assert status["conditions"][2]["reason"] == "ResourceCollision"
+    assert api_writes(core_api) == []
+    assert api_writes(apps_api) == []
+    assert api_writes(networking_api) == []
+    assert api_writes(rbac_api) == []
+    assert "read-pass-value" not in repr(status)
+
+
+def test_logging_loki_phase_applied_before_retry_without_alloy_or_core() -> None:
+    core_api = make_core_api()
+    apps_api = make_apps_api()
+    networking_api = make_networking_api()
+    rbac_api = make_rbac_api()
+    install_logging_present(core_api, apps_api, networking_api, rbac_api, {})
+
+    with pytest.raises(main.ReconcileRetry):
+        reconcile_appliance(
+            spec=valid_spec(),
+            meta=sample_meta(),
+            core_api=core_api,
+            apps_api=apps_api,
+            networking_api=networking_api,
+            rbac_api=rbac_api,
+            batch_api=make_batch_api(),
+        )
+
+    created = (
+        {
+            call.kwargs["body"]["metadata"]["name"]
+            for call in core_api.create_namespaced_secret.call_args_list
+        }
+        | {
+            call.kwargs["body"]["metadata"]["name"]
+            for call in core_api.create_namespaced_config_map.call_args_list
+        }
+        | {
+            call.kwargs["body"]["metadata"]["name"]
+            for call in core_api.create_namespaced_service.call_args_list
+        }
+        | {
+            call.kwargs["body"]["metadata"]["name"]
+            for call in (
+                core_api.create_namespaced_persistent_volume_claim.call_args_list
+            )
+        }
+        | {
+            call.kwargs["body"]["metadata"]["name"]
+            for call in apps_api.create_namespaced_stateful_set.call_args_list
+        }
+    )
+    assert created == {
+        "example-logging-credentials",
+        "example-loki-data",
+        "example-loki-config",
+        "example-gateway-config",
+        "example-gateway",
+        "example-loki",
+    }
+    assert apps_api.create_namespaced_deployment.call_count == 0
+    assert networking_api.create_namespaced_ingress.call_count == 0
+    assert "example-operator-state" not in {
+        call.kwargs["body"]["metadata"]["name"]
+        for call in core_api.create_namespaced_config_map.call_args_list
+    }
+
+
+def test_logging_alloy_phase_applied_after_loki_ready_before_core() -> None:
+    core_api = make_core_api()
+    apps_api = make_apps_api()
+    networking_api = make_networking_api()
+    rbac_api = make_rbac_api()
+    ready = ready_logging()
+    present = {
+        key: ready[key]
+        for key in (
+            ("Secret", "example-logging-credentials"),
+            ("PersistentVolumeClaim", "example-loki-data"),
+            ("ConfigMap", "example-loki-config"),
+            ("Secret", "example-gateway-config"),
+            ("Service", "example-gateway"),
+            ("StatefulSet", "example-loki"),
+        )
+    }
+    install_logging_present(core_api, apps_api, networking_api, rbac_api, present)
+
+    with pytest.raises(main.ReconcileRetry):
+        reconcile_appliance(
+            spec=valid_spec(),
+            meta=sample_meta(),
+            core_api=core_api,
+            apps_api=apps_api,
+            networking_api=networking_api,
+            rbac_api=rbac_api,
+            batch_api=make_batch_api(),
+        )
+
+    alloy_created = {
+        call.kwargs["body"]["metadata"]["name"]
+        for call in apps_api.create_namespaced_deployment.call_args_list
+    }
+    assert alloy_created == {"example-alloy"}
+    alloy_configs = [
+        call.kwargs["body"]["metadata"]["name"]
+        for call in core_api.create_namespaced_config_map.call_args_list
+    ]
+    assert alloy_configs == ["example-alloy-config"]
+    assert "example-operator-state" not in alloy_configs
+
+
+def test_logging_adaptor_ingress_is_gated_until_adaptor_ready() -> None:
+    core_api = make_core_api()
+    apps_api = make_apps_api()
+    networking_api = make_networking_api()
+    rbac_api = make_rbac_api()
+    ready = ready_logging()
+    present = {
+        key: ready[key]
+        for key in (
+            ("Secret", "example-logging-credentials"),
+            ("PersistentVolumeClaim", "example-loki-data"),
+            ("ConfigMap", "example-loki-config"),
+            ("Secret", "example-gateway-config"),
+            ("Service", "example-gateway"),
+            ("StatefulSet", "example-loki"),
+            ("ConfigMap", "example-alloy-config"),
+            ("ServiceAccount", "example-alloy-sa"),
+            ("Role", "example-alloy-role"),
+            ("RoleBinding", "example-alloy-rb"),
+            ("Deployment", "example-alloy"),
+        )
+    }
+    present[("Deployment", "example-keystone")] = ready_keystone_deployment()
+    install_logging_present(core_api, apps_api, networking_api, rbac_api, present)
+
+    with pytest.raises(main.ReconcileRetry):
+        reconcile_appliance(
+            spec=valid_spec(),
+            meta=sample_meta(),
+            core_api=core_api,
+            apps_api=apps_api,
+            networking_api=networking_api,
+            rbac_api=rbac_api,
+            batch_api=make_batch_api(),
+        )
+
+    adaptor_deployments = {
+        call.kwargs["body"]["metadata"]["name"]
+        for call in apps_api.create_namespaced_deployment.call_args_list
+    }
+    adaptor_services = {
+        call.kwargs["body"]["metadata"]["name"]
+        for call in core_api.create_namespaced_service.call_args_list
+    }
+    assert "example-adaptor" in adaptor_deployments
+    assert "example-adaptor" in adaptor_services
+    assert "example-adaptor" not in {
+        call.kwargs["body"]["metadata"]["name"]
+        for call in networking_api.create_namespaced_ingress.call_args_list
+    }
+    assert "example-operator-state" not in {
+        call.kwargs["body"]["metadata"]["name"]
+        for call in core_api.create_namespaced_config_map.call_args_list
+    }
+
+
+def test_logging_adaptor_ready_applies_ingress_and_marker_is_final() -> None:
+    core_api = make_core_api()
+    apps_api = make_apps_api()
+    networking_api = make_networking_api()
+    rbac_api = make_rbac_api()
+    ready = ready_logging()
+    present = {key: ready[key] for key in ready}
+    present[("Deployment", "example-keystone")] = ready_keystone_deployment()
+    install_logging_present(core_api, apps_api, networking_api, rbac_api, present)
+
+    status = reconcile_appliance(
+        spec=valid_spec(),
+        meta=sample_meta(),
+        core_api=core_api,
+        apps_api=apps_api,
+        networking_api=networking_api,
+        rbac_api=rbac_api,
+        batch_api=make_batch_api(),
+    )
+
+    assert status["acceptedVersion"] == "2603.4"
+    assert status["conditions"][2]["reason"] == "Reconciled"
+    ingress_patched = [
+        call.kwargs["name"]
+        for call in networking_api.patch_namespaced_ingress.call_args_list
+    ]
+    assert "example-adaptor" in ingress_patched
+    assert core_api.method_calls[-1] == call.create_namespaced_config_map(
+        namespace="operators", body=ANY
+    )
+
+
+def test_logging_adaptor_waits_for_keystone_before_writes_or_marker() -> None:
+    core_api = make_core_api()
+    apps_api = make_apps_api()
+    networking_api = make_networking_api()
+    rbac_api = make_rbac_api()
+    ready = ready_logging()
+    present = {
+        key: ready[key]
+        for key in (
+            ("Secret", "example-logging-credentials"),
+            ("PersistentVolumeClaim", "example-loki-data"),
+            ("ConfigMap", "example-loki-config"),
+            ("Secret", "example-gateway-config"),
+            ("Service", "example-gateway"),
+            ("StatefulSet", "example-loki"),
+            ("ConfigMap", "example-alloy-config"),
+            ("ServiceAccount", "example-alloy-sa"),
+            ("Role", "example-alloy-role"),
+            ("RoleBinding", "example-alloy-rb"),
+            ("Deployment", "example-alloy"),
+        )
+    }
+    install_logging_present(core_api, apps_api, networking_api, rbac_api, present)
+
+    with pytest.raises(main.ReconcileRetry) as excinfo:
+        reconcile_appliance(
+            spec=valid_spec(),
+            meta=sample_meta(),
+            core_api=core_api,
+            apps_api=apps_api,
+            networking_api=networking_api,
+            rbac_api=rbac_api,
+            batch_api=make_batch_api(),
+        )
+
+    assert excinfo.value.status["conditions"][2]["reason"] == "ResourceApplyFailed"
+    assert "example-adaptor" not in {
+        call.kwargs["body"]["metadata"]["name"]
+        for call in apps_api.create_namespaced_deployment.call_args_list
+    }
+    assert "example-adaptor" not in {
+        call.kwargs["body"]["metadata"]["name"]
+        for call in core_api.create_namespaced_service.call_args_list
+    }
+    assert "example-adaptor" not in {
+        call.kwargs["body"]["metadata"]["name"]
+        for call in networking_api.create_namespaced_ingress.call_args_list
+    } | {
+        call.kwargs["name"]
+        for call in networking_api.patch_namespaced_ingress.call_args_list
+    }
+    assert "example-operator-state" not in {
+        call.kwargs["body"]["metadata"]["name"]
+        for call in core_api.create_namespaced_config_map.call_args_list
+    } | {
+        call.kwargs["name"]
+        for call in core_api.patch_namespaced_config_map.call_args_list
+    }
