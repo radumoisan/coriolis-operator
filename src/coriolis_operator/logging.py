@@ -110,6 +110,7 @@ ALLOY_HTTP_PORT = 12345
 ALLOY_CONFIG_DIR = "/etc/alloy"
 ALLOY_CONFIG_PATH = f"{ALLOY_CONFIG_DIR}/config.alloy"
 ALLOY_DATA_DIR = "/var/lib/alloy/data"
+ALLOY_DATA_PARENT_DIR = "/var/lib/alloy"
 ALLOY_TMP_DIR = "/tmp"
 ALLOY_CREDENTIAL_MOUNT_DIR = "/etc/alloy/credentials"
 ALLOY_CREDENTIAL_PATH = f"{ALLOY_CREDENTIAL_MOUNT_DIR}/write_password"
@@ -1223,7 +1224,7 @@ def build_alloy_deployment(
                 "mountPath": ALLOY_CREDENTIAL_MOUNT_DIR,
                 "readOnly": True,
             },
-            {"name": "storage", "mountPath": ALLOY_DATA_DIR},
+            {"name": "storage", "mountPath": ALLOY_DATA_PARENT_DIR},
             {"name": "tmp", "mountPath": ALLOY_TMP_DIR},
         ],
         "startupProbe": _alloy_probe(

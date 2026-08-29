@@ -20,6 +20,7 @@ from coriolis_operator.logging import (
     ALLOY_CREDENTIAL_MOUNT_DIR,
     ALLOY_CREDENTIAL_PATH,
     ALLOY_DATA_DIR,
+    ALLOY_DATA_PARENT_DIR,
     ALLOY_HTTP_PORT,
     ALLOY_IMAGE,
     ALLOY_READY_PATH,
@@ -945,7 +946,7 @@ def test_build_alloy_deployment_is_hardened_and_owned() -> None:
     assert mounts["config"]["readOnly"] is True
     assert mounts["credentials"]["mountPath"] == ALLOY_CREDENTIAL_MOUNT_DIR
     assert mounts["credentials"]["readOnly"] is True
-    assert mounts["storage"]["mountPath"] == ALLOY_DATA_DIR
+    assert mounts["storage"]["mountPath"] == ALLOY_DATA_PARENT_DIR
     assert mounts["tmp"]["mountPath"] == "/tmp"
 
     for probe in ("startupProbe", "readinessProbe", "livenessProbe"):
@@ -982,6 +983,27 @@ def test_build_alloy_deployment_mounts_only_write_credential_item() -> None:
 
     assert volumes["storage"]["emptyDir"] == {}
     assert volumes["tmp"]["emptyDir"] == {}
+
+
+def test_build_alloy_deployment_mounts_writable_parent_for_readonly_root() -> None:
+    deployment = build_alloy_deployment(
+        appliance_name="appliance",
+        namespace="coriolis",
+        accepted_version="2603.4",
+        owner=_owner(),
+        settings=_settings(),
+    )
+    container = deployment["spec"]["template"]["spec"]["containers"][0]
+    pod_spec = deployment["spec"]["template"]["spec"]
+
+    storage_mount = next(m for m in container["volumeMounts"] if m["name"] == "storage")
+    assert storage_mount["mountPath"] == ALLOY_DATA_PARENT_DIR
+    assert storage_mount["mountPath"] != ALLOY_DATA_DIR
+    assert ALLOY_DATA_DIR.startswith(f"{ALLOY_DATA_PARENT_DIR}/")
+    assert f"--storage.path={ALLOY_DATA_DIR}" in container["args"]
+
+    volumes = {volume["name"]: volume for volume in pod_spec["volumes"]}
+    assert volumes["storage"]["emptyDir"] == {}
 
 
 def test_alloy_resources_are_distinct_per_resource() -> None:
