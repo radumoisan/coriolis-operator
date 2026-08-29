@@ -5152,9 +5152,13 @@ def test_memcached_apply_failure_is_sanitized_and_skips_marker(operation: str) -
 
 @pytest.mark.parametrize(
     "handler",
-    [main.update_appliance_storage, main.update_appliance_resources],
+    [
+        main.update_appliance_storage,
+        main.update_appliance_resources,
+        main.update_appliance_logging,
+    ],
 )
-def test_mariadb_spec_field_handlers_route_through_reconcile(
+def test_runtime_spec_field_handlers_route_through_reconcile(
     monkeypatch: pytest.MonkeyPatch, handler
 ) -> None:
     handled = MagicMock()

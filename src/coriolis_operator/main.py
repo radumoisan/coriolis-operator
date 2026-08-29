@@ -2733,6 +2733,18 @@ def update_appliance_ingress(
     _handle_reconcile(spec, meta, patch, status, **kwargs)
 
 
+@kopf.on.field(GROUP, VERSION, PLURAL, field="spec.logging")
+def update_appliance_logging(
+    spec: Mapping[str, Any],
+    meta: Mapping[str, Any],
+    patch: kopf.Patch,
+    status: Mapping[str, Any] | None = None,
+    **kwargs: Any,
+) -> None:
+    """Reconcile requested appliance logging changes."""
+    _handle_reconcile(spec, meta, patch, status, **kwargs)
+
+
 @kopf.timer(GROUP, VERSION, PLURAL, initial_delay=60, interval=60)
 def retry_resource_collision(
     spec: Mapping[str, Any],
