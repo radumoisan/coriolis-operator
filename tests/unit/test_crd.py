@@ -241,8 +241,8 @@ def test_sample_uses_explicit_logging_settings() -> None:
                 "limits": {"cpu": "1", "memory": "1Gi"},
             },
             "gateway": {
-                "requests": {"cpu": "25m", "memory": "32Mi"},
-                "limits": {"cpu": "100m", "memory": "64Mi"},
+                "requests": {"cpu": "100m", "memory": "32Mi"},
+                "limits": {"cpu": "1", "memory": "64Mi"},
             },
             "alloy": {
                 "requests": {"cpu": "100m", "memory": "128Mi"},

@@ -428,6 +428,9 @@ server:
   grpc_listen_port: 9095
   log_level: warn
 
+frontend:
+  address: {_LOKI_UPSTREAM_ADDRESS}
+
 common:
   path_prefix: {LOKI_DATA_DIR}
   replication_factor: 1
