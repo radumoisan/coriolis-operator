@@ -29,9 +29,36 @@ from coriolis_operator.api import (
     API_RUN_AS_ID,
     API_TERMINATION_GRACE_PERIOD_SECONDS,
 )
+from coriolis_operator.barbican import (
+    BARBICAN_API_COMMAND,
+    BARBICAN_API_IMAGE,
+    BARBICAN_API_STATE_DIR,
+    BARBICAN_CONFIG_KEYS,
+    BARBICAN_DB_SYNC_COMMAND,
+    BARBICAN_HEALTH_PROBE,
+    BARBICAN_IMAGE_PULL_SECRET_NAME,
+    BARBICAN_PORT,
+    BARBICAN_REPLICAS,
+    BARBICAN_RUN_AS_ID,
+    BARBICAN_RUNTIME_DIR,
+    BARBICAN_SECRET_CONFIG_KEYS,
+    BARBICAN_SUPPLEMENTAL_GROUP,
+    BARBICAN_TERMINATION_GRACE_PERIOD_SECONDS,
+    BARBICAN_TMP_DIR,
+    BARBICAN_VASSAL_PATH,
+    BARBICAN_VENV_PYTHON,
+    BARBICAN_WORKER_COMMAND,
+    BARBICAN_WORKER_IMAGE,
+    SensitiveBarbicanCredentials,
+    generate_barbican_crypto_key,
+    render_barbican_config,
+    render_sensitive_barbican_config,
+    validate_retained_barbican_values,
+)
 from coriolis_operator.common import (
     BOOTSTRAP_ACTIVE_DEADLINE_SECONDS,
     BOOTSTRAP_BACKOFF_LIMIT,
+    BOOTSTRAP_BARBICAN_CREDENTIALS_DIR,
     BOOTSTRAP_COMPONENT,
     BOOTSTRAP_CONFIG_DIR,
     BOOTSTRAP_CORIOLIS_CREDENTIALS_DIR,
@@ -424,6 +451,7 @@ class IngressResourcePreflight:
     web_classification: OwnedClassification
     keystone_classification: OwnedClassification
     api_classification: OwnedClassification
+    barbican_classification: OwnedClassification
     manifests: tuple[dict[str, Any], ...] = field(repr=False)
 
 
@@ -482,6 +510,17 @@ class KeystoneResourcePreflight:
     classifications: Mapping[str, RetainedClassification | OwnedClassification]
     credentials: Mapping[str, Mapping[str, str]] = field(repr=False)
     manifests: tuple[dict[str, Any], ...] = field(repr=False)
+
+
+@dataclass(frozen=True)
+class BarbicanResourcePreflight:
+    """Pure Barbican preflight outcome with credentials and manifests redacted."""
+
+    classifications: Mapping[str, RetainedClassification | OwnedClassification]
+    credentials: Mapping[str, Mapping[str, str]] = field(repr=False)
+    manifests: tuple[dict[str, Any], ...] = field(repr=False)
+    api_service_classification: OwnedClassification = OwnedClassification.ABSENT
+    api_deployment_classification: OwnedClassification = OwnedClassification.ABSENT
 
 
 def state_config_map_name(resource_name: str) -> str:
@@ -2001,6 +2040,30 @@ def build_api_ingress(
     )
 
 
+def build_barbican_ingress(
+    *,
+    appliance_name: str,
+    namespace: str,
+    accepted_version: str,
+    owner: Mapping[str, Any],
+    settings: IngressSettings,
+) -> dict[str, Any]:
+    """Build the prefixed Ingress routing public requests to the Barbican API."""
+    return _build_ingress(
+        appliance_name=appliance_name,
+        namespace=namespace,
+        accepted_version=accepted_version,
+        owner=owner,
+        settings=settings,
+        component="barbican-api",
+        port=BARBICAN_PORT,
+        path="/barbican(/|$)(.*)",
+        path_type="ImplementationSpecific",
+        include_settings=False,
+        rewrite_target="/$2",
+    )
+
+
 def _managed_ingress_manifest(
     *, existing: Any, manifest: dict[str, Any]
 ) -> dict[str, Any]:
@@ -2021,11 +2084,13 @@ def preflight_ingress_resources(
     web_ingress: Any | None,
     keystone_ingress: Any | None,
     api_ingress: Any | None,
+    barbican_ingress: Any | None,
 ) -> IngressResourcePreflight:
     """Classify all Ingresses before constructing guarded apply manifests."""
     web_resource_name = appliance_resource_name(appliance_name, WEB_COMPONENT)
     keystone_resource_name = appliance_resource_name(appliance_name, "keystone")
     api_resource_name = appliance_resource_name(appliance_name, "coriolis-api")
+    barbican_resource_name = appliance_resource_name(appliance_name, "barbican-api")
     web_classification = classify_owned_resource(
         existing=web_ingress,
         resource_name=web_resource_name,
@@ -2053,10 +2118,20 @@ def preflight_ingress_resources(
         accepted_version=accepted_version,
         owner=owner,
     )
+    barbican_classification = classify_owned_resource(
+        existing=barbican_ingress,
+        resource_name=barbican_resource_name,
+        namespace=namespace,
+        appliance_name=appliance_name,
+        component="barbican-api",
+        accepted_version=accepted_version,
+        owner=owner,
+    )
     classifications = (
         web_classification,
         keystone_classification,
         api_classification,
+        barbican_classification,
     )
     if OwnedClassification.COLLISION in classifications:
         return IngressResourcePreflight(*classifications, ())
@@ -2083,8 +2158,20 @@ def preflight_ingress_resources(
             owner=owner,
             settings=settings,
         ),
+        build_barbican_ingress(
+            appliance_name=appliance_name,
+            namespace=namespace,
+            accepted_version=accepted_version,
+            owner=owner,
+            settings=settings,
+        ),
     )
-    existing_resources = (web_ingress, keystone_ingress, api_ingress)
+    existing_resources = (
+        web_ingress,
+        keystone_ingress,
+        api_ingress,
+        barbican_ingress,
+    )
     guarded_manifests = tuple(
         _managed_ingress_manifest(existing=existing, manifest=manifest)
         if classification is OwnedClassification.MANAGED
@@ -4298,6 +4385,598 @@ def preflight_keystone_resources(
     )
 
 
+BARBICAN_CREDENTIALS_KEYS = frozenset(
+    {
+        "barbican_database_password",
+        "barbican_keystone_password",
+        "barbican_crypto_key",
+    }
+)
+_BARBICAN_VASSAL_KEY = "barbican-api.ini"
+_BARBICAN_VASSAL_ITEM_PATH = BARBICAN_VASSAL_PATH.removeprefix(
+    f"{BARBICAN_RUNTIME_DIR}/"
+)
+
+
+def generate_barbican_credentials(
+    password_factory: Callable[[int], str] = secrets.token_urlsafe,
+    byte_factory: Callable[[int], bytes] = secrets.token_bytes,
+) -> dict[str, str]:
+    """Generate the retained Barbican passwords and simple_crypto master key."""
+    values = {
+        "barbican_database_password": password_factory(32),
+        "barbican_keystone_password": password_factory(32),
+    }
+    if any(not isinstance(value, str) or not value for value in values.values()):
+        raise ValueError("credential token factory must return a non-empty string")
+    values["barbican_crypto_key"] = generate_barbican_crypto_key(byte_factory)
+    return values
+
+
+def build_barbican_credentials_secret(
+    *,
+    appliance_name: str,
+    namespace: str,
+    accepted_version: str,
+    retention: str,
+    values: Mapping[str, str],
+) -> dict[str, Any]:
+    """Build the retained ownerless Barbican credentials Secret."""
+    return _build_retained_secret(
+        appliance_name=appliance_name,
+        namespace=namespace,
+        accepted_version=accepted_version,
+        component="barbican-credentials",
+        retention=retention,
+        values=values,
+        expected_keys=BARBICAN_CREDENTIALS_KEYS,
+    )
+
+
+def _build_barbican_owned(
+    *,
+    appliance_name: str,
+    namespace: str,
+    accepted_version: str,
+    owner: Mapping[str, Any],
+    component: str,
+    kind: str,
+    values: Mapping[str, str],
+    expected_keys: frozenset[str],
+) -> dict[str, Any]:
+    resource_name = appliance_resource_name(appliance_name, component)
+    body: dict[str, Any] = {
+        "apiVersion": "v1",
+        "kind": kind,
+        "metadata": build_resource_metadata(
+            resource_name=resource_name,
+            namespace=namespace,
+            appliance_name=appliance_name,
+            component=component,
+            accepted_version=accepted_version,
+            owner=owner,
+        ),
+    }
+    checked = _validated_opaque_values(values, expected_keys, resource_name)
+    if kind == "Secret":
+        body.update({"type": "Opaque", "data": _encoded_secret_data(checked)})
+    else:
+        body["data"] = checked
+    return body
+
+
+def build_barbican_config_map(
+    *,
+    appliance_name: str,
+    namespace: str,
+    accepted_version: str,
+    owner: Mapping[str, Any],
+    values: Mapping[str, str],
+) -> dict[str, Any]:
+    """Build the owner-referenced non-sensitive Barbican ConfigMap."""
+    return _build_barbican_owned(
+        appliance_name=appliance_name,
+        namespace=namespace,
+        accepted_version=accepted_version,
+        owner=owner,
+        component="barbican-config",
+        kind="ConfigMap",
+        values=values,
+        expected_keys=BARBICAN_CONFIG_KEYS,
+    )
+
+
+def build_barbican_config_secret(
+    *,
+    appliance_name: str,
+    namespace: str,
+    accepted_version: str,
+    owner: Mapping[str, Any],
+    values: Mapping[str, str],
+) -> dict[str, Any]:
+    """Build the owner-referenced sensitive Barbican configuration Secret."""
+    return _build_barbican_owned(
+        appliance_name=appliance_name,
+        namespace=namespace,
+        accepted_version=accepted_version,
+        owner=owner,
+        component="barbican-config-secret",
+        kind="Secret",
+        values=values,
+        expected_keys=BARBICAN_SECRET_CONFIG_KEYS,
+    )
+
+
+def build_barbican_api_service(
+    *,
+    appliance_name: str,
+    namespace: str,
+    accepted_version: str,
+    owner: Mapping[str, Any],
+) -> dict[str, Any]:
+    """Build the internal ClusterIP Service for the Barbican API."""
+    component = "barbican-api"
+    metadata = build_resource_metadata(
+        resource_name=appliance_resource_name(appliance_name, component),
+        namespace=namespace,
+        appliance_name=appliance_name,
+        component=component,
+        accepted_version=accepted_version,
+        owner=owner,
+    )
+    return {
+        "apiVersion": "v1",
+        "kind": "Service",
+        "metadata": metadata,
+        "spec": {
+            "type": "ClusterIP",
+            "selector": {
+                "coriolis.cloudbase.it/appliance": appliance_identity(appliance_name),
+                "coriolis.cloudbase.it/component": component,
+            },
+            "ports": [
+                {
+                    "name": component,
+                    "protocol": "TCP",
+                    "port": BARBICAN_PORT,
+                    "targetPort": BARBICAN_PORT,
+                }
+            ],
+        },
+    }
+
+
+def _barbican_container_security_context() -> dict[str, Any]:
+    return {
+        "runAsNonRoot": True,
+        "readOnlyRootFilesystem": True,
+        "allowPrivilegeEscalation": False,
+        "capabilities": {"drop": ["ALL"]},
+        "seccompProfile": {"type": "RuntimeDefault"},
+    }
+
+
+def _barbican_config_volume(appliance_name: str) -> dict[str, Any]:
+    config_map_name = appliance_resource_name(appliance_name, "barbican-config")
+    config_secret_name = appliance_resource_name(
+        appliance_name, "barbican-config-secret"
+    )
+    return {
+        "name": "config",
+        "projected": {
+            "sources": [
+                {
+                    "configMap": {
+                        "name": config_map_name,
+                        "items": [
+                            {
+                                "key": key,
+                                "path": (
+                                    _BARBICAN_VASSAL_ITEM_PATH
+                                    if key == _BARBICAN_VASSAL_KEY
+                                    else key
+                                ),
+                                "mode": 0o444,
+                            }
+                            for key in sorted(BARBICAN_CONFIG_KEYS)
+                        ],
+                    }
+                },
+                {
+                    "secret": {
+                        "name": config_secret_name,
+                        "items": [
+                            {
+                                "key": "barbican.conf",
+                                "path": "barbican.conf",
+                                "mode": 0o440,
+                            }
+                        ],
+                    }
+                },
+            ]
+        },
+    }
+
+
+def _barbican_config_mount() -> dict[str, Any]:
+    return {"name": "config", "mountPath": BARBICAN_RUNTIME_DIR, "readOnly": True}
+
+
+def _barbican_tmp_mount() -> dict[str, Any]:
+    return {"name": "tmp", "mountPath": BARBICAN_TMP_DIR}
+
+
+def _barbican_volumes(appliance_name: str, *, with_state: bool) -> list[dict[str, Any]]:
+    volumes = [
+        _barbican_config_volume(appliance_name),
+        {"name": "tmp", "emptyDir": {"medium": "Memory"}},
+    ]
+    if with_state:
+        volumes.append({"name": "state", "emptyDir": {}})
+    return volumes
+
+
+def _barbican_deployment(
+    *,
+    appliance_name: str,
+    namespace: str,
+    accepted_version: str,
+    owner: Mapping[str, Any],
+    component: str,
+    pod_spec: dict[str, Any],
+) -> dict[str, Any]:
+    resource_name = appliance_resource_name(appliance_name, component)
+    metadata = build_resource_metadata(
+        resource_name=resource_name,
+        namespace=namespace,
+        appliance_name=appliance_name,
+        component=component,
+        accepted_version=accepted_version,
+        owner=owner,
+    )
+    return {
+        "apiVersion": "apps/v1",
+        "kind": "Deployment",
+        "metadata": metadata,
+        "spec": {
+            "replicas": BARBICAN_REPLICAS,
+            "strategy": {"type": "Recreate"},
+            "selector": {
+                "matchLabels": {
+                    "coriolis.cloudbase.it/appliance": appliance_identity(
+                        appliance_name
+                    ),
+                    "coriolis.cloudbase.it/component": component,
+                }
+            },
+            "template": {
+                "metadata": {"labels": dict(metadata["labels"])},
+                "spec": pod_spec,
+            },
+        },
+    }
+
+
+def build_barbican_api_deployment(
+    *,
+    appliance_name: str,
+    namespace: str,
+    accepted_version: str,
+    owner: Mapping[str, Any],
+) -> dict[str, Any]:
+    """Build the restricted single-replica Barbican API Deployment."""
+    component = "barbican-api"
+    probe = {"exec": {"command": [BARBICAN_VENV_PYTHON, "-c", BARBICAN_HEALTH_PROBE]}}
+    container = {
+        "name": component,
+        "image": BARBICAN_API_IMAGE,
+        "command": list(BARBICAN_API_COMMAND),
+        "ports": [
+            {
+                "name": component,
+                "containerPort": BARBICAN_PORT,
+                "protocol": "TCP",
+            }
+        ],
+        "securityContext": _barbican_container_security_context(),
+        "volumeMounts": [
+            _barbican_config_mount(),
+            _barbican_tmp_mount(),
+            {"name": "state", "mountPath": BARBICAN_API_STATE_DIR},
+        ],
+        "startupProbe": dict(
+            probe,
+            periodSeconds=2,
+            timeoutSeconds=5,
+            failureThreshold=30,
+        ),
+        "readinessProbe": dict(
+            probe,
+            periodSeconds=5,
+            timeoutSeconds=5,
+            failureThreshold=3,
+            successThreshold=1,
+        ),
+        "livenessProbe": dict(
+            probe,
+            periodSeconds=10,
+            timeoutSeconds=5,
+            failureThreshold=6,
+        ),
+    }
+    db_sync = {
+        "name": "db-sync",
+        "image": BARBICAN_API_IMAGE,
+        "command": list(BARBICAN_DB_SYNC_COMMAND),
+        "securityContext": _barbican_container_security_context(),
+        "volumeMounts": [_barbican_config_mount(), _barbican_tmp_mount()],
+    }
+    pod_spec = {
+        "imagePullSecrets": [{"name": BARBICAN_IMAGE_PULL_SECRET_NAME}],
+        "securityContext": {
+            "runAsUser": BARBICAN_RUN_AS_ID,
+            "runAsGroup": BARBICAN_RUN_AS_ID,
+            "fsGroup": BARBICAN_RUN_AS_ID,
+            "fsGroupChangePolicy": "OnRootMismatch",
+            "supplementalGroups": [BARBICAN_SUPPLEMENTAL_GROUP],
+        },
+        "automountServiceAccountToken": False,
+        "enableServiceLinks": False,
+        "terminationGracePeriodSeconds": BARBICAN_TERMINATION_GRACE_PERIOD_SECONDS,
+        "initContainers": [db_sync],
+        "containers": [container],
+        "volumes": _barbican_volumes(appliance_name, with_state=True),
+    }
+    return _barbican_deployment(
+        appliance_name=appliance_name,
+        namespace=namespace,
+        accepted_version=accepted_version,
+        owner=owner,
+        component=component,
+        pod_spec=pod_spec,
+    )
+
+
+def build_barbican_worker_deployment(
+    *,
+    appliance_name: str,
+    namespace: str,
+    accepted_version: str,
+    owner: Mapping[str, Any],
+) -> dict[str, Any]:
+    """Build the restricted single-replica Barbican worker Deployment."""
+    component = "barbican-worker"
+    container = {
+        "name": component,
+        "image": BARBICAN_WORKER_IMAGE,
+        "command": list(BARBICAN_WORKER_COMMAND),
+        "securityContext": _barbican_container_security_context(),
+        "volumeMounts": [_barbican_config_mount(), _barbican_tmp_mount()],
+    }
+    pod_spec = {
+        "imagePullSecrets": [{"name": BARBICAN_IMAGE_PULL_SECRET_NAME}],
+        "securityContext": {
+            "runAsUser": BARBICAN_RUN_AS_ID,
+            "runAsGroup": BARBICAN_RUN_AS_ID,
+            "fsGroup": BARBICAN_RUN_AS_ID,
+            "fsGroupChangePolicy": "OnRootMismatch",
+            "supplementalGroups": [BARBICAN_SUPPLEMENTAL_GROUP],
+        },
+        "automountServiceAccountToken": False,
+        "enableServiceLinks": False,
+        "terminationGracePeriodSeconds": BARBICAN_TERMINATION_GRACE_PERIOD_SECONDS,
+        "containers": [container],
+        "volumes": _barbican_volumes(appliance_name, with_state=False),
+    }
+    return _barbican_deployment(
+        appliance_name=appliance_name,
+        namespace=namespace,
+        accepted_version=accepted_version,
+        owner=owner,
+        component=component,
+        pod_spec=pod_spec,
+    )
+
+
+def preflight_barbican_resources(
+    *,
+    appliance_name: str,
+    namespace: str,
+    accepted_version: str,
+    owner: Mapping[str, Any],
+    retention: str,
+    database_host: object,
+    rabbitmq_host: object,
+    keystone_host: object,
+    barbican_host: object,
+    rabbitmq_password: str,
+    barbican_credentials_secret: Any | None,
+    barbican_config_map: Any | None,
+    barbican_config_secret: Any | None,
+    barbican_api_service: Any | None,
+    barbican_api_deployment: Any | None,
+    barbican_worker_deployment: Any | None,
+    password_factory: Callable[[int], str] = secrets.token_urlsafe,
+    byte_factory: Callable[[int], bytes] = secrets.token_bytes,
+) -> BarbicanResourcePreflight:
+    """Classify all Barbican resources before validating, generating, or rendering.
+
+    The API Service and Deployment share one deterministic resource name, so
+    their classifications collapse into that single mapping entry with
+    collision dominating and any absent object dominating a managed sibling.
+    The per-kind classifications are also returned as explicit fields so
+    callers can precheck each object without the collapse.
+    """
+    credentials_name = appliance_resource_name(appliance_name, "barbican-credentials")
+    config_name = appliance_resource_name(appliance_name, "barbican-config")
+    config_secret_name = appliance_resource_name(
+        appliance_name, "barbican-config-secret"
+    )
+    api_name = appliance_resource_name(appliance_name, "barbican-api")
+    worker_name = appliance_resource_name(appliance_name, "barbican-worker")
+    classifications: dict[str, RetainedClassification | OwnedClassification] = {
+        credentials_name: classify_retained_resource(
+            existing=barbican_credentials_secret,
+            resource_name=credentials_name,
+            namespace=namespace,
+            appliance_name=appliance_name,
+            component="barbican-credentials",
+            accepted_version=accepted_version,
+            retention=retention,
+        ),
+        config_name: classify_owned_resource(
+            existing=barbican_config_map,
+            resource_name=config_name,
+            namespace=namespace,
+            appliance_name=appliance_name,
+            component="barbican-config",
+            accepted_version=accepted_version,
+            owner=owner,
+        ),
+        config_secret_name: classify_owned_resource(
+            existing=barbican_config_secret,
+            resource_name=config_secret_name,
+            namespace=namespace,
+            appliance_name=appliance_name,
+            component="barbican-config-secret",
+            accepted_version=accepted_version,
+            owner=owner,
+        ),
+    }
+    api_service_classification = classify_owned_resource(
+        existing=barbican_api_service,
+        resource_name=api_name,
+        namespace=namespace,
+        appliance_name=appliance_name,
+        component="barbican-api",
+        accepted_version=accepted_version,
+        owner=owner,
+    )
+    api_deployment_classification = classify_owned_resource(
+        existing=barbican_api_deployment,
+        resource_name=api_name,
+        namespace=namespace,
+        appliance_name=appliance_name,
+        component="barbican-api",
+        accepted_version=accepted_version,
+        owner=owner,
+    )
+    api_pair = [api_service_classification, api_deployment_classification]
+    if OwnedClassification.COLLISION in api_pair:
+        classifications[api_name] = OwnedClassification.COLLISION
+    elif OwnedClassification.ABSENT in api_pair:
+        classifications[api_name] = OwnedClassification.ABSENT
+    else:
+        classifications[api_name] = OwnedClassification.MANAGED
+    classifications[worker_name] = classify_owned_resource(
+        existing=barbican_worker_deployment,
+        resource_name=worker_name,
+        namespace=namespace,
+        appliance_name=appliance_name,
+        component="barbican-worker",
+        accepted_version=accepted_version,
+        owner=owner,
+    )
+    if any(value.value == "collision" for value in classifications.values()):
+        return BarbicanResourcePreflight(
+            classifications,
+            {},
+            (),
+            api_service_classification,
+            api_deployment_classification,
+        )
+
+    credentials: dict[str, Mapping[str, str]] = {}
+    if classifications[credentials_name] is RetainedClassification.REUSE:
+        try:
+            retained = validated_retained_secret_values(
+                existing=barbican_credentials_secret,
+                expected_keys=BARBICAN_CREDENTIALS_KEYS,
+            )
+            validate_retained_barbican_values(
+                database_password=retained["barbican_database_password"],
+                keystone_password=retained["barbican_keystone_password"],
+                crypto_key=retained["barbican_crypto_key"],
+            )
+        except (ValueError, KeyError):
+            classifications[credentials_name] = RetainedClassification.COLLISION
+            return BarbicanResourcePreflight(
+                classifications,
+                {},
+                (),
+                api_service_classification,
+                api_deployment_classification,
+            )
+        credentials[credentials_name] = retained
+    elif classifications[credentials_name] is RetainedClassification.ABSENT:
+        credentials[credentials_name] = generate_barbican_credentials(
+            password_factory=password_factory,
+            byte_factory=byte_factory,
+        )
+    values = credentials[credentials_name]
+    config = render_barbican_config()
+    secret = render_sensitive_barbican_config(
+        database_host=database_host,
+        rabbitmq_host=rabbitmq_host,
+        keystone_host=keystone_host,
+        barbican_host=barbican_host,
+        credentials=SensitiveBarbicanCredentials(
+            database_password=values["barbican_database_password"],
+            keystone_password=values["barbican_keystone_password"],
+            rabbitmq_password=rabbitmq_password,
+            crypto_key=values["barbican_crypto_key"],
+        ),
+    )
+    return BarbicanResourcePreflight(
+        classifications,
+        credentials,
+        (
+            build_barbican_credentials_secret(
+                appliance_name=appliance_name,
+                namespace=namespace,
+                accepted_version=accepted_version,
+                retention=retention,
+                values=values,
+            ),
+            build_barbican_config_map(
+                appliance_name=appliance_name,
+                namespace=namespace,
+                accepted_version=accepted_version,
+                owner=owner,
+                values=config,
+            ),
+            build_barbican_config_secret(
+                appliance_name=appliance_name,
+                namespace=namespace,
+                accepted_version=accepted_version,
+                owner=owner,
+                values=secret,
+            ),
+            build_barbican_api_service(
+                appliance_name=appliance_name,
+                namespace=namespace,
+                accepted_version=accepted_version,
+                owner=owner,
+            ),
+            build_barbican_api_deployment(
+                appliance_name=appliance_name,
+                namespace=namespace,
+                accepted_version=accepted_version,
+                owner=owner,
+            ),
+            build_barbican_worker_deployment(
+                appliance_name=appliance_name,
+                namespace=namespace,
+                accepted_version=accepted_version,
+                owner=owner,
+            ),
+        ),
+        api_service_classification=api_service_classification,
+        api_deployment_classification=api_deployment_classification,
+    )
+
+
 def preflight_foundational_resources(
     *,
     appliance_name: str,
@@ -4772,6 +5451,9 @@ def build_common_bootstrap_job(
     coriolis_credentials_name = appliance_resource_name(
         appliance_name, "coriolis-credentials"
     )
+    barbican_credentials_name = appliance_resource_name(
+        appliance_name, "barbican-credentials"
+    )
     pod_spec = {
         "imagePullSecrets": [{"name": BOOTSTRAP_IMAGE_PULL_SECRET_NAME}],
         "restartPolicy": "Never",
@@ -4819,6 +5501,11 @@ def build_common_bootstrap_job(
                     {
                         "name": "coriolis-credentials",
                         "mountPath": BOOTSTRAP_CORIOLIS_CREDENTIALS_DIR,
+                        "readOnly": True,
+                    },
+                    {
+                        "name": "barbican-credentials",
+                        "mountPath": BOOTSTRAP_BARBICAN_CREDENTIALS_DIR,
                         "readOnly": True,
                     },
                     {"name": "tmp", "mountPath": "/tmp"},
@@ -4882,6 +5569,19 @@ def build_common_bootstrap_job(
                             "path": "coriolis-database-password",
                             "mode": 0o440,
                         },
+                    ],
+                },
+            },
+            {
+                "name": "barbican-credentials",
+                "secret": {
+                    "secretName": barbican_credentials_name,
+                    "items": [
+                        {
+                            "key": "barbican_keystone_password",
+                            "path": "barbican-keystone-password",
+                            "mode": 0o440,
+                        }
                     ],
                 },
             },
@@ -5077,6 +5777,7 @@ def preflight_common_bootstrap_resources(
     resource_name = appliance_resource_name(appliance_name, BOOTSTRAP_COMPONENT)
     script = render_bootstrap_script(
         coriolis_api_host=appliance_resource_name(appliance_name, "coriolis-api"),
+        barbican_host=appliance_resource_name(appliance_name, "barbican-api"),
         rabbitmq_host=appliance_resource_name(appliance_name, "rabbitmq"),
         memcached_host=appliance_resource_name(appliance_name, "memcached"),
         database_host=appliance_resource_name(appliance_name, "mariadb"),

@@ -57,6 +57,7 @@ from coriolis_operator.reconcile import (
     build_api_deployment,
     build_api_ingress,
     build_api_service,
+    build_barbican_ingress,
     build_common_bootstrap_config_map,
     build_common_bootstrap_job,
     build_conductor_deployment,
@@ -88,6 +89,7 @@ from coriolis_operator.reconcile import (
     invalid_runtime_configuration_conditions,
     kubernetes_coriolis_render_inputs,
     logging_readiness_condition,
+    preflight_barbican_resources,
     preflight_foundational_resources,
     preflight_keystone_resources,
     preflight_mariadb_resources,
@@ -431,6 +433,55 @@ def _mark_workload_ready(body: dict) -> dict:
     return body
 
 
+def ready_barbican(appliance_name: str = "example") -> dict[tuple[str, str], dict]:
+    """Return Barbican API Service and API/worker Deployments as converged objects."""
+    preflight = preflight_barbican_resources(
+        appliance_name=appliance_name,
+        namespace="operators",
+        accepted_version="2603.4",
+        owner=dict(OWNER, name=appliance_name, uid="abc-123"),
+        retention="state-credentials",
+        database_host=appliance_resource_name(appliance_name, "mariadb"),
+        rabbitmq_host=appliance_resource_name(appliance_name, "rabbitmq"),
+        keystone_host=appliance_resource_name(appliance_name, "keystone"),
+        barbican_host=appliance_resource_name(appliance_name, "barbican-api"),
+        rabbitmq_password="rabbitmq synthetic",
+        barbican_credentials_secret=None,
+        barbican_config_map=None,
+        barbican_config_secret=None,
+        barbican_api_service=None,
+        barbican_api_deployment=None,
+        barbican_worker_deployment=None,
+        password_factory=lambda _: "synthetic-credential",
+        byte_factory=lambda _: b"k" * 32,
+    )
+    wanted = {
+        ("Service", appliance_resource_name(appliance_name, "barbican-api")),
+        ("Deployment", appliance_resource_name(appliance_name, "barbican-api")),
+        ("Deployment", appliance_resource_name(appliance_name, "barbican-worker")),
+    }
+    bodies: dict[tuple[str, str], dict] = {}
+    for body in preflight.manifests:
+        key = (body["kind"], body["metadata"]["name"])
+        if key not in wanted:
+            continue
+        body = copy.deepcopy(body)
+        body["metadata"]["resourceVersion"] = "1"
+        if key[0] == "Deployment":
+            _mark_workload_ready(body)
+        bodies[key] = body
+    return bodies
+
+
+BARBICAN_READY_KEYS: frozenset[tuple[str, str]] = frozenset(
+    {
+        ("Service", "example-barbican-api"),
+        ("Deployment", "example-barbican-api"),
+        ("Deployment", "example-barbican-worker"),
+    }
+)
+
+
 def ready_logging(appliance_name: str = "example") -> dict[tuple[str, str], dict]:
     """Return every logging resource as an existing, converged managed object."""
     preflight = preflight_logging_resources(
@@ -467,12 +518,14 @@ def ready_logging(appliance_name: str = "example") -> dict[tuple[str, str], dict
     )
     keystone_deployment["metadata"]["resourceVersion"] = "1"
     bodies[("Deployment", keystone_name)] = keystone_deployment
+    bodies.update(ready_barbican(appliance_name))
     return bodies
 
 
 def _bootstrap_script(appliance_name: str = "example") -> str:
     return render_bootstrap_script(
         coriolis_api_host=appliance_resource_name(appliance_name, "coriolis-api"),
+        barbican_host=appliance_resource_name(appliance_name, "barbican-api"),
         rabbitmq_host=appliance_resource_name(appliance_name, "rabbitmq"),
         memcached_host=appliance_resource_name(appliance_name, "memcached"),
         database_host=appliance_resource_name(appliance_name, "mariadb"),
@@ -688,6 +741,7 @@ def mariadb_bodies() -> dict[str, dict]:
             database_password="database synthetic",
             coriolis_database_password="db synthetic",
             keystone_database_password="keystone synthetic",
+            barbican_database_password="barbican synthetic",
         ),
         owner=OWNER,
         mariadb_data_pvc=None,
@@ -742,6 +796,13 @@ def ingress_bodies() -> dict[str, dict]:
             owner=OWNER,
             settings=settings,
         ),
+        build_barbican_ingress(
+            appliance_name="example",
+            namespace="operators",
+            accepted_version="2603.4",
+            owner=OWNER,
+            settings=settings,
+        ),
     )
     return {body["metadata"]["name"]: copy.deepcopy(body) for body in manifests}
 
@@ -770,6 +831,45 @@ def keystone_bodies(appliance_name: str = "example") -> dict[str, dict]:
     return {
         body["metadata"]["name"]: copy.deepcopy(body) for body in preflight.manifests
     }
+
+
+BARBICAN_RESOURCE_NAMES = (
+    "example-barbican-credentials",
+    "example-barbican-config",
+    "example-barbican-config-secret",
+    "example-barbican-api",
+    "example-barbican-worker",
+)
+
+
+def barbican_bodies(appliance_name: str = "example") -> dict[str, dict]:
+    preflight = preflight_barbican_resources(
+        appliance_name=appliance_name,
+        namespace="operators",
+        accepted_version="2603.4",
+        owner=dict(OWNER, name=appliance_name, uid="abc-123"),
+        retention="state-credentials",
+        database_host=appliance_resource_name(appliance_name, "mariadb"),
+        rabbitmq_host=appliance_resource_name(appliance_name, "rabbitmq"),
+        keystone_host=appliance_resource_name(appliance_name, "keystone"),
+        barbican_host=appliance_resource_name(appliance_name, "barbican-api"),
+        rabbitmq_password="rabbitmq synthetic",
+        barbican_credentials_secret=None,
+        barbican_config_map=None,
+        barbican_config_secret=None,
+        barbican_api_service=None,
+        barbican_api_deployment=None,
+        barbican_worker_deployment=None,
+        password_factory=lambda _: "synthetic-credential",
+        byte_factory=lambda _: b"k" * 32,
+    )
+    bodies: dict[str, dict] = {}
+    for body in preflight.manifests:
+        name = body["metadata"]["name"]
+        if name == "example-barbican-api" and name in bodies:
+            continue
+        bodies[name] = copy.deepcopy(body)
+    return bodies
 
 
 def test_keystone_prepare_init_does_not_chmod_mount_roots_and_keeps_0600_files() -> (
@@ -885,7 +985,11 @@ def _hermetic_default_clients(monkeypatch: pytest.MonkeyPatch) -> None:
 
 
 def _wrap_ready_logging_read(
-    api: MagicMock, attr: str, kind: str, appliance_name: str = "example"
+    api: MagicMock,
+    attr: str,
+    kind: str,
+    appliance_name: str = "example",
+    exclude_keys: frozenset[tuple[str, str]] = frozenset(),
 ) -> None:
     method = getattr(api, attr)
     base = method.side_effect
@@ -902,7 +1006,8 @@ def _wrap_ready_logging_read(
     )
 
     def wrapped(*, name: str, namespace: str) -> object:
-        if (kind, name) in ready_logging(appliance_name):
+        key = (kind, name)
+        if key in ready_logging(appliance_name) and key not in exclude_keys:
             return ready_logging(appliance_name)[(kind, name)]
         if ordered is not None:
             try:
@@ -921,7 +1026,11 @@ def _wrap_ready_logging_read(
     method.side_effect = wrapped
 
 
-def install_ready_logging(*apis: MagicMock, appliance_name: str = "example") -> None:
+def install_ready_logging(
+    *apis: MagicMock,
+    appliance_name: str = "example",
+    exclude_keys: frozenset[tuple[str, str]] = frozenset(),
+) -> None:
     """Wrap read side effects so logging reads return converged ready objects."""
     core_kinds = (
         ("read_namespaced_config_map", "ConfigMap"),
@@ -941,7 +1050,7 @@ def install_ready_logging(*apis: MagicMock, appliance_name: str = "example") -> 
     )
     for api in apis:
         for attr, kind in core_kinds + apps_kinds + networking_kinds + rbac_kinds:
-            _wrap_ready_logging_read(api, attr, kind, appliance_name)
+            _wrap_ready_logging_read(api, attr, kind, appliance_name, exclude_keys)
 
 
 def install_logging_present(
@@ -1994,7 +2103,7 @@ def test_reconcile_appliance_server_side_applies_state_and_returns_status() -> N
     )
     assert status["observedGeneration"] == 7
     assert status["acceptedVersion"] == "2603.4"
-    assert len(networking_api.create_namespaced_ingress.call_args_list) == 3
+    assert len(networking_api.create_namespaced_ingress.call_args_list) == 4
     created_credentials = [
         call.kwargs["body"]
         for call in core_api.create_namespaced_secret.call_args_list
@@ -3419,6 +3528,8 @@ def test_foundational_gate_reuses_retained_secrets_without_writing_them() -> Non
         "example-keystone-credential-keys",
         "example-mariadb-config-secret",
         "example-keystone-config-secret",
+        "example-barbican-credentials",
+        "example-barbican-config-secret",
     ]
     assert patched_secret_names == ["example-gateway-config"]
     config_secret = next(
@@ -3460,7 +3571,7 @@ def test_foundational_gate_collision_has_no_writes_after_complete_reads() -> Non
 
     status = reconcile_appliance(spec=valid_spec(), meta=sample_meta(), core_api=api)
 
-    assert api.read_namespaced_secret.call_count == 10
+    assert api.read_namespaced_secret.call_count == 12
     assert api.create_namespaced_secret.call_count == 0
     assert api.create_namespaced_config_map.call_count == 0
     assert {item["reason"] for item in status["conditions"]} >= {"ResourceCollision"}
@@ -3545,7 +3656,7 @@ def test_apply_conflict_keeps_prior_writes_and_preserves_accepted_version() -> N
             core_api=api,
         )
 
-    assert api.create_namespaced_secret.call_count == 8
+    assert api.create_namespaced_secret.call_count == 10
     assert excinfo.value.status["acceptedVersion"] == "2603.4"
     assert excinfo.value.status["conditions"][2]["reason"] == "MarkerApplyFailed"
     assert "rendered-secret-must-not-leak" not in repr(excinfo.value.status)
@@ -3876,6 +3987,7 @@ def test_dependency_services_read_and_create_in_order() -> None:
         for component, _ in DEPENDENCY_SERVICES
     ] + [
         "example-coriolis-api",
+        "example-barbican-api",
         "example-coriolis-web",
         "example-gateway",
         "example-adaptor",
@@ -3888,6 +4000,9 @@ def test_dependency_services_read_and_create_in_order() -> None:
         appliance_resource_name("example", component)
         for component, _ in DEPENDENCY_SERVICES
     ] + ["example-coriolis-api", "example-coriolis-web"]
+    assert [
+        call.kwargs["name"] for call in api.patch_namespaced_service.call_args_list
+    ] == ["example-gateway", "example-barbican-api", "example-adaptor"]
     assert api.method_calls[-1] == call.create_namespaced_config_map(
         namespace="operators", body=ANY
     )
@@ -3926,9 +4041,13 @@ def test_managed_dependency_services_use_guarded_ssa_and_restore_content_type() 
     assert patched_names == ["example-gateway"] + [
         appliance_resource_name("example", component)
         for component, _ in DEPENDENCY_SERVICES
-    ] + ["example-adaptor"]
+    ] + ["example-barbican-api", "example-adaptor"]
     for service_call in api.patch_namespaced_service.call_args_list:
-        if service_call.kwargs["name"] in ("example-gateway", "example-adaptor"):
+        if service_call.kwargs["name"] in (
+            "example-gateway",
+            "example-adaptor",
+            "example-barbican-api",
+        ):
             continue
         assert service_call.kwargs["body"]["metadata"]["resourceVersion"] == "17"
         assert service_call.kwargs["field_manager"] == "coriolis-operator"
@@ -3954,7 +4073,7 @@ def test_dependency_service_collision_has_no_writes_after_all_service_reads() ->
         core_api=api,
     )
 
-    assert api.read_namespaced_service.call_count == len(DEPENDENCY_SERVICES) + 4
+    assert api.read_namespaced_service.call_count == len(DEPENDENCY_SERVICES) + 5
     assert status["conditions"][2]["reason"] == "ResourceCollision"
     assert "operators/example-rabbitmq" in status["conditions"][2]["message"]
     assert not [
@@ -4138,10 +4257,17 @@ def test_mariadb_reads_and_writes_follow_the_frozen_cross_api_order() -> None:
     networking_api = make_networking_api()
     events: list[tuple[str, str, str]] = []
 
+    barbican_ready = ready_barbican()
+    absent_read_kinds = {"service": "Service", "deployment": "Deployment"}
+
     def absent_read(resource: str):
+        kind = absent_read_kinds.get(resource)
+
         def read(*, name: str, namespace: str) -> object:
             assert namespace == "operators"
             events.append(("read", resource, name))
+            if kind is not None and (kind, name) in BARBICAN_READY_KEYS:
+                return copy.deepcopy(barbican_ready[(kind, name)])
             raise _api_exception(404)
 
         return read
@@ -4153,6 +4279,18 @@ def test_mariadb_reads_and_writes_follow_the_frozen_cross_api_order() -> None:
 
         return create
 
+    def successful_barbican_patch(resource: str):
+        def patch(*, name: str, namespace: str, **_: object) -> None:
+            assert namespace == "operators"
+            if (resource, name) in {
+                ("service", "example-barbican-api"),
+                ("deployment", "example-barbican-api"),
+                ("deployment", "example-barbican-worker"),
+            }:
+                events.append(("write", resource, name))
+
+        return patch
+
     core_api.read_namespaced_config_map.side_effect = absent_read("configmap")
     core_api.read_namespaced_secret.side_effect = absent_read("secret")
     core_api.read_namespaced_service.side_effect = absent_read("service")
@@ -4160,10 +4298,12 @@ def test_mariadb_reads_and_writes_follow_the_frozen_cross_api_order() -> None:
     apps_api.read_namespaced_stateful_set.side_effect = absent_read("statefulset")
     apps_api.read_namespaced_deployment.side_effect = absent_read("deployment")
     networking_api.read_namespaced_ingress.side_effect = absent_read("ingress")
-    install_ready_logging(core_api, apps_api, networking_api)
+    install_ready_logging(
+        core_api, apps_api, networking_api, exclude_keys=BARBICAN_READY_KEYS
+    )
 
     def succeeded_job_read(*, name: str, namespace: str) -> dict:
-        assert name == "example-common-bootstrap-v2"
+        assert name == "example-common-bootstrap-v3"
         assert namespace == "operators"
         events.append(("read", "job", name))
         return succeeded_bootstrap_job()
@@ -4180,6 +4320,10 @@ def test_mariadb_reads_and_writes_follow_the_frozen_cross_api_order() -> None:
     )
     apps_api.create_namespaced_deployment.side_effect = successful_create("deployment")
     networking_api.create_namespaced_ingress.side_effect = successful_create("ingress")
+    core_api.patch_namespaced_service.side_effect = successful_barbican_patch("service")
+    apps_api.patch_namespaced_deployment.side_effect = successful_barbican_patch(
+        "deployment"
+    )
 
     status = reconcile_appliance(
         spec=valid_spec(),
@@ -4214,6 +4358,12 @@ def test_mariadb_reads_and_writes_follow_the_frozen_cross_api_order() -> None:
         ("read", "secret", "example-keystone-credential-keys"),
         ("read", "configmap", "example-keystone-config"),
         ("read", "secret", "example-keystone-config-secret"),
+        ("read", "secret", "example-barbican-credentials"),
+        ("read", "configmap", "example-barbican-config"),
+        ("read", "secret", "example-barbican-config-secret"),
+        ("read", "service", "example-barbican-api"),
+        ("read", "deployment", "example-barbican-api"),
+        ("read", "deployment", "example-barbican-worker"),
         ("read", "deployment", "example-coriolis-api"),
         ("read", "deployment", "example-coriolis-conductor"),
         ("read", "deployment", "example-coriolis-scheduler"),
@@ -4221,13 +4371,14 @@ def test_mariadb_reads_and_writes_follow_the_frozen_cross_api_order() -> None:
         ("read", "deployment", "example-coriolis-minion-manager"),
         ("read", "deployment", "example-coriolis-deployer-manager"),
         ("read", "deployment", "example-coriolis-worker"),
-        ("read", "configmap", "example-common-bootstrap-v2"),
-        ("read", "job", "example-common-bootstrap-v2"),
+        ("read", "configmap", "example-common-bootstrap-v3"),
+        ("read", "job", "example-common-bootstrap-v3"),
         ("read", "service", "example-coriolis-web"),
         ("read", "deployment", "example-coriolis-web"),
         ("read", "ingress", "example-coriolis-web"),
         ("read", "ingress", "example-keystone"),
         ("read", "ingress", "example-coriolis-api"),
+        ("read", "ingress", "example-barbican-api"),
     ]
     assert [event for event in events if event[0] == "write"] == [
         ("write", "secret", "example-coriolis-credentials"),
@@ -4251,7 +4402,13 @@ def test_mariadb_reads_and_writes_follow_the_frozen_cross_api_order() -> None:
         ("write", "deployment", "example-memcached"),
         ("write", "configmap", "example-keystone-config"),
         ("write", "secret", "example-keystone-config-secret"),
-        ("write", "configmap", "example-common-bootstrap-v2"),
+        ("write", "secret", "example-barbican-credentials"),
+        ("write", "configmap", "example-barbican-config"),
+        ("write", "secret", "example-barbican-config-secret"),
+        ("write", "service", "example-barbican-api"),
+        ("write", "deployment", "example-barbican-api"),
+        ("write", "deployment", "example-barbican-worker"),
+        ("write", "configmap", "example-common-bootstrap-v3"),
         ("write", "deployment", "example-coriolis-conductor"),
         ("write", "deployment", "example-coriolis-scheduler"),
         ("write", "deployment", "example-coriolis-transfer-cron"),
@@ -4265,6 +4422,7 @@ def test_mariadb_reads_and_writes_follow_the_frozen_cross_api_order() -> None:
         ("write", "ingress", "example-coriolis-web"),
         ("write", "ingress", "example-keystone"),
         ("write", "ingress", "example-coriolis-api"),
+        ("write", "ingress", "example-barbican-api"),
         ("write", "configmap", "example-operator-state"),
     ]
     first_write = next(
@@ -4278,7 +4436,12 @@ def test_mariadb_reads_and_writes_follow_the_frozen_cross_api_order() -> None:
 
 @pytest.mark.parametrize(
     "resource_name",
-    ["example-coriolis-web", "example-keystone", "example-coriolis-api"],
+    [
+        "example-coriolis-web",
+        "example-keystone",
+        "example-coriolis-api",
+        "example-barbican-api",
+    ],
 )
 def test_ingress_collision_at_each_name_is_mutation_free(resource_name: str) -> None:
     core_api = make_core_api()
@@ -4307,7 +4470,12 @@ def test_ingress_collision_at_each_name_is_mutation_free(resource_name: str) -> 
 
 @pytest.mark.parametrize(
     "resource_name",
-    ["example-coriolis-web", "example-keystone", "example-coriolis-api"],
+    [
+        "example-coriolis-web",
+        "example-keystone",
+        "example-coriolis-api",
+        "example-barbican-api",
+    ],
 )
 def test_managed_ingress_uses_guarded_ssa(resource_name: str) -> None:
     existing = ingress_bodies()[resource_name]
@@ -4350,10 +4518,111 @@ def test_missing_ingresses_are_created_in_frozen_order_before_marker() -> None:
     assert [
         call.kwargs["body"]["metadata"]["name"]
         for call in networking_api.create_namespaced_ingress.call_args_list
-    ] == ["example-coriolis-web", "example-keystone", "example-coriolis-api"]
+    ] == [
+        "example-coriolis-web",
+        "example-keystone",
+        "example-coriolis-api",
+        "example-barbican-api",
+    ]
     assert core_api.method_calls[-1] == call.create_namespaced_config_map(
         namespace="operators", body=ANY
     )
+
+
+@pytest.mark.parametrize(
+    "case",
+    [
+        "service-absent",
+        "api-deployment-unready",
+        "worker-deployment-unready",
+        "ready",
+    ],
+)
+def test_barbican_ingress_and_marker_wait_for_barbican_readiness(
+    case: str,
+) -> None:
+    core_api = make_core_api()
+    apps_api = make_apps_api()
+    networking_api = make_networking_api()
+    barbican = ready_barbican()
+    if case == "service-absent":
+        base_service_read = core_api.read_namespaced_service.side_effect
+
+        def read_service(*, name: str, namespace: str) -> object:
+            if name == "example-barbican-api":
+                raise _api_exception(404)
+            assert callable(base_service_read)
+            return base_service_read(name=name, namespace=namespace)
+
+        core_api.read_namespaced_service.side_effect = read_service
+    elif case in ("api-deployment-unready", "worker-deployment-unready"):
+        component = (
+            "example-barbican-api"
+            if case == "api-deployment-unready"
+            else "example-barbican-worker"
+        )
+        base_deployment_read = apps_api.read_namespaced_deployment.side_effect
+
+        def read_deployment(*, name: str, namespace: str) -> object:
+            if name == component:
+                unready = copy.deepcopy(barbican[("Deployment", component)])
+                del unready["status"]
+                return unready
+            assert callable(base_deployment_read)
+            return base_deployment_read(name=name, namespace=namespace)
+
+        apps_api.read_namespaced_deployment.side_effect = read_deployment
+
+    if case == "ready":
+        status = reconcile_appliance(
+            spec=valid_spec(),
+            meta=sample_meta(),
+            core_api=core_api,
+            apps_api=apps_api,
+            networking_api=networking_api,
+        )
+        assert status["conditions"][2]["reason"] == "Reconciled"
+        assert [
+            call.kwargs["body"]["metadata"]["name"]
+            for call in networking_api.create_namespaced_ingress.call_args_list
+        ] == [
+            "example-coriolis-web",
+            "example-keystone",
+            "example-coriolis-api",
+            "example-barbican-api",
+        ]
+        assert core_api.method_calls[-1] == call.create_namespaced_config_map(
+            namespace="operators", body=ANY
+        )
+        return
+
+    with pytest.raises(main.ReconcileRetry) as excinfo:
+        reconcile_appliance(
+            spec=valid_spec(),
+            meta=sample_meta(),
+            core_api=core_api,
+            apps_api=apps_api,
+            networking_api=networking_api,
+        )
+
+    assert excinfo.value.status["conditions"][2]["reason"] == "ResourceApplyFailed"
+    assert [
+        call.kwargs["body"]["metadata"]["name"]
+        for call in networking_api.create_namespaced_ingress.call_args_list
+    ] == [
+        "example-coriolis-web",
+        "example-keystone",
+        "example-coriolis-api",
+    ]
+    assert networking_api.patch_namespaced_ingress.call_args_list == []
+    config_map_writes = [
+        call.kwargs["body"]["metadata"]["name"]
+        for call in (
+            core_api.create_namespaced_config_map.call_args_list
+            + core_api.patch_namespaced_config_map.call_args_list
+        )
+    ]
+    assert "example-operator-state" not in config_map_writes
 
 
 def test_managed_ingress_without_resource_version_retries_before_writes() -> None:
@@ -5198,19 +5467,25 @@ def test_keystone_reads_all_resources_before_the_first_write() -> None:
     core_api = make_core_api()
     apps_api = make_apps_api()
     reads: list[str] = []
+    barbican_ready = ready_barbican()
 
-    def absent(*, name: str, namespace: str) -> object:
-        assert namespace == "operators"
-        reads.append(name)
-        raise _api_exception(404)
+    def absent(kind: str | None = None):
+        def read(*, name: str, namespace: str) -> object:
+            assert namespace == "operators"
+            reads.append(name)
+            if kind is not None and (kind, name) in BARBICAN_READY_KEYS:
+                return copy.deepcopy(barbican_ready[(kind, name)])
+            raise _api_exception(404)
 
-    core_api.read_namespaced_config_map.side_effect = absent
-    core_api.read_namespaced_secret.side_effect = absent
-    core_api.read_namespaced_service.side_effect = absent
-    core_api.read_namespaced_persistent_volume_claim.side_effect = absent
-    apps_api.read_namespaced_stateful_set.side_effect = absent
-    apps_api.read_namespaced_deployment.side_effect = absent
-    install_ready_logging(core_api, apps_api)
+        return read
+
+    core_api.read_namespaced_config_map.side_effect = absent()
+    core_api.read_namespaced_secret.side_effect = absent()
+    core_api.read_namespaced_service.side_effect = absent("Service")
+    core_api.read_namespaced_persistent_volume_claim.side_effect = absent()
+    apps_api.read_namespaced_stateful_set.side_effect = absent()
+    apps_api.read_namespaced_deployment.side_effect = absent("Deployment")
+    install_ready_logging(core_api, apps_api, exclude_keys=BARBICAN_READY_KEYS)
 
     reconcile_appliance(
         spec=valid_spec(), meta=sample_meta(), core_api=core_api, apps_api=apps_api
@@ -5240,6 +5515,12 @@ def test_keystone_reads_all_resources_before_the_first_write() -> None:
         "example-keystone-credential-keys",
         "example-keystone-config",
         "example-keystone-config-secret",
+        "example-barbican-credentials",
+        "example-barbican-config",
+        "example-barbican-config-secret",
+        "example-barbican-api",
+        "example-barbican-api",
+        "example-barbican-worker",
         "example-coriolis-api",
         "example-coriolis-conductor",
         "example-coriolis-scheduler",
@@ -5247,12 +5528,18 @@ def test_keystone_reads_all_resources_before_the_first_write() -> None:
         "example-coriolis-minion-manager",
         "example-coriolis-deployer-manager",
         "example-coriolis-worker",
-        "example-common-bootstrap-v2",
+        "example-common-bootstrap-v3",
         "example-coriolis-web",
         "example-coriolis-web",
     ]
     assert reads.index("example-keystone-database-credentials") > reads.index(
         "example-rabbitmq"
+    )
+    assert reads.count("example-barbican-api") == 2
+    assert (
+        reads.index("example-barbican-credentials")
+        < reads.index("example-barbican-worker")
+        < reads.index("example-common-bootstrap-v3")
     )
 
 
@@ -5383,7 +5670,10 @@ def test_keystone_retained_creation_precedes_mariadb_and_marker_is_last() -> Non
         "example-memcached",
         "example-keystone-config",
         "example-keystone-config-secret",
-        "example-common-bootstrap-v2",
+        "example-barbican-credentials",
+        "example-barbican-config",
+        "example-barbican-config-secret",
+        "example-common-bootstrap-v3",
         "example-coriolis-conductor",
         "example-coriolis-scheduler",
         "example-coriolis-transfer-cron",
@@ -5430,6 +5720,133 @@ def test_keystone_retained_reuse_performs_no_retained_secret_writes() -> None:
         for call in core_api.create_namespaced_secret.call_args_list
         if call.kwargs["body"]["metadata"]["name"] in retained_names
     }
+
+
+@pytest.mark.parametrize("resource_name", BARBICAN_RESOURCE_NAMES)
+def test_barbican_collision_at_each_position_is_mutation_free(
+    resource_name: str,
+) -> None:
+    core_api = make_core_api()
+    apps_api = make_apps_api()
+    existing = barbican_bodies()
+    existing[resource_name]["metadata"]["labels"]["app.kubernetes.io/managed-by"] = (
+        "other"
+    )
+    configure_keystone_existing(
+        core_api, apps_api, {resource_name: existing[resource_name]}
+    )
+
+    status = reconcile_appliance(
+        spec=valid_spec(), meta=sample_meta(), core_api=core_api, apps_api=apps_api
+    )
+
+    assert status["conditions"][2]["reason"] == "ResourceCollision"
+    assert f"operators/{resource_name}" in status["conditions"][2]["message"]
+    assert api_writes(core_api) == []
+    assert api_writes(apps_api) == []
+
+
+def _barbican_api_bodies_by_kind(appliance_name: str = "example") -> dict[str, dict]:
+    preflight = preflight_barbican_resources(
+        appliance_name=appliance_name,
+        namespace="operators",
+        accepted_version="2603.4",
+        owner=dict(OWNER, name=appliance_name, uid="abc-123"),
+        retention="state-credentials",
+        database_host=appliance_resource_name(appliance_name, "mariadb"),
+        rabbitmq_host=appliance_resource_name(appliance_name, "rabbitmq"),
+        keystone_host=appliance_resource_name(appliance_name, "keystone"),
+        barbican_host=appliance_resource_name(appliance_name, "barbican-api"),
+        rabbitmq_password="rabbitmq synthetic",
+        barbican_credentials_secret=None,
+        barbican_config_map=None,
+        barbican_config_secret=None,
+        barbican_api_service=None,
+        barbican_api_deployment=None,
+        barbican_worker_deployment=None,
+        password_factory=lambda _: "synthetic-credential",
+        byte_factory=lambda _: b"k" * 32,
+    )
+    return {
+        body["kind"]: copy.deepcopy(body)
+        for body in preflight.manifests
+        if body["metadata"]["name"]
+        == appliance_resource_name(appliance_name, "barbican-api")
+    }
+
+
+@pytest.mark.parametrize(
+    ("managed_kind", "read_attr", "api_name"),
+    [
+        ("Service", "read_namespaced_service", "core"),
+        ("Deployment", "read_namespaced_deployment", "apps"),
+    ],
+)
+def test_managed_barbican_api_without_resource_version_retries_before_writes(
+    managed_kind: str, read_attr: str, api_name: str
+) -> None:
+    core_api = make_core_api()
+    apps_api = make_apps_api()
+    body = _barbican_api_bodies_by_kind()[managed_kind]
+    assert "resourceVersion" not in body["metadata"]
+
+    def read_target(*, name: str, namespace: str) -> object:
+        assert namespace == "operators"
+        if name == "example-barbican-api":
+            return body
+        raise _api_exception(404)
+
+    target_api = core_api if api_name == "core" else apps_api
+    configure_keystone_existing(core_api, apps_api, {})
+    setattr(target_api, read_attr, MagicMock(side_effect=read_target))
+
+    with pytest.raises(main.ReconcileRetry) as excinfo:
+        reconcile_appliance(
+            spec=valid_spec(), meta=sample_meta(), core_api=core_api, apps_api=apps_api
+        )
+
+    assert excinfo.value.status["conditions"][2]["reason"] == "ResourceApplyFailed"
+    assert api_writes(core_api) == []
+    assert api_writes(apps_api) == []
+    core_api.create_namespaced_secret.assert_not_called()
+    core_api.create_namespaced_config_map.assert_not_called()
+    core_api.create_namespaced_service.assert_not_called()
+    core_api.patch_namespaced_secret.assert_not_called()
+    core_api.patch_namespaced_config_map.assert_not_called()
+    apps_api.create_namespaced_deployment.assert_not_called()
+    apps_api.patch_namespaced_deployment.assert_not_called()
+
+
+def test_barbican_retained_credentials_reuse_skips_write_and_marker_is_last() -> None:
+    core_api = make_core_api()
+    apps_api = make_apps_api()
+    existing = barbican_bodies()
+    configure_keystone_existing(
+        core_api,
+        apps_api,
+        {"example-barbican-credentials": existing["example-barbican-credentials"]},
+    )
+    install_ready_logging(core_api, apps_api)
+
+    reconcile_appliance(
+        spec=valid_spec(), meta=sample_meta(), core_api=core_api, apps_api=apps_api
+    )
+
+    created_secret_names = [
+        call.kwargs["body"]["metadata"]["name"]
+        for call in core_api.create_namespaced_secret.call_args_list
+    ]
+    patched_secret_names = [
+        call.kwargs["name"] for call in core_api.patch_namespaced_secret.call_args_list
+    ]
+    assert "example-barbican-credentials" not in created_secret_names
+    assert "example-barbican-credentials" not in patched_secret_names
+    assert "example-barbican-config-secret" in created_secret_names
+    created_names = [
+        call.kwargs["body"]["metadata"]["name"]
+        for call in core_api.create_namespaced_config_map.call_args_list
+    ]
+    assert created_names[-1] == "example-operator-state"
 
 
 @pytest.mark.parametrize(
@@ -6352,6 +6769,7 @@ def _ready_runtime_observer_apis(
         *[component for component, _ in DEPENDENCY_SERVICES],
         "coriolis-api",
         "coriolis-web",
+        "barbican-api",
     )
     stateful_set_components = ("mariadb", "rabbitmq")
     deployment_components = (
@@ -6365,6 +6783,8 @@ def _ready_runtime_observer_apis(
         "coriolis-worker",
         "coriolis-api",
         "coriolis-web",
+        "barbican-api",
+        "barbican-worker",
     )
     ingress: dict[str, object] = {}
     if logging_ready:
@@ -6451,6 +6871,69 @@ def test_runtime_observer_reports_starting_without_health_for_missing_resource(
     core_api.read_namespaced_secret.assert_not_called()
 
 
+@pytest.mark.parametrize(
+    "component",
+    ["barbican-api", "barbican-worker"],
+)
+def test_runtime_observer_reports_starting_when_barbican_deployment_missing(
+    monkeypatch: pytest.MonkeyPatch, component: str
+) -> None:
+    core_api, apps_api, batch_api, networking_api = _ready_runtime_observer_apis()
+    missing = appliance_resource_name("example", component)
+    delegate = apps_api.read_namespaced_deployment.side_effect
+
+    def read_deployment(*, name: str, namespace: str) -> object:
+        if name == missing:
+            raise _api_exception(404)
+        return delegate(name=name, namespace=namespace)
+
+    apps_api.read_namespaced_deployment.side_effect = read_deployment
+    health_checks = MagicMock(return_value=True)
+    monkeypatch.setattr(main, "_runtime_health_checks", health_checks)
+
+    observed = main.observe_runtime_readiness(
+        meta=sample_meta(),
+        status=_runtime_observer_status(),
+        core_api=core_api,
+        apps_api=apps_api,
+        batch_api=batch_api,
+        networking_api=networking_api,
+    )
+
+    assert _readiness_state(observed) == "RuntimeStarting"
+    health_checks.assert_not_called()
+    core_api.read_namespaced_secret.assert_not_called()
+
+
+def test_runtime_observer_reports_starting_when_barbican_service_missing(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    core_api, apps_api, batch_api, networking_api = _ready_runtime_observer_apis()
+    delegate = core_api.read_namespaced_service.side_effect
+
+    def read_service(*, name: str, namespace: str) -> object:
+        if name == appliance_resource_name("example", "barbican-api"):
+            raise _api_exception(404)
+        return delegate(name=name, namespace=namespace)
+
+    core_api.read_namespaced_service.side_effect = read_service
+    health_checks = MagicMock(return_value=True)
+    monkeypatch.setattr(main, "_runtime_health_checks", health_checks)
+
+    observed = main.observe_runtime_readiness(
+        meta=sample_meta(),
+        status=_runtime_observer_status(),
+        core_api=core_api,
+        apps_api=apps_api,
+        batch_api=batch_api,
+        networking_api=networking_api,
+    )
+
+    assert _readiness_state(observed) == "RuntimeStarting"
+    health_checks.assert_not_called()
+    core_api.read_namespaced_secret.assert_not_called()
+
+
 def test_runtime_observer_reports_observation_failure_for_read_or_secret_failure(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -6518,7 +7001,7 @@ def test_runtime_observer_reports_health_failure_and_ready(
             assert [call_info[0] for call_info in core_api.method_calls] == [
                 "read_namespaced_persistent_volume_claim",
                 "read_namespaced_persistent_volume_claim",
-                *("read_namespaced_service",) * 6,
+                *("read_namespaced_service",) * 7,
                 "read_namespaced_secret",
                 "read_namespaced_persistent_volume_claim",
                 "read_namespaced_service",
@@ -6526,7 +7009,7 @@ def test_runtime_observer_reports_health_failure_and_ready(
             ]
             assert [call_info[0] for call_info in apps_api.method_calls] == [
                 *("read_namespaced_stateful_set",) * 2,
-                *("read_namespaced_deployment",) * 10,
+                *("read_namespaced_deployment",) * 12,
                 "read_namespaced_stateful_set",
                 "read_namespaced_deployment",
                 "read_namespaced_deployment",
@@ -6770,7 +7253,7 @@ def test_bootstrap_config_map_and_job_exact_contract() -> None:
 
     assert config_map["apiVersion"] == "v1"
     assert config_map["kind"] == "ConfigMap"
-    assert config_map["metadata"]["name"] == "example-common-bootstrap-v2"
+    assert config_map["metadata"]["name"] == "example-common-bootstrap-v3"
     assert config_map["metadata"]["namespace"] == "operators"
     assert config_map["metadata"]["ownerReferences"] == [dict(OWNER, controller=True)]
     assert config_map["immutable"] is True
@@ -6779,7 +7262,7 @@ def test_bootstrap_config_map_and_job_exact_contract() -> None:
 
     assert job["apiVersion"] == "batch/v1"
     assert job["kind"] == "Job"
-    assert job["metadata"]["name"] == "example-common-bootstrap-v2"
+    assert job["metadata"]["name"] == "example-common-bootstrap-v3"
     assert job["metadata"]["namespace"] == "operators"
     assert job["metadata"]["ownerReferences"] == [dict(OWNER, controller=True)]
     assert BOOTSTRAP_SCRIPT_ANNOTATION in job["metadata"]["annotations"]
@@ -6814,7 +7297,7 @@ def test_bootstrap_config_map_and_job_exact_contract() -> None:
 
     assert len(pod["containers"]) == 1
     container = pod["containers"][0]
-    assert container["name"] == "common-bootstrap-v2"
+    assert container["name"] == "common-bootstrap-v3"
     assert container["image"] == CONDUCTOR_IMAGE
     assert container["command"] == ["python3", "/etc/coriolis-bootstrap/bootstrap.py"]
     assert "args" not in container
@@ -6838,9 +7321,10 @@ def test_bootstrap_config_map_and_job_exact_contract() -> None:
         "config",
         "infra-credentials",
         "coriolis-credentials",
+        "barbican-credentials",
     }
     assert volumes["tmp"] == {"name": "tmp", "emptyDir": {}}
-    assert volumes["script"]["configMap"]["name"] == "example-common-bootstrap-v2"
+    assert volumes["script"]["configMap"]["name"] == "example-common-bootstrap-v3"
     assert volumes["script"]["configMap"]["items"] == [
         {"key": "bootstrap.py", "path": "bootstrap.py", "mode": 0o444}
     ]
@@ -6876,6 +7360,17 @@ def test_bootstrap_config_map_and_job_exact_contract() -> None:
             "mode": 0o440,
         },
     ]
+    assert (
+        volumes["barbican-credentials"]["secret"]["secretName"]
+        == "example-barbican-credentials"
+    )
+    assert volumes["barbican-credentials"]["secret"]["items"] == [
+        {
+            "key": "barbican_keystone_password",
+            "path": "barbican-keystone-password",
+            "mode": 0o440,
+        }
+    ]
 
     mounts = {mount["name"]: mount for mount in container["volumeMounts"]}
     assert mounts["script"]["mountPath"] == "/etc/coriolis-bootstrap"
@@ -6888,17 +7383,27 @@ def test_bootstrap_config_map_and_job_exact_contract() -> None:
         "/etc/coriolis-bootstrap-coriolis"
     )
     assert mounts["coriolis-credentials"]["readOnly"] is True
+    assert mounts["barbican-credentials"]["mountPath"] == (
+        "/etc/coriolis-bootstrap-barbican"
+    )
+    assert mounts["barbican-credentials"]["readOnly"] is True
     assert mounts["tmp"]["mountPath"] == "/tmp"
     assert "readOnly" not in mounts["tmp"]
 
     mount_paths = [mount["mountPath"] for mount in container["volumeMounts"]]
-    assert len(set(mount_paths)) == 5
-    assert len(mount_paths) == 5
+    assert len(set(mount_paths)) == 6
+    assert len(mount_paths) == 6
     for path in mount_paths:
         assert not any(
             path != other and other.startswith(path + "/") for other in mount_paths
         ), f"nested mount path: {path}"
-    for name in ("script", "config", "infra-credentials", "coriolis-credentials"):
+    for name in (
+        "script",
+        "config",
+        "infra-credentials",
+        "coriolis-credentials",
+        "barbican-credentials",
+    ):
         assert mounts[name]["readOnly"] is True
 
 
@@ -6918,7 +7423,7 @@ def test_bootstrap_absent_creates_job_and_raises_running_before_marker() -> None
         item.kwargs["body"]["metadata"]["name"]
         for item in core_api.create_namespaced_config_map.call_args_list
     ]
-    assert bootstrap_names[-1] == "example-common-bootstrap-v2"
+    assert bootstrap_names[-1] == "example-common-bootstrap-v3"
     batch_api.create_namespaced_job.assert_called_once_with(
         namespace="operators", body=ANY
     )
@@ -8226,6 +8731,7 @@ def test_bootstrap_config_map_collision_has_zero_writes() -> None:
         _api_exception(404),
         _api_exception(404),
         _api_exception(404),
+        _api_exception(404),
         collided,
     ]
     install_ready_logging(core_api)
@@ -8239,7 +8745,7 @@ def test_bootstrap_config_map_collision_has_zero_writes() -> None:
     )
 
     assert status["conditions"][2]["reason"] == "ResourceCollision"
-    assert "operators/example-common-bootstrap-v2" in status["conditions"][2]["message"]
+    assert "operators/example-common-bootstrap-v3" in status["conditions"][2]["message"]
     assert api_writes(core_api) == []
     batch_api.create_namespaced_job.assert_not_called()
 
@@ -8314,6 +8820,26 @@ JOB_DRIFT_MUTATORS = [
         ),
     ),
     (
+        "barbican-mount-missing",
+        lambda b: b["spec"]["template"]["spec"]["containers"][0].update(
+            volumeMounts=[
+                mount
+                for mount in b["spec"]["template"]["spec"]["containers"][0][
+                    "volumeMounts"
+                ]
+                if mount["name"] != "barbican-credentials"
+            ]
+        ),
+    ),
+    (
+        "barbican-volume-item",
+        lambda b: next(
+            volume
+            for volume in b["spec"]["template"]["spec"]["volumes"]
+            if volume["name"] == "barbican-credentials"
+        )["secret"]["items"][0].update(key="other_password"),
+    ),
+    (
         "volume-source",
         lambda b: b["spec"]["template"]["spec"]["volumes"][1]["configMap"].update(
             name="other-config"
@@ -8357,7 +8883,7 @@ def test_bootstrap_job_drift_is_collision_with_no_writes(mutate) -> None:
     )
 
     assert status["conditions"][2]["reason"] == "ResourceCollision"
-    assert "operators/example-common-bootstrap-v2" in status["conditions"][2]["message"]
+    assert "operators/example-common-bootstrap-v3" in status["conditions"][2]["message"]
     assert api_writes(core_api) == []
     batch_api.create_namespaced_job.assert_not_called()
     batch_api.patch_namespaced_job.assert_not_called()
@@ -8384,6 +8910,7 @@ def test_bootstrap_job_identity_collision_is_mutation_free() -> None:
 def test_bootstrap_job_script_change_is_collision_without_writes() -> None:
     different_script = render_bootstrap_script(
         coriolis_api_host="example-coriolis-api",
+        barbican_host="example-barbican-api",
         rabbitmq_host="different-rabbitmq",
         memcached_host="example-memcached",
         database_host="example-mariadb",
@@ -8422,6 +8949,7 @@ def test_bootstrap_config_map_immutable_drift_is_collision_with_no_writes() -> N
         _api_exception(404),
         _api_exception(404),
         _api_exception(404),
+        _api_exception(404),
         collided,
     ]
     install_ready_logging(core_api)
@@ -8432,7 +8960,7 @@ def test_bootstrap_config_map_immutable_drift_is_collision_with_no_writes() -> N
     )
 
     assert status["conditions"][2]["reason"] == "ResourceCollision"
-    assert "operators/example-common-bootstrap-v2" in status["conditions"][2]["message"]
+    assert "operators/example-common-bootstrap-v3" in status["conditions"][2]["message"]
     assert api_writes(core_api) == []
     batch_api.create_namespaced_job.assert_not_called()
 
@@ -8442,6 +8970,7 @@ def test_bootstrap_config_map_data_drift_is_collision_with_no_writes() -> None:
     collided = bootstrap_config_map_body()
     collided["data"] = {"bootstrap.py": "corrupted script"}
     core_api.read_namespaced_config_map.side_effect = [
+        _api_exception(404),
         _api_exception(404),
         _api_exception(404),
         _api_exception(404),
@@ -8471,6 +9000,7 @@ def test_bootstrap_config_map_managed_reuse_is_no_write() -> None:
         _api_exception(404),
         _api_exception(404),
         _api_exception(404),
+        _api_exception(404),
         existing,
     ]
     install_ready_logging(core_api)
@@ -8484,12 +9014,12 @@ def test_bootstrap_config_map_managed_reuse_is_no_write() -> None:
         item.kwargs["body"]["metadata"]["name"]
         for item in core_api.create_namespaced_config_map.call_args_list
     ]
-    assert "example-common-bootstrap-v2" not in created_names
+    assert "example-common-bootstrap-v3" not in created_names
     patched_names = [
         item.kwargs["name"]
         for item in core_api.patch_namespaced_config_map.call_args_list
     ]
-    assert "example-common-bootstrap-v2" not in patched_names
+    assert "example-common-bootstrap-v3" not in patched_names
     assert created_names[-1] == "example-operator-state"
     statuses = {item["type"]: item for item in status["conditions"]}
     assert statuses["Reconciled"]["status"] == "True"
@@ -8507,7 +9037,7 @@ def test_bootstrap_config_map_is_never_patched() -> None:
         item.kwargs["name"]
         for item in core_api.patch_namespaced_config_map.call_args_list
     ]
-    assert "example-common-bootstrap-v2" not in patched_names
+    assert "example-common-bootstrap-v3" not in patched_names
 
 
 def test_bootstrap_non_404_read_error_requests_sanitized_retry() -> None:
@@ -8956,6 +9486,7 @@ def test_logging_adaptor_ingress_is_gated_until_adaptor_ready() -> None:
         )
     }
     present[("Deployment", "example-keystone")] = ready_keystone_deployment()
+    present.update({key: ready[key] for key in BARBICAN_READY_KEYS})
     install_logging_present(core_api, apps_api, networking_api, rbac_api, present)
 
     with pytest.raises(main.ReconcileRetry):

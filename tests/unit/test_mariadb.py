@@ -6,6 +6,8 @@ from pathlib import Path
 import pytest
 
 from coriolis_operator.mariadb import (
+    MARIADB_BOOTSTRAP_SCHEMA_ANNOTATION,
+    MARIADB_BOOTSTRAP_SCHEMA_VALUE,
     MARIADB_CONFIG_KEYS,
     MARIADB_IMAGE,
     MARIADB_SECRET_CONFIG_KEYS,
@@ -27,6 +29,13 @@ def _valid_settings() -> tuple[dict[str, object], dict[str, object]]:
             }
         },
     )
+
+
+def test_bootstrap_schema_marker_is_barbican_v1() -> None:
+    assert MARIADB_BOOTSTRAP_SCHEMA_ANNOTATION == (
+        "coriolis.cloudbase.it/mariadb-bootstrap-schema"
+    )
+    assert MARIADB_BOOTSTRAP_SCHEMA_VALUE == "barbican-v1"
 
 
 def test_resolve_mariadb_settings_validates_quantities_without_mutating_input() -> None:
@@ -96,6 +105,7 @@ def test_rendered_mariadb_values_are_exactly_partitioned_and_follow_contract() -
         database_password="ADMIN_SENTINEL",
         coriolis_database_password="CORIOLIS_SENTINEL",
         keystone_database_password="KEYSTONE_SENTINEL",
+        barbican_database_password="BARBICAN_SENTINEL",
     )
     sensitive = render_sensitive_mariadb_config(credentials=credentials)
 
@@ -126,11 +136,43 @@ def test_rendered_mariadb_values_are_exactly_partitioned_and_follow_contract() -
     assert 'set +e\n    wait "$mariadb_pid"\n    exit $?' in start_script
     assert "ADMIN_SENTINEL" not in "".join(non_sensitive.values())
     assert "CORIOLIS_SENTINEL" not in "".join(non_sensitive.values())
+    assert "KEYSTONE_SENTINEL" not in "".join(non_sensitive.values())
+    assert "BARBICAN_SENTINEL" not in "".join(non_sensitive.values())
     assert "ADMIN_SENTINEL" not in repr(credentials)
+    assert "KEYSTONE_SENTINEL" not in repr(credentials)
+    assert "BARBICAN_SENTINEL" not in repr(credentials)
     assert "ADMIN_SENTINEL" not in repr(sensitive)
+    assert "BARBICAN_SENTINEL" not in repr(sensitive)
     assert str(sensitive) == "SensitiveMariaDBConfig(<redacted>)"
+    bootstrap = sensitive["bootstrap.sql"]
+    for service in ("coriolis", "keystone", "barbican"):
+        assert (
+            f"CREATE DATABASE IF NOT EXISTS {service} CHARACTER SET utf8mb4 "
+            f"COLLATE utf8mb4_unicode_ci;\n" in bootstrap
+        )
+        assert f"CREATE USER IF NOT EXISTS '{service}'@'%' IDENTIFIED BY '" in bootstrap
+        assert f"ALTER USER '{service}'@'%' IDENTIFIED BY '" in bootstrap
+        assert f"GRANT ALL PRIVILEGES ON {service}.* TO '{service}'@'%';\n" in bootstrap
+    assert bootstrap.startswith("ALTER USER 'root'@'localhost' IDENTIFIED BY '")
+    positions = [
+        bootstrap.index("CREATE DATABASE IF NOT EXISTS coriolis"),
+        bootstrap.index("CREATE DATABASE IF NOT EXISTS keystone"),
+        bootstrap.index("CREATE DATABASE IF NOT EXISTS barbican"),
+        bootstrap.index("FLUSH PRIVILEGES;\n"),
+    ]
+    assert positions == sorted(positions)
+    assert len(positions) == len(set(positions))
+    assert bootstrap.endswith("FLUSH PRIVILEGES;\n")
+    assert "database_password" not in bootstrap
+    assert bootstrap.count("ADMIN_SENTINEL") == 1
+    assert bootstrap.count("CORIOLIS_SENTINEL") == 2
+    assert bootstrap.count("KEYSTONE_SENTINEL") == 2
+    assert bootstrap.count("BARBICAN_SENTINEL") == 2
+    assert "'barbican'@'%' IDENTIFIED BY 'BARBICAN_SENTINEL';\n" in bootstrap
     with pytest.raises(FrozenInstanceError):
         credentials.database_password = "replacement"  # type: ignore[misc]
+    with pytest.raises(FrozenInstanceError):
+        credentials.barbican_database_password = "replacement"  # type: ignore[misc]
 
 
 def test_start_script_recovers_marker_states_behaviorally(tmp_path: Path) -> None:
@@ -316,11 +358,14 @@ def test_sensitive_rendering_escapes_credentials_and_redacts_errors() -> None:
         database_password="admin\\\"'",
         coriolis_database_password="coriolis\\'",
         keystone_database_password="keystone\\'",
+        barbican_database_password="barbican\\'",
     )
     values = render_sensitive_mariadb_config(credentials=credentials)
 
     assert values["admin.cnf"].splitlines()[2] == 'password="admin\\\\\\"\'"'
     assert "IDENTIFIED BY 'admin\\\\\"\\'';" in values["bootstrap.sql"]
+    assert "IDENTIFIED BY 'barbican\\\\\\'';" in values["bootstrap.sql"]
+    assert "'barbican'@'%'" in values["bootstrap.sql"]
     with pytest.raises(
         ValueError, match="^invalid sensitive MariaDB configuration input$"
     ):
@@ -333,6 +378,7 @@ def test_sensitive_rendering_escapes_credentials_and_redacts_errors() -> None:
                 database_password="",
                 coriolis_database_password="secret",
                 keystone_database_password="secret",
+                barbican_database_password="secret",
             )
         )
     assert "admin" not in repr(SensitiveMariaDBConfig({"x": "secret"}))
@@ -350,6 +396,20 @@ def test_sensitive_rendering_rejects_control_characters_without_value_leaks(
                 database_password=sentinel,
                 coriolis_database_password="safe-password",
                 keystone_database_password="safe-password",
+                barbican_database_password="safe-password",
+            )
+        )
+
+    assert str(error.value) == "invalid sensitive MariaDB configuration input"
+    assert sentinel not in str(error.value)
+
+    with pytest.raises(ValueError) as error:
+        render_sensitive_mariadb_config(
+            credentials=SensitiveMariaDBCredentials(
+                database_password="safe-password",
+                coriolis_database_password="safe-password",
+                keystone_database_password="safe-password",
+                barbican_database_password=sentinel,
             )
         )
 

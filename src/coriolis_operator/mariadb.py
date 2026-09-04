@@ -21,7 +21,7 @@ MARIADB_PVC_RETENTION_ANNOTATION = "coriolis.cloudbase.it/retention"
 MARIADB_PVC_RETENTION_VALUE = "mariadb-data"
 MARIADB_TERMINATION_GRACE_PERIOD_SECONDS = 30
 MARIADB_BOOTSTRAP_SCHEMA_ANNOTATION = "coriolis.cloudbase.it/mariadb-bootstrap-schema"
-MARIADB_BOOTSTRAP_SCHEMA_VALUE = "keystone-v1"
+MARIADB_BOOTSTRAP_SCHEMA_VALUE = "barbican-v1"
 MARIADB_DATA_DIR = "/var/lib/mysql"
 MARIADB_RUNTIME_DIR = "/run/mysqld"
 MARIADB_SOCKET_PATH = f"{MARIADB_RUNTIME_DIR}/mariadb.sock"
@@ -98,6 +98,7 @@ class SensitiveMariaDBCredentials:
     database_password: str = field(repr=False)
     coriolis_database_password: str = field(repr=False)
     keystone_database_password: str = field(repr=False)
+    barbican_database_password: str = field(repr=False)
 
 
 class SensitiveMariaDBConfig(Mapping[str, str]):
@@ -316,6 +317,9 @@ def render_sensitive_mariadb_config(
     keystone_database_password = _validated_credential(
         credentials.keystone_database_password
     )
+    barbican_database_password = _validated_credential(
+        credentials.barbican_database_password
+    )
     try:
         return SensitiveMariaDBConfig(
             {
@@ -346,6 +350,13 @@ def render_sensitive_mariadb_config(
                     "ALTER USER 'keystone'@'%' IDENTIFIED BY '"
                     f"{_escape_sql_string(keystone_database_password)}';\n"
                     "GRANT ALL PRIVILEGES ON keystone.* TO 'keystone'@'%';\n"
+                    "CREATE DATABASE IF NOT EXISTS barbican CHARACTER SET utf8mb4 "
+                    "COLLATE utf8mb4_unicode_ci;\n"
+                    "CREATE USER IF NOT EXISTS 'barbican'@'%' IDENTIFIED BY '"
+                    f"{_escape_sql_string(barbican_database_password)}';\n"
+                    "ALTER USER 'barbican'@'%' IDENTIFIED BY '"
+                    f"{_escape_sql_string(barbican_database_password)}';\n"
+                    "GRANT ALL PRIVILEGES ON barbican.* TO 'barbican'@'%';\n"
                     "FLUSH PRIVILEGES;\n"
                 ),
             }

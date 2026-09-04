@@ -15,7 +15,7 @@ CONDUCTOR_IMAGE = (
     "@sha256:27495f44fbb8b320098d0aa04cd9dcb2a4b432e57aa17417606efc5403ac09c7"
 )
 BOOTSTRAP_IMAGE_PULL_SECRET_NAME = "coriolis-appliance-registry"
-BOOTSTRAP_REVISION = "v2"
+BOOTSTRAP_REVISION = "v3"
 BOOTSTRAP_UID_GID = 42434
 BOOTSTRAP_COMPONENT = f"common-bootstrap-{BOOTSTRAP_REVISION}"
 BOOTSTRAP_BACKOFF_LIMIT = 2
@@ -30,6 +30,7 @@ BOOTSTRAP_SCRIPT_FILENAME = "bootstrap.py"
 BOOTSTRAP_SCRIPT_PATH = f"{BOOTSTRAP_SCRIPT_DIR}/{BOOTSTRAP_SCRIPT_FILENAME}"
 BOOTSTRAP_INFRA_CREDENTIALS_DIR = "/etc/coriolis-bootstrap-infra"
 BOOTSTRAP_CORIOLIS_CREDENTIALS_DIR = "/etc/coriolis-bootstrap-coriolis"
+BOOTSTRAP_BARBICAN_CREDENTIALS_DIR = "/etc/coriolis-bootstrap-barbican"
 BOOTSTRAP_KEYSTONE_ADMIN_PASSWORD_PATH = (
     f"{BOOTSTRAP_INFRA_CREDENTIALS_DIR}/keystone-admin-password"
 )
@@ -42,12 +43,16 @@ BOOTSTRAP_CORIOLIS_KEYSTONE_PASSWORD_PATH = (
 BOOTSTRAP_CORIOLIS_DATABASE_PASSWORD_PATH = (
     f"{BOOTSTRAP_CORIOLIS_CREDENTIALS_DIR}/coriolis-database-password"
 )
+BOOTSTRAP_BARBICAN_KEYSTONE_PASSWORD_PATH = (
+    f"{BOOTSTRAP_BARBICAN_CREDENTIALS_DIR}/barbican-keystone-password"
+)
 BOOTSTRAP_TEMPLATE_ANNOTATION = "coriolis.cloudbase.it/bootstrap-template-id"
 BOOTSTRAP_SCRIPT_ANNOTATION = "coriolis.cloudbase.it/bootstrap-script-id"
 
 _INVALID_HOST_MESSAGE = "invalid Coriolis-common bootstrap input"
 _DNS_LABEL_RE = re.compile(r"[a-z0-9](?:[-a-z0-9]*[a-z0-9])?")
 _API_HOST_PLACEHOLDER = "__CORIOLIS_API_HOST__"
+_BARBICAN_HOST_PLACEHOLDER = "__BARBICAN_HOST__"
 _RABBITMQ_HOST_PLACEHOLDER = "__RABBITMQ_HOST__"
 _MEMCACHED_HOST_PLACEHOLDER = "__MEMCACHED_HOST__"
 _DATABASE_HOST_PLACEHOLDER = "__DATABASE_HOST__"
@@ -56,6 +61,7 @@ _ADMIN_PASSWORD_PLACEHOLDER = "__KEYSTONE_ADMIN_PASSWORD_PATH__"
 _RABBITMQ_PASSWORD_PLACEHOLDER = "__RABBITMQ_PASSWORD_PATH__"
 _CORIOLIS_PASSWORD_PLACEHOLDER = "__CORIOLIS_KEYSTONE_PASSWORD_PATH__"
 _DATABASE_PASSWORD_PLACEHOLDER = "__CORIOLIS_DATABASE_PASSWORD_PATH__"
+_BARBICAN_PASSWORD_PLACEHOLDER = "__BARBICAN_KEYSTONE_PASSWORD_PATH__"
 _DBSYNC_TIMEOUT_PLACEHOLDER = "__DBSYNC_TIMEOUT_SECONDS__"
 
 
@@ -81,7 +87,9 @@ KEYSTONE_ADMIN_PASSWORD_PATH = '__KEYSTONE_ADMIN_PASSWORD_PATH__'
 RABBITMQ_PASSWORD_PATH = '__RABBITMQ_PASSWORD_PATH__'
 CORIOLIS_KEYSTONE_PASSWORD_PATH = '__CORIOLIS_KEYSTONE_PASSWORD_PATH__'
 CORIOLIS_DATABASE_PASSWORD_PATH = '__CORIOLIS_DATABASE_PASSWORD_PATH__'
+BARBICAN_KEYSTONE_PASSWORD_PATH = '__BARBICAN_KEYSTONE_PASSWORD_PATH__'
 ENDPOINT_URL = 'http://__CORIOLIS_API_HOST__:7667/v1/%(tenant_id)s'
+BARBICAN_ENDPOINT_URL = 'http://__BARBICAN_HOST__:9311'
 KEYSTONE_AUTH_URL = 'http://' + KEYSTONE_HOST + ':5000/v3'
 DEPENDENCY_DEADLINE_SECONDS = 300
 DEPENDENCY_SLEEP_SECONDS = 2
@@ -212,50 +220,71 @@ def bootstrap_keystone(kc):
             return existing
         return kc.projects.create(name=name, domain=default_domain.id)
 
+    def ensure_service_user(name, password_path, service_project):
+        password = Path(password_path).read_text().strip()
+        existing = unique([u for u in kc.users.list(domain=default_domain.id)
+            if u.name == name])
+        if existing is None:
+            return kc.users.create(
+                name=name, password=password, domain=default_domain.id,
+                enabled=True, default_project=service_project.id,
+            )
+        kc.users.update(existing.id, password=password, enabled=True,
+            default_project=service_project.id)
+        return kc.users.get(existing.id)
+
+    def ensure_admin(user, service_project, admin_role):
+        assigned = [g for g in kc.role_assignments.list(user=user.id,
+            project=service_project.id) if g.role['id'] == admin_role.id]
+        if not assigned:
+            kc.roles.grant(role=admin_role.id, user=user.id,
+                project=service_project.id)
+
+    def ensure_service(name, service_type, description):
+        existing = unique([s for s in kc.services.list() if s.name == name])
+        if existing is None:
+            return kc.services.create(name=name, type=service_type,
+                description=description)
+        kc.services.update(existing.id, name=name, type=service_type,
+            description=description)
+        return kc.services.get(existing.id)
+
+    def ensure_endpoints(service, url):
+        by_interface = {}
+        for endpoint in kc.endpoints.list(service=service.id):
+            by_interface.setdefault(endpoint.interface, []).append(endpoint)
+        for interface in ('admin', 'internal', 'public'):
+            existing = unique(by_interface.get(interface, []))
+            if existing is None:
+                kc.endpoints.create(service=service.id, interface=interface,
+                    url=url, region='RegionOne')
+            else:
+                kc.endpoints.update(existing.id, service=service.id,
+                    interface=interface, url=url, region='RegionOne')
+
     service_project = ensure_project('service')
 
-    coriolis_password = Path(CORIOLIS_KEYSTONE_PASSWORD_PATH).read_text().strip()
-    existing_user = unique([u for u in kc.users.list(domain=default_domain.id)
-        if u.name == 'coriolis'])
-    if existing_user is None:
-        coriolis_user = kc.users.create(
-            name='coriolis', password=coriolis_password, domain=default_domain.id,
-            enabled=True, default_project=service_project.id,
-        )
-    else:
-        kc.users.update(existing_user.id, password=coriolis_password, enabled=True,
-            default_project=service_project.id)
-        coriolis_user = kc.users.get(existing_user.id)
+    coriolis_user = ensure_service_user('coriolis',
+        CORIOLIS_KEYSTONE_PASSWORD_PATH, service_project)
+    barbican_user = ensure_service_user('barbican',
+        BARBICAN_KEYSTONE_PASSWORD_PATH, service_project)
 
     admin_role = next((r for r in kc.roles.list() if r.name == 'admin'), None)
     if admin_role is None:
         fail('coriolis-bootstrap-failed')
-    assigned = [g for g in kc.role_assignments.list(user=coriolis_user.id,
-        project=service_project.id) if g.role['id'] == admin_role.id]
-    if not assigned:
-        kc.roles.grant(role=admin_role.id, user=coriolis_user.id,
-            project=service_project.id)
+    ensure_admin(coriolis_user, service_project, admin_role)
+    ensure_admin(barbican_user, service_project, admin_role)
 
-    service = unique([s for s in kc.services.list() if s.name == 'coriolis'])
-    if service is None:
-        migration_service = kc.services.create(name='coriolis', type='migration',
-            description='Cloud Migration as a Service')
-    else:
-        kc.services.update(service.id, name='coriolis', type='migration',
-            description='Cloud Migration as a Service')
-        migration_service = kc.services.get(service.id)
+    for role_name in ('key-manager:service-admin', 'creator', 'observer', 'audit'):
+        if unique([r for r in kc.roles.list() if r.name == role_name]) is None:
+            kc.roles.create(name=role_name)
 
-    by_interface = {}
-    for endpoint in kc.endpoints.list(service=migration_service.id):
-        by_interface.setdefault(endpoint.interface, []).append(endpoint)
-    for interface in ('admin', 'internal', 'public'):
-        existing = unique(by_interface.get(interface, []))
-        if existing is None:
-            kc.endpoints.create(service=migration_service.id, interface=interface,
-                url=ENDPOINT_URL, region='RegionOne')
-        else:
-            kc.endpoints.update(existing.id, service=migration_service.id,
-                interface=interface, url=ENDPOINT_URL, region='RegionOne')
+    migration_service = ensure_service('coriolis', 'migration',
+        'Cloud Migration as a Service')
+    key_manager_service = ensure_service('barbican', 'key-manager',
+        'Barbican Key Management Service')
+    ensure_endpoints(migration_service, ENDPOINT_URL)
+    ensure_endpoints(key_manager_service, BARBICAN_ENDPOINT_URL)
 
 
 def verify_keystone(kc):
@@ -269,12 +298,19 @@ def verify_keystone(kc):
     if len(users) != 1 or not users[0].enabled:
         fail('coriolis-bootstrap-failed')
     coriolis_user = users[0]
+    users = [u for u in kc.users.list(domain=default_domain.id)
+        if u.name == 'barbican']
+    if len(users) != 1 or not users[0].enabled:
+        fail('coriolis-bootstrap-failed')
+    barbican_user = users[0]
     projects = [p for p in kc.projects.list(domain=default_domain.id)
         if p.name == 'service']
     if len(projects) != 1:
         fail('coriolis-bootstrap-failed')
     service_project = projects[0]
     if coriolis_user.default_project_id != service_project.id:
+        fail('coriolis-bootstrap-failed')
+    if barbican_user.default_project_id != service_project.id:
         fail('coriolis-bootstrap-failed')
     admin_role = next((r for r in kc.roles.list() if r.name == 'admin'), None)
     if admin_role is None:
@@ -283,6 +319,13 @@ def verify_keystone(kc):
         project=service_project.id)
     if not any(g.role['id'] == admin_role.id for g in assignments):
         fail('coriolis-bootstrap-failed')
+    assignments = kc.role_assignments.list(user=barbican_user.id,
+        project=service_project.id)
+    if not any(g.role['id'] == admin_role.id for g in assignments):
+        fail('coriolis-bootstrap-failed')
+    for role_name in ('key-manager:service-admin', 'creator', 'observer', 'audit'):
+        if len([r for r in kc.roles.list() if r.name == role_name]) != 1:
+            fail('coriolis-bootstrap-failed')
 
     coriolis_password = Path(CORIOLIS_KEYSTONE_PASSWORD_PATH).read_text().strip()
     coriolis_auth = v3.Password(
@@ -296,6 +339,20 @@ def verify_keystone(kc):
     session = ks_session.Session(auth=coriolis_auth, timeout=10)
     coriolis_token = coriolis_auth.get_token(session)
     if not coriolis_token:
+        fail('coriolis-bootstrap-failed')
+
+    barbican_password = Path(BARBICAN_KEYSTONE_PASSWORD_PATH).read_text().strip()
+    barbican_auth = v3.Password(
+        auth_url=KEYSTONE_AUTH_URL,
+        username='barbican',
+        password=barbican_password,
+        project_name='service',
+        user_domain_name='Default',
+        project_domain_name='Default',
+    )
+    session = ks_session.Session(auth=barbican_auth, timeout=10)
+    barbican_token = barbican_auth.get_token(session)
+    if not barbican_token:
         fail('coriolis-bootstrap-failed')
 
     services = [s for s in kc.services.list() if s.name == 'coriolis']
@@ -319,6 +376,29 @@ def verify_keystone(kc):
         if endpoint.region != 'RegionOne':
             fail('coriolis-bootstrap-failed')
         if endpoint.url != ENDPOINT_URL:
+            fail('coriolis-bootstrap-failed')
+
+    services = [s for s in kc.services.list() if s.name == 'barbican']
+    if len(services) != 1:
+        fail('coriolis-bootstrap-failed')
+    key_manager_service = services[0]
+    if key_manager_service.type != 'key-manager':
+        fail('coriolis-bootstrap-failed')
+    if key_manager_service.description != 'Barbican Key Management Service':
+        fail('coriolis-bootstrap-failed')
+
+    by_interface = {}
+    for endpoint in kc.endpoints.list(service=key_manager_service.id):
+        by_interface.setdefault(endpoint.interface, []).append(endpoint)
+    if set(by_interface) != {'admin', 'internal', 'public'}:
+        fail('coriolis-bootstrap-failed')
+    for interface, endpoints in by_interface.items():
+        if len(endpoints) != 1:
+            fail('coriolis-bootstrap-failed')
+        endpoint = endpoints[0]
+        if endpoint.region != 'RegionOne':
+            fail('coriolis-bootstrap-failed')
+        if endpoint.url != BARBICAN_ENDPOINT_URL:
             fail('coriolis-bootstrap-failed')
 
 
@@ -345,6 +425,7 @@ except Exception:
 def render_bootstrap_script(
     *,
     coriolis_api_host: object,
+    barbican_host: object,
     rabbitmq_host: object,
     memcached_host: object,
     database_host: object,
@@ -355,6 +436,7 @@ def render_bootstrap_script(
         _BOOTSTRAP_SCRIPT_TEMPLATE.replace(
             _API_HOST_PLACEHOLDER, _validated_host(coriolis_api_host)
         )
+        .replace(_BARBICAN_HOST_PLACEHOLDER, _validated_host(barbican_host))
         .replace(_RABBITMQ_HOST_PLACEHOLDER, _validated_host(rabbitmq_host))
         .replace(_MEMCACHED_HOST_PLACEHOLDER, _validated_host(memcached_host))
         .replace(_DATABASE_HOST_PLACEHOLDER, _validated_host(database_host))
@@ -367,6 +449,9 @@ def render_bootstrap_script(
         .replace(
             _DATABASE_PASSWORD_PLACEHOLDER,
             BOOTSTRAP_CORIOLIS_DATABASE_PASSWORD_PATH,
+        )
+        .replace(
+            _BARBICAN_PASSWORD_PLACEHOLDER, BOOTSTRAP_BARBICAN_KEYSTONE_PASSWORD_PATH
         )
         .replace(_DBSYNC_TIMEOUT_PLACEHOLDER, str(BOOTSTRAP_DBSYNC_TIMEOUT_SECONDS))
     )

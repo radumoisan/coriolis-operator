@@ -8,6 +8,7 @@ from coriolis_operator.reconcile import (
     IngressResourcePreflight,
     OwnedClassification,
     build_api_ingress,
+    build_barbican_ingress,
     build_keystone_ingress,
     build_web_ingress,
     preflight_ingress_resources,
@@ -41,6 +42,7 @@ def test_ingress_manifests_have_the_frozen_logical_origin_contract() -> None:
     web = build_web_ingress(**kwargs())
     keystone = build_keystone_ingress(**kwargs())
     api = build_api_ingress(**kwargs())
+    barbican = build_barbican_ingress(**kwargs())
 
     shared_spec = {
         "ingressClassName": "nginx-public",
@@ -62,13 +64,18 @@ def test_ingress_manifests_have_the_frozen_logical_origin_contract() -> None:
         "nginx.ingress.kubernetes.io/cors-max-age": "1000",
     }
 
-    assert [manifest["metadata"]["name"] for manifest in (web, keystone, api)] == [
+    assert [
+        manifest["metadata"]["name"] for manifest in (web, keystone, api, barbican)
+    ] == [
         "example-coriolis-web",
         "example-keystone",
         "example-coriolis-api",
+        "example-barbican-api",
     ]
     for manifest, component in zip(
-        (web, keystone, api), ("coriolis-web", "keystone", "coriolis-api"), strict=True
+        (web, keystone, api, barbican),
+        ("coriolis-web", "keystone", "coriolis-api", "barbican-api"),
+        strict=True,
     ):
         assert manifest["apiVersion"] == "networking.k8s.io/v1"
         assert manifest["kind"] == "Ingress"
@@ -128,6 +135,7 @@ def test_ingress_manifests_have_the_frozen_logical_origin_contract() -> None:
     for manifest, path, service_name, port, rewrite_target in (
         (keystone, "/identity(/|$)(.*)", "example-keystone", 5000, "/v3/$2"),
         (api, "/coriolis(/|$)(.*)", "example-coriolis-api", 7667, "/v1/$2"),
+        (barbican, "/barbican(/|$)(.*)", "example-barbican-api", 9311, "/$2"),
     ):
         assert manifest["metadata"]["annotations"] == {
             "coriolis.cloudbase.it/appliance-name": "example",
@@ -167,6 +175,7 @@ def test_ingress_manifests_use_existing_tls_secret_without_cert_manager() -> Non
         build_web_ingress(**dict(kwargs(), settings=settings)),
         build_keystone_ingress(**dict(kwargs(), settings=settings)),
         build_api_ingress(**dict(kwargs(), settings=settings)),
+        build_barbican_ingress(**dict(kwargs(), settings=settings)),
     )
 
     assert ingress == before
@@ -190,6 +199,7 @@ def test_ingress_preflight_is_ordered_guarded_and_does_not_mutate_inputs() -> No
         web_ingress=None,
         keystone_ingress=None,
         api_ingress=None,
+        barbican_ingress=None,
     )
 
     assert arguments == kwargs()
@@ -197,17 +207,21 @@ def test_ingress_preflight_is_ordered_guarded_and_does_not_mutate_inputs() -> No
         OwnedClassification.ABSENT,
         OwnedClassification.ABSENT,
         OwnedClassification.ABSENT,
+        OwnedClassification.ABSENT,
         (
             build_web_ingress(**kwargs()),
             build_keystone_ingress(**kwargs()),
             build_api_ingress(**kwargs()),
+            build_barbican_ingress(**kwargs()),
         ),
     )
     with pytest.raises(FrozenInstanceError):
         absent.web_classification = OwnedClassification.MANAGED  # type: ignore[misc]
 
     existing = copy.deepcopy(absent.manifests)
-    for resource, resource_version in zip(existing, ("11", "12", "13"), strict=True):
+    for resource, resource_version in zip(
+        existing, ("11", "12", "13", "14"), strict=True
+    ):
         resource["metadata"]["resourceVersion"] = resource_version
     before_existing = copy.deepcopy(existing)
     managed = preflight_ingress_resources(
@@ -215,18 +229,20 @@ def test_ingress_preflight_is_ordered_guarded_and_does_not_mutate_inputs() -> No
         web_ingress=existing[0],
         keystone_ingress=existing[1],
         api_ingress=existing[2],
+        barbican_ingress=existing[3],
     )
 
     assert existing == before_existing
     assert managed.web_classification is OwnedClassification.MANAGED
     assert managed.keystone_classification is OwnedClassification.MANAGED
     assert managed.api_classification is OwnedClassification.MANAGED
+    assert managed.barbican_classification is OwnedClassification.MANAGED
     assert [
         manifest["metadata"]["resourceVersion"] for manifest in managed.manifests
-    ] == ["11", "12", "13"]
+    ] == ["11", "12", "13", "14"]
 
 
-@pytest.mark.parametrize("collision_index", [0, 1, 2])
+@pytest.mark.parametrize("collision_index", [0, 1, 2, 3])
 def test_ingress_preflight_is_all_or_nothing_on_any_collision(
     collision_index: int,
 ) -> None:
@@ -234,6 +250,7 @@ def test_ingress_preflight_is_all_or_nothing_on_any_collision(
         build_web_ingress(**kwargs()),
         build_keystone_ingress(**kwargs()),
         build_api_ingress(**kwargs()),
+        build_barbican_ingress(**kwargs()),
     ]
     manifests[collision_index]["metadata"]["labels"][
         "coriolis.cloudbase.it/component"
@@ -245,6 +262,7 @@ def test_ingress_preflight_is_all_or_nothing_on_any_collision(
         web_ingress=manifests[0],
         keystone_ingress=manifests[1],
         api_ingress=manifests[2],
+        barbican_ingress=manifests[3],
     )
 
     assert manifests == before
@@ -252,6 +270,7 @@ def test_ingress_preflight_is_all_or_nothing_on_any_collision(
         result.web_classification,
         result.keystone_classification,
         result.api_classification,
+        result.barbican_classification,
     )
     assert result.manifests == ()
 
@@ -267,4 +286,5 @@ def test_ingress_preflight_rejects_a_managed_ingress_without_resource_version() 
             web_ingress=web,
             keystone_ingress=None,
             api_ingress=None,
+            barbican_ingress=None,
         )

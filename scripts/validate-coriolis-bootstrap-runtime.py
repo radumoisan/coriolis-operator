@@ -793,6 +793,7 @@ def create_evidence_files(
         root_password = secrets.token_urlsafe(32)
         coriolis_password = secrets.token_urlsafe(32)
         keystone_password = secrets.token_urlsafe(32)
+        barbican_password = secrets.token_urlsafe(32)
         admin_password = secrets.token_urlsafe(32)
         coriolis_keystone_password = secrets.token_urlsafe(32)
         rabbitmq_password = secrets.token_urlsafe(32)
@@ -804,6 +805,7 @@ def create_evidence_files(
             database_password=root_password,
             coriolis_database_password=coriolis_password,
             keystone_database_password=keystone_password,
+            barbican_database_password=barbican_password,
         )
         for name, content in render_sensitive_mariadb_config(
             credentials=credentials
@@ -873,6 +875,7 @@ def create_evidence_files(
             coriolis / "bootstrap.py",
             render_bootstrap_script(
                 coriolis_api_host="coriolis-api",
+                barbican_host="barbican",
                 rabbitmq_host="rabbitmq",
                 memcached_host="memcached",
                 database_host="mariadb",

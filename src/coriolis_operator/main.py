@@ -80,6 +80,7 @@ from coriolis_operator.reconcile import (
     kubernetes_coriolis_render_inputs,
     logging_readiness_condition,
     preflight_api_resources,
+    preflight_barbican_resources,
     preflight_common_bootstrap_resources,
     preflight_conductor_resource,
     preflight_deployer_manager_resource,
@@ -400,6 +401,8 @@ def observe_runtime_readiness(
             "coriolis-worker",
             "coriolis-api",
             "coriolis-web",
+            "barbican-api",
+            "barbican-worker",
         )
         deployments = tuple(
             _read_for_runtime_readiness(
@@ -411,7 +414,7 @@ def observe_runtime_readiness(
         )
         service_components = tuple(
             component for component, _ in DEPENDENCY_SERVICES
-        ) + ("coriolis-api", "coriolis-web")
+        ) + ("coriolis-api", "coriolis-web", "barbican-api")
         services = tuple(
             _read_for_runtime_readiness(
                 api.read_namespaced_service,
@@ -871,6 +874,15 @@ def reconcile_appliance(
             name, "keystone-config-secret"
         )
         keystone_deployment_name = appliance_resource_name(name, "keystone")
+        barbican_credentials_name = appliance_resource_name(
+            name, "barbican-credentials"
+        )
+        barbican_config_map_name = appliance_resource_name(name, "barbican-config")
+        barbican_config_secret_name = appliance_resource_name(
+            name, "barbican-config-secret"
+        )
+        barbican_api_name = appliance_resource_name(name, "barbican-api")
+        barbican_worker_name = appliance_resource_name(name, "barbican-worker")
         bootstrap_resource_name = appliance_resource_name(name, BOOTSTRAP_COMPONENT)
         logging_credentials_secret_name = appliance_resource_name(
             name, "logging-credentials"
@@ -1085,6 +1097,54 @@ def reconcile_appliance(
         accepted_version=accepted_version,
         status=status,
     )
+    barbican_credentials_existing = _read_or_absent(
+        api.read_namespaced_secret,
+        name=barbican_credentials_name,
+        namespace=namespace,
+        generation=generation,
+        accepted_version=accepted_version,
+        status=status,
+    )
+    barbican_config_map_existing = _read_or_absent(
+        api.read_namespaced_config_map,
+        name=barbican_config_map_name,
+        namespace=namespace,
+        generation=generation,
+        accepted_version=accepted_version,
+        status=status,
+    )
+    barbican_config_secret_existing = _read_or_absent(
+        api.read_namespaced_secret,
+        name=barbican_config_secret_name,
+        namespace=namespace,
+        generation=generation,
+        accepted_version=accepted_version,
+        status=status,
+    )
+    barbican_api_service_existing = _read_or_absent(
+        api.read_namespaced_service,
+        name=barbican_api_name,
+        namespace=namespace,
+        generation=generation,
+        accepted_version=accepted_version,
+        status=status,
+    )
+    barbican_api_deployment_existing = _read_or_absent(
+        workloads_api.read_namespaced_deployment,
+        name=barbican_api_name,
+        namespace=namespace,
+        generation=generation,
+        accepted_version=accepted_version,
+        status=status,
+    )
+    barbican_worker_deployment_existing = _read_or_absent(
+        workloads_api.read_namespaced_deployment,
+        name=barbican_worker_name,
+        namespace=namespace,
+        generation=generation,
+        accepted_version=accepted_version,
+        status=status,
+    )
     coriolis_api_deployment_existing = _read_or_absent(
         workloads_api.read_namespaced_deployment,
         name=coriolis_api_name,
@@ -1192,6 +1252,14 @@ def reconcile_appliance(
     coriolis_api_ingress_existing = _read_or_absent(
         ingress_api.read_namespaced_ingress,
         name=coriolis_api_name,
+        namespace=namespace,
+        generation=generation,
+        accepted_version=accepted_version,
+        status=status,
+    )
+    barbican_ingress_existing = _read_or_absent(
+        ingress_api.read_namespaced_ingress,
+        name=barbican_api_name,
         namespace=namespace,
         generation=generation,
         accepted_version=accepted_version,
@@ -1484,6 +1552,80 @@ def reconcile_appliance(
             )
 
     try:
+        barbican_preflight = preflight_barbican_resources(
+            appliance_name=name,
+            namespace=namespace,
+            accepted_version=requested_version,
+            owner=owner,
+            retention=STATE_CREDENTIALS_RETENTION,
+            database_host=inputs.endpoints.database_host,
+            rabbitmq_host=inputs.endpoints.rabbitmq_host,
+            keystone_host=inputs.endpoints.keystone_host,
+            barbican_host=barbican_api_name,
+            rabbitmq_password=preflight.credentials[infrastructure_credentials_name][
+                "rabbitmq_password"
+            ],
+            barbican_credentials_secret=barbican_credentials_existing,
+            barbican_config_map=barbican_config_map_existing,
+            barbican_config_secret=barbican_config_secret_existing,
+            barbican_api_service=barbican_api_service_existing,
+            barbican_api_deployment=barbican_api_deployment_existing,
+            barbican_worker_deployment=barbican_worker_deployment_existing,
+        )
+        barbican_collision = next(
+            (
+                resource_name
+                for resource_name, classification in (
+                    barbican_preflight.classifications.items()
+                )
+                if classification.value == "collision"
+            ),
+            None,
+        )
+    except ReconcileRetry:
+        raise
+    except Exception:
+        raise _retry_status(
+            generation, accepted_version, status, "ResourceApplyFailed"
+        ) from None
+    if barbican_collision is not None:
+        return build_status(
+            generation,
+            accepted_version=accepted_version,
+            conditions=collision_conditions(namespace, barbican_collision),
+            prior_conditions=_prior_conditions(status),
+        )
+    for existing, classification in (
+        (
+            barbican_config_map_existing,
+            barbican_preflight.classifications[barbican_config_map_name],
+        ),
+        (
+            barbican_config_secret_existing,
+            barbican_preflight.classifications[barbican_config_secret_name],
+        ),
+        (
+            barbican_api_service_existing,
+            barbican_preflight.api_service_classification,
+        ),
+        (
+            barbican_api_deployment_existing,
+            barbican_preflight.api_deployment_classification,
+        ),
+        (
+            barbican_worker_deployment_existing,
+            barbican_preflight.classifications[barbican_worker_name],
+        ),
+    ):
+        if (
+            classification is OwnedClassification.MANAGED
+            and _resource_version(existing) is None
+        ):
+            raise _retry_status(
+                generation, accepted_version, status, "ResourceApplyFailed"
+            )
+
+    try:
         mariadb_preflight = preflight_mariadb_resources(
             appliance_name=name,
             namespace=namespace,
@@ -1499,6 +1641,9 @@ def reconcile_appliance(
                 keystone_database_password=keystone_preflight.credentials[
                     keystone_database_credentials_name
                 ]["keystone_database_password"],
+                barbican_database_password=barbican_preflight.credentials[
+                    barbican_credentials_name
+                ]["barbican_database_password"],
             ),
             owner=owner,
             mariadb_data_pvc=mariadb_data_pvc_existing,
@@ -1904,6 +2049,7 @@ def reconcile_appliance(
             web_ingress=coriolis_web_ingress_existing,
             keystone_ingress=keystone_ingress_existing,
             api_ingress=coriolis_api_ingress_existing,
+            barbican_ingress=barbican_ingress_existing,
         )
     except ReconcileRetry:
         raise
@@ -1926,6 +2072,11 @@ def reconcile_appliance(
             coriolis_api_name,
             coriolis_api_ingress_existing,
             ingress_preflight.api_classification,
+        ),
+        (
+            barbican_api_name,
+            barbican_ingress_existing,
+            ingress_preflight.barbican_classification,
         ),
     ):
         if classification is OwnedClassification.COLLISION:
@@ -2164,6 +2315,7 @@ def reconcile_appliance(
         coriolis_web_ingress_body,
         keystone_ingress_body,
         coriolis_api_ingress_body,
+        barbican_ingress_body,
     ) = ingress_preflight.manifests
     (conductor_deployment_body,) = conductor_preflight.manifests
     (scheduler_deployment_body,) = scheduler_preflight.manifests
@@ -2171,6 +2323,14 @@ def reconcile_appliance(
     (minion_manager_deployment_body,) = minion_manager_preflight.manifests
     (deployer_manager_deployment_body,) = deployer_manager_preflight.manifests
     (worker_deployment_body,) = worker_preflight.manifests
+    (
+        barbican_credentials_body,
+        barbican_config_map_body,
+        barbican_config_secret_body,
+        barbican_api_service_body,
+        barbican_api_deployment_body,
+        barbican_worker_deployment_body,
+    ) = barbican_preflight.manifests
 
     try:
         config_map_body = build_coriolis_config_map(
@@ -2441,6 +2601,62 @@ def reconcile_appliance(
             accepted_version=accepted_version,
             status=status,
         )
+    if (
+        barbican_preflight.classifications[barbican_credentials_name]
+        is not RetainedClassification.REUSE
+    ):
+        _create_or_apply(
+            api,
+            kind="secret",
+            body=barbican_credentials_body,
+            existing=barbican_credentials_existing,
+            category="ResourceApplyFailed",
+            generation=generation,
+            accepted_version=accepted_version,
+            status=status,
+        )
+    for resource_api, kind, body, existing in (
+        (
+            api,
+            "config_map",
+            barbican_config_map_body,
+            barbican_config_map_existing,
+        ),
+        (
+            api,
+            "secret",
+            barbican_config_secret_body,
+            barbican_config_secret_existing,
+        ),
+        (
+            api,
+            "service",
+            barbican_api_service_body,
+            barbican_api_service_existing,
+        ),
+        (
+            workloads_api,
+            "deployment",
+            barbican_api_deployment_body,
+            barbican_api_deployment_existing,
+        ),
+        (
+            workloads_api,
+            "deployment",
+            barbican_worker_deployment_body,
+            barbican_worker_deployment_existing,
+        ),
+    ):
+        _create_or_apply(
+            resource_api,
+            kind=kind,
+            body=body,
+            existing=existing,
+            category="ResourceApplyFailed",
+            generation=generation,
+            accepted_version=accepted_version,
+            status=status,
+        )
     (bootstrap_config_map_body, bootstrap_job_body) = bootstrap_preflight.manifests
     if bootstrap_preflight.config_map_classification is OwnedClassification.ABSENT:
         _create_or_apply(
@@ -2604,6 +2820,22 @@ def reconcile_appliance(
             accepted_version=accepted_version,
             status=status,
         )
+    if (
+        barbican_api_service_existing is None
+        or not _deployment_ready(barbican_api_deployment_existing)
+        or not _deployment_ready(barbican_worker_deployment_existing)
+    ):
+        raise _retry_status(generation, accepted_version, status, "ResourceApplyFailed")
+    _create_or_apply(
+        ingress_api,
+        kind="ingress",
+        body=barbican_ingress_body,
+        existing=barbican_ingress_existing,
+        category="ResourceApplyFailed",
+        generation=generation,
+        accepted_version=accepted_version,
+        status=status,
+    )
     if not _deployment_ready(keystone_deployment_existing):
         raise _retry_status(generation, accepted_version, status, "ResourceApplyFailed")
     apply_logging_phase(LOGGING_ADAPTOR_PHASE_KEYS)
