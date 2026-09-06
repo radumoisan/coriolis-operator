@@ -14,6 +14,7 @@ from coriolis_operator.barbican import (
     BARBICAN_CONFIG_PATH,
     BARBICAN_DB_SYNC_COMMAND,
     BARBICAN_DB_SYNC_PATH,
+    BARBICAN_DEFAULT_CONFIG_PATH,
     BARBICAN_HEALTH_PROBE,
     BARBICAN_HEALTHCHECK_DISABLE_PATH,
     BARBICAN_IMAGE_PULL_SECRET_NAME,
@@ -112,6 +113,7 @@ def test_identity_constants_are_exact() -> None:
     assert BARBICAN_POLICY_PATH == "/etc/barbican-runtime/policy.yaml"
     assert BARBICAN_DB_SYNC_PATH == "/etc/barbican-runtime/db-sync.py"
     assert BARBICAN_CONFIG_PATH == "/etc/barbican-runtime/barbican.conf"
+    assert BARBICAN_DEFAULT_CONFIG_PATH == "/etc/barbican/barbican.conf"
     assert BARBICAN_HEALTHCHECK_DISABLE_PATH == (
         "/var/lib/barbican/healthcheck_disable"
     )
@@ -197,7 +199,7 @@ def test_vassal_uses_image_supported_uwsgi_form() -> None:
     assert "python3" not in vassal
     assert f"processes = {BARBICAN_REPLICAS}\n" in vassal
     assert f"paste = config:{BARBICAN_PASTE_PATH}\n" in vassal
-    assert f"pyargv = --config-file={BARBICAN_CONFIG_PATH}\n" in vassal
+    assert "pyargv" not in vassal
     assert "add-header = Connection: close\n" in vassal
 
 

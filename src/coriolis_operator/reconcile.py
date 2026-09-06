@@ -35,6 +35,7 @@ from coriolis_operator.barbican import (
     BARBICAN_API_STATE_DIR,
     BARBICAN_CONFIG_KEYS,
     BARBICAN_DB_SYNC_COMMAND,
+    BARBICAN_DEFAULT_CONFIG_PATH,
     BARBICAN_HEALTH_PROBE,
     BARBICAN_IMAGE_PULL_SECRET_NAME,
     BARBICAN_PORT,
@@ -4603,6 +4604,15 @@ def _barbican_config_mount() -> dict[str, Any]:
     return {"name": "config", "mountPath": BARBICAN_RUNTIME_DIR, "readOnly": True}
 
 
+def _barbican_api_default_config_mount() -> dict[str, Any]:
+    return {
+        "name": "config",
+        "mountPath": BARBICAN_DEFAULT_CONFIG_PATH,
+        "subPath": "barbican.conf",
+        "readOnly": True,
+    }
+
+
 def _barbican_tmp_mount() -> dict[str, Any]:
     return {"name": "tmp", "mountPath": BARBICAN_TMP_DIR}
 
@@ -4682,6 +4692,7 @@ def build_barbican_api_deployment(
         "securityContext": _barbican_container_security_context(),
         "volumeMounts": [
             _barbican_config_mount(),
+            _barbican_api_default_config_mount(),
             _barbican_tmp_mount(),
             {"name": "state", "mountPath": BARBICAN_API_STATE_DIR},
         ],

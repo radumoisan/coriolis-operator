@@ -41,6 +41,7 @@ BARBICAN_TERMINATION_GRACE_PERIOD_SECONDS = 30
 BARBICAN_RUNTIME_DIR = "/etc/barbican-runtime"
 BARBICAN_TMP_DIR = "/tmp"
 BARBICAN_API_STATE_DIR = "/var/lib/barbican"
+BARBICAN_DEFAULT_CONFIG_PATH = "/etc/barbican/barbican.conf"
 BARBICAN_VASSALS_DIR = f"{BARBICAN_RUNTIME_DIR}/vassals"
 BARBICAN_CONFIG_PATH = f"{BARBICAN_RUNTIME_DIR}/barbican.conf"
 BARBICAN_DB_SYNC_PATH = f"{BARBICAN_RUNTIME_DIR}/db-sync.py"
@@ -649,12 +650,24 @@ class Validator:
             spec.get("volumes"), with_state=component == API_COMPONENT
         ):
             return False
-        mounts: list[dict[str, object]] = [
+        base_mounts: list[dict[str, object]] = [
             {"name": "config", "mountPath": BARBICAN_RUNTIME_DIR, "readOnly": True},
             {"name": "tmp", "mountPath": BARBICAN_TMP_DIR},
         ]
         if component == API_COMPONENT:
-            mounts.append({"name": "state", "mountPath": BARBICAN_API_STATE_DIR})
+            mounts: list[dict[str, object]] = [
+                base_mounts[0],
+                {
+                    "name": "config",
+                    "mountPath": BARBICAN_DEFAULT_CONFIG_PATH,
+                    "subPath": CONFIG_SECRET_KEY,
+                    "readOnly": True,
+                },
+                base_mounts[1],
+                {"name": "state", "mountPath": BARBICAN_API_STATE_DIR},
+            ]
+        else:
+            mounts = base_mounts
         image = (
             BARBICAN_API_IMAGE if component == API_COMPONENT else BARBICAN_WORKER_IMAGE
         )
@@ -708,7 +721,7 @@ class Validator:
             "image": BARBICAN_API_IMAGE,
             "command": BARBICAN_DB_SYNC_COMMAND,
             "securityContext": CONTAINER_SECURITY_CONTEXT,
-            "volumeMounts": mounts[:2],
+            "volumeMounts": base_mounts,
         }
         inits = spec.get("initContainers")
         if component == API_COMPONENT:

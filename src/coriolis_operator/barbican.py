@@ -26,6 +26,7 @@ BARBICAN_TERMINATION_GRACE_PERIOD_SECONDS = 30
 BARBICAN_RUNTIME_DIR = "/etc/barbican-runtime"
 BARBICAN_TMP_DIR = "/tmp"
 BARBICAN_API_STATE_DIR = "/var/lib/barbican"
+BARBICAN_DEFAULT_CONFIG_PATH = "/etc/barbican/barbican.conf"
 BARBICAN_VASSALS_DIR = f"{BARBICAN_RUNTIME_DIR}/vassals"
 BARBICAN_PASTE_PATH = f"{BARBICAN_RUNTIME_DIR}/barbican-api-paste.ini"
 BARBICAN_VASSAL_PATH = f"{BARBICAN_VASSALS_DIR}/barbican-api.ini"
@@ -261,7 +262,6 @@ no-default-app = true
 memory-report = true
 plugins = python
 paste = config:{BARBICAN_PASTE_PATH}
-pyargv = --config-file={BARBICAN_CONFIG_PATH}
 add-header = Connection: close
 """
     policy = """\"creator\": \"role:admin or role:member\"

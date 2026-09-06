@@ -12,6 +12,7 @@ from coriolis_operator.barbican import (
     BARBICAN_API_STATE_DIR,
     BARBICAN_CONFIG_KEYS,
     BARBICAN_DB_SYNC_COMMAND,
+    BARBICAN_DEFAULT_CONFIG_PATH,
     BARBICAN_HEALTH_PROBE,
     BARBICAN_IMAGE_PULL_SECRET_NAME,
     BARBICAN_PORT,
@@ -424,9 +425,16 @@ def test_api_deployment_is_hardened_with_db_sync_init_and_probes() -> None:
     assert container["securityContext"] == _restricted_container_security()
     assert container["volumeMounts"] == [
         {"name": "config", "mountPath": BARBICAN_RUNTIME_DIR, "readOnly": True},
+        {
+            "name": "config",
+            "mountPath": BARBICAN_DEFAULT_CONFIG_PATH,
+            "subPath": "barbican.conf",
+            "readOnly": True,
+        },
         {"name": "tmp", "mountPath": BARBICAN_TMP_DIR},
         {"name": "state", "mountPath": BARBICAN_API_STATE_DIR},
     ]
+    assert BARBICAN_DEFAULT_CONFIG_PATH == "/etc/barbican/barbican.conf"
     for absent in ("env", "envFrom", "resources"):
         assert absent not in container
 

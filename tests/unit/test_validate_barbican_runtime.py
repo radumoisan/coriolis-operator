@@ -290,6 +290,17 @@ class FakeKubernetes:
             },
             {"name": "tmp", "mountPath": runtime.BARBICAN_TMP_DIR},
         ]
+        api_mounts = [
+            mounts[0],
+            {
+                "name": "config",
+                "mountPath": runtime.BARBICAN_DEFAULT_CONFIG_PATH,
+                "subPath": runtime.CONFIG_SECRET_KEY,
+                "readOnly": True,
+            },
+            mounts[1],
+            {"name": "state", "mountPath": runtime.BARBICAN_API_STATE_DIR},
+        ]
         volumes: list[dict[str, Any]] = [
             {
                 "name": "config",
@@ -331,12 +342,7 @@ class FakeKubernetes:
                 else list(runtime.BARBICAN_WORKER_COMMAND)
             ),
             "securityContext": copy.deepcopy(runtime.CONTAINER_SECURITY_CONTEXT),
-            "volumeMounts": mounts
-            + (
-                [{"name": "state", "mountPath": runtime.BARBICAN_API_STATE_DIR}]
-                if api
-                else []
-            ),
+            "volumeMounts": list(api_mounts) if api else mounts,
             "resources": {},
             "imagePullPolicy": "IfNotPresent",
             "terminationMessagePath": "/dev/termination-log",
@@ -928,6 +934,18 @@ def test_delete_polling_timeout_fails_then_reports_cleanup_failure() -> None:
             lambda k, h: k.api_deployment["spec"]["template"]["spec"]["containers"][0][
                 "startupProbe"
             ]["exec"]["command"].__setitem__(0, "/usr/bin/python3"),
+            "api-deployment",
+        ),
+        (
+            lambda k, h: k.api_deployment["spec"]["template"]["spec"]["containers"][0][
+                "volumeMounts"
+            ].pop(1),
+            "api-deployment",
+        ),
+        (
+            lambda k, h: k.api_deployment["spec"]["template"]["spec"]["containers"][0][
+                "volumeMounts"
+            ][1].update({"mountPath": "/etc/barbican/other.conf"}),
             "api-deployment",
         ),
         (
