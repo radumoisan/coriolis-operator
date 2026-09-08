@@ -182,7 +182,7 @@ spec:
                       default: 120
                     coriolisDebug:
                       type: boolean
-                      default: true
+                      default: false
                     storage:
                       type: object
                       required:

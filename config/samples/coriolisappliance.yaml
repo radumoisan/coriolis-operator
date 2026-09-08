@@ -15,7 +15,7 @@ spec:
     retentionHours: 24
     compactionIntervalMinutes: 15
     retentionDeleteDelayMinutes: 120
-    coriolisDebug: true
+    coriolisDebug: false
     storage:
       loki:
         storageClassName: local-path

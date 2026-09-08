@@ -29,7 +29,8 @@ UID = "cr-uid-1234abcd"
 BOOTSTRAP = "common-bootstrap-v3"
 CATEGORY_LINE = "coriolis-bootstrap-provisioning complete"
 COMPONENT_LABEL = runtime.COMPONENT_LABEL
-APPLIANCE_ANNOTATION = runtime.APPLIANCE_NAME_ANNOTATION
+APPLIANCE_LABEL = runtime.APPLIANCE_LABEL
+APP = "acme"
 
 PRODUCERS = runtime.REQUIRED_PRODUCERS
 INFRA = ("loki", "alloy", "adaptor", "memcached")
@@ -64,6 +65,9 @@ class Scenario:
         self.no_category = False
         self.leak: str | None = None
         self.bad_uid: Any = UID
+        self.wrong_appliance: set[str] = set()
+        self.missing_appliance: set[str] = set()
+        self.wrong_component: set[str] = set()
 
 
 def _pod(component: str, scenario: Scenario) -> dict[str, Any]:
@@ -80,10 +84,17 @@ def _pod(component: str, scenario: Scenario) -> dict[str, Any]:
     completed = component == BOOTSTRAP or component in scenario.completed_non_bootstrap
     phase = "Succeeded" if completed else "Running"
     ready = component not in scenario.not_ready
+    labels = {COMPONENT_LABEL: component, APPLIANCE_LABEL: APP}
+    if component in scenario.wrong_appliance:
+        labels[APPLIANCE_LABEL] = "other-appliance"
+    if component in scenario.missing_appliance:
+        del labels[APPLIANCE_LABEL]
+    if component in scenario.wrong_component:
+        labels[COMPONENT_LABEL] = "other-component"
     return {
         "metadata": {
             "name": f"acme-{component}-abcde",
-            "annotations": {APPLIANCE_ANNOTATION: "acme"},
+            "labels": labels,
         },
         "spec": {"containers": [{"name": name} for name in containers]},
         "status": {
@@ -219,9 +230,16 @@ def _make(
             result = (0, json.dumps({"data": data}), "")
         elif "pods" in parts:
             selector = next(
-                part for part in parts if part.startswith(f"{COMPONENT_LABEL}=")
+                part for part in parts if part.startswith(f"{APPLIANCE_LABEL}=")
             )
-            result = (0, _pods_payload(selector.split("=", 1)[1], scenario), "")
+            appliance_field, _, component_field = selector.partition(",")
+            assert appliance_field == f"{APPLIANCE_LABEL}={APP}"
+            assert component_field.startswith(f"{COMPONENT_LABEL}=")
+            result = (
+                0,
+                _pods_payload(component_field.split("=", 1)[1], scenario),
+                "",
+            )
         elif "logs" in parts:
             container = parts[parts.index("-c") + 1]
             if container in BOUNDARY_CONTAINERS:
@@ -511,6 +529,41 @@ def test_duplicate_eligible_pods_are_rejected_as_ambiguous() -> None:
     validator, output, _, _, _ = _make(scenario)
     assert validator.run() == 1
     assert output[-1] == "FAIL pod-rabbitmq"
+
+
+def test_pod_queries_request_exact_compound_appliance_selector() -> None:
+    validator, _, calls, _, _ = _make()
+    assert validator.run() == 0
+    selectors = [
+        command[command.index("-l") + 1]
+        for command in calls
+        if command[5] == "get" and "-l" in command
+    ]
+    queried = ("memcached", "loki", "alloy", "adaptor", *PRODUCERS)
+    assert selectors == [
+        f"{APPLIANCE_LABEL}={APP},{COMPONENT_LABEL}={component}"
+        for component in queried
+    ]
+
+
+@pytest.mark.parametrize(
+    ("fault", "component", "stage"),
+    [
+        ("wrong_appliance", "mariadb", "pod-mariadb"),
+        ("missing_appliance", BOOTSTRAP, f"pod-{BOOTSTRAP}"),
+        ("wrong_component", "coriolis-api", "pod-coriolis-api"),
+        ("wrong_appliance", "memcached", "readiness"),
+        ("missing_appliance", "loki", "readiness"),
+    ],
+)
+def test_pod_with_mismatched_identity_labels_fails_closed(
+    fault: str, component: str, stage: str
+) -> None:
+    scenario = Scenario()
+    getattr(scenario, fault).add(component)
+    validator, output, _, _, _ = _make(scenario)
+    assert validator.run() == 1
+    assert output[-1] == f"FAIL {stage}"
 
 
 def test_failed_bootstrap_retry_is_ignored_when_successful_pod_exists() -> None:

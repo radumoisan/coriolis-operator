@@ -212,7 +212,7 @@ def test_crd_requires_logging_without_defaults() -> None:
     }
     assert logging["properties"]["coriolisDebug"] == {
         "type": "boolean",
-        "default": True,
+        "default": False,
     }
     assert logging["properties"]["storage"] == {
         "type": "object",
@@ -250,7 +250,7 @@ def test_sample_uses_explicit_logging_settings() -> None:
         "retentionHours": 24,
         "compactionIntervalMinutes": 15,
         "retentionDeleteDelayMinutes": 120,
-        "coriolisDebug": True,
+        "coriolisDebug": False,
         "storage": {"loki": {"storageClassName": "local-path", "size": "10Gi"}},
         "resources": {
             "loki": {

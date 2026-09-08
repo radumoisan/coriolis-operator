@@ -165,6 +165,14 @@ def test_resolve_logging_settings_defaults_omitted_lifecycle_fields() -> None:
 
     assert settings.compaction_interval_minutes == 15
     assert settings.retention_delete_delay_minutes == 120
+    assert settings.coriolis_debug is False
+
+
+def test_resolve_logging_settings_accepts_explicit_true_debug() -> None:
+    logging = _valid_settings()
+    logging["coriolisDebug"] = True
+    settings = resolve_logging_settings(logging)
+
     assert settings.coriolis_debug is True
 
 

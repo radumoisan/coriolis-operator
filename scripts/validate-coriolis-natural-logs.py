@@ -55,7 +55,7 @@ MAX_SINCE_SECONDS = 86400
 LOKI_QUERY_LIMIT = 5000
 MEMCACHED_COMPONENT = "memcached"
 BOOTSTRAP_CATEGORY = "coriolis-bootstrap-"
-APPLIANCE_NAME_ANNOTATION = "coriolis.cloudbase.it/appliance-name"
+APPLIANCE_LABEL = "coriolis.cloudbase.it/appliance"
 COMPONENT_LABEL = "coriolis.cloudbase.it/component"
 
 _STAGE = re.compile(r"^[a-z0-9][a-z0-9-]*$")
@@ -498,7 +498,8 @@ class Validator:
         )
 
     def _appliance_pods(self, stage: str, component: str) -> list[dict[str, object]]:
-        payload = self._json(stage, "pods", "-l", f"{COMPONENT_LABEL}={component}")
+        selector = f"{APPLIANCE_LABEL}={self.app},{COMPONENT_LABEL}={component}"
+        payload = self._json(stage, "pods", "-l", selector)
         items = payload.get("items")
         if not isinstance(items, list):
             raise ValidationFailure(stage)
@@ -506,10 +507,11 @@ class Validator:
         for item in items:
             if not isinstance(item, dict):
                 raise ValidationFailure(stage)
-            annotation = self._pod_field(item, "metadata", "annotations")
+            labels = self._pod_field(item, "metadata", "labels")
             if (
-                isinstance(annotation, dict)
-                and annotation.get(APPLIANCE_NAME_ANNOTATION) == self.app
+                isinstance(labels, dict)
+                and labels.get(APPLIANCE_LABEL) == self.app
+                and labels.get(COMPONENT_LABEL) == component
             ):
                 matches.append(item)
         return matches
