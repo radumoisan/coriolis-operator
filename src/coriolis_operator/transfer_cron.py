@@ -12,7 +12,6 @@ TRANSFER_CRON_TERMINATION_GRACE_PERIOD_SECONDS = 15
 TRANSFER_CRON_COMMAND = "/usr/local/bin/coriolis-transfer-cron"
 TRANSFER_CRON_ARGS = ("--config-file=/etc/coriolis/coriolis.conf",)
 TRANSFER_CRON_CONFIG_DIR = "/etc/coriolis"
-TRANSFER_CRON_LOG_DIR = "/var/log/coriolis"
 TRANSFER_CRON_CONFIG_MAP_KEYS = (
     "coriolis-api.wsgi",
     "wsgi-coriolis.conf",

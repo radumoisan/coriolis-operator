@@ -12,4 +12,3 @@ DEPLOYER_MANAGER_TERMINATION_GRACE_PERIOD_SECONDS = 30
 DEPLOYER_MANAGER_COMMAND = "/usr/local/bin/coriolis-deployer-manager"
 DEPLOYER_MANAGER_ARGS = ("--config-file=/etc/coriolis/coriolis.conf",)
 DEPLOYER_MANAGER_CONFIG_DIR = "/etc/coriolis"
-DEPLOYER_MANAGER_LOG_DIR = "/var/log/coriolis"

@@ -233,6 +233,11 @@ def test_kubernetes_templates_have_only_the_approved_deltas() -> None:
             "ssl = False\n",
         )
         .replace("cafile = {{ coriolis_config_dir }}/ssl/ca/coriolis-ca.crt\n", "")
+        .replace("log_dir = {{  coriolis_log_dir }}\n", "log_dir =\n")
+        .replace(
+            "syslog_log_facility = LOG_LOCAL0\nuse_syslog = yes\n",
+            "use_syslog = false\nuse_stderr = true\n",
+        )
         .replace(UPSTREAM_PROVIDER_TEMPLATE_BLOCK, KUBERNETES_PROVIDER_TEMPLATE_BLOCK)
         .replace(
             "export_base_path = {{ coriolis_export_dir }}\n",
@@ -328,10 +333,14 @@ def test_sensitive_records_are_exact_frozen_and_redact_credentials() -> None:
 
 def test_render_sensitive_config_is_deterministic_exact_and_redacted() -> None:
     first = render_sensitive_coriolis_config(
-        endpoints=SENSITIVE_ENDPOINTS, credentials=SENSITIVE_CREDENTIALS
+        endpoints=SENSITIVE_ENDPOINTS,
+        coriolis_debug=True,
+        credentials=SENSITIVE_CREDENTIALS,
     )
     second = render_sensitive_coriolis_config(
-        endpoints=SENSITIVE_ENDPOINTS, credentials=SENSITIVE_CREDENTIALS
+        endpoints=SENSITIVE_ENDPOINTS,
+        coriolis_debug=True,
+        credentials=SENSITIVE_CREDENTIALS,
     )
     content = first["coriolis.conf"]
 
@@ -355,7 +364,9 @@ def test_render_sensitive_config_is_deterministic_exact_and_redacted() -> None:
 
 def test_sensitive_render_has_frozen_providers_and_fixed_values() -> None:
     content = render_sensitive_coriolis_config(
-        endpoints=SENSITIVE_ENDPOINTS, credentials=SENSITIVE_CREDENTIALS
+        endpoints=SENSITIVE_ENDPOINTS,
+        coriolis_debug=True,
+        credentials=SENSITIVE_CREDENTIALS,
     )["coriolis.conf"]
 
     assert all(content.count(section) == 1 for section in PROVIDER_SECTIONS)
@@ -381,7 +392,9 @@ def test_sensitive_render_has_frozen_providers_and_fixed_values() -> None:
     for fixed_line in (
         "messaging_transport_url = rabbit://openstack:RABBIT_SENTINEL_41e9@rabbitmq.synthetic.test:5672/",
         "debug = True",
-        "log_dir = /var/log/coriolis",
+        "log_dir =",
+        "use_syslog = false",
+        "use_stderr = true",
         "compress_transfers = False",
         "ssl = False",
         "backend_argument = url:memcached.synthetic.test:11211",
@@ -401,11 +414,20 @@ def test_sensitive_render_has_frozen_providers_and_fixed_values() -> None:
     assert "compressor_address" not in content
     assert "ssl_ca_file" not in content
     assert "cafile" not in content
+    assert "syslog_log_facility" not in content
+    disabled = render_sensitive_coriolis_config(
+        endpoints=SENSITIVE_ENDPOINTS,
+        coriolis_debug=False,
+        credentials=SENSITIVE_CREDENTIALS,
+    )["coriolis.conf"]
+    assert "debug = False" in disabled
 
 
 def test_sensitive_credentials_only_render_at_contracted_locations() -> None:
     content = render_sensitive_coriolis_config(
-        endpoints=SENSITIVE_ENDPOINTS, credentials=SENSITIVE_CREDENTIALS
+        endpoints=SENSITIVE_ENDPOINTS,
+        coriolis_debug=True,
+        credentials=SENSITIVE_CREDENTIALS,
     )["coriolis.conf"]
 
     for sentinel, expected_count in zip(
@@ -423,7 +445,9 @@ def test_sensitive_credentials_only_render_at_contracted_locations() -> None:
 
 def test_sensitive_config_composes_only_with_secret_builder() -> None:
     values = render_sensitive_coriolis_config(
-        endpoints=SENSITIVE_ENDPOINTS, credentials=SENSITIVE_CREDENTIALS
+        endpoints=SENSITIVE_ENDPOINTS,
+        coriolis_debug=True,
+        credentials=SENSITIVE_CREDENTIALS,
     )
     secret = build_coriolis_config_secret(
         appliance_name="example",
@@ -475,7 +499,11 @@ def test_sensitive_render_rejects_invalid_values_without_leakage(
     )
 
     with pytest.raises(ValueError) as excinfo:
-        render_sensitive_coriolis_config(endpoints=endpoints, credentials=credentials)
+        render_sensitive_coriolis_config(
+            endpoints=endpoints,
+            credentials=credentials,
+            coriolis_debug=True,
+        )
 
     assert str(excinfo.value) == "invalid sensitive Coriolis configuration input"
     assert "malicious" not in str(excinfo.value)
@@ -488,6 +516,7 @@ def test_sensitive_render_rejects_wrong_record_types_and_malformed_records() -> 
     ):
         render_sensitive_coriolis_config(
             endpoints=object(),
+            coriolis_debug=True,
             credentials=SENSITIVE_CREDENTIALS,  # type: ignore[arg-type]
         )
     with pytest.raises(
@@ -495,6 +524,7 @@ def test_sensitive_render_rejects_wrong_record_types_and_malformed_records() -> 
     ):
         render_sensitive_coriolis_config(
             endpoints=SENSITIVE_ENDPOINTS,
+            coriolis_debug=True,
             credentials=object(),  # type: ignore[arg-type]
         )
     with pytest.raises(TypeError):
@@ -511,6 +541,18 @@ def test_sensitive_render_rejects_wrong_record_types_and_malformed_records() -> 
         SensitiveCoriolisCredentials("one", "two", "three")
     with pytest.raises(TypeError):
         SensitiveCoriolisCredentials("one", "two", "three", "four", "five")
+    with pytest.raises(TypeError):
+        render_sensitive_coriolis_config(
+            endpoints=SENSITIVE_ENDPOINTS, credentials=SENSITIVE_CREDENTIALS
+        )
+    with pytest.raises(
+        ValueError, match="^invalid sensitive Coriolis configuration input$"
+    ):
+        render_sensitive_coriolis_config(
+            endpoints=SENSITIVE_ENDPOINTS,
+            credentials=SENSITIVE_CREDENTIALS,
+            coriolis_debug="true",  # type: ignore[arg-type]
+        )
 
 
 def test_sensitive_render_failure_is_fixed_and_does_not_leak_credentials(
@@ -527,7 +569,9 @@ def test_sensitive_render_failure_is_fixed_and_does_not_leak_credentials(
 
     with pytest.raises(ValueError) as excinfo:
         render_sensitive_coriolis_config(
-            endpoints=SENSITIVE_ENDPOINTS, credentials=SENSITIVE_CREDENTIALS
+            endpoints=SENSITIVE_ENDPOINTS,
+            coriolis_debug=True,
+            credentials=SENSITIVE_CREDENTIALS,
         )
 
     assert str(excinfo.value) == "sensitive Coriolis configuration rendering failed"
@@ -540,7 +584,9 @@ def test_sensitive_render_does_not_mutate_input_records() -> None:
     credential_hash = hash(SENSITIVE_CREDENTIALS)
 
     render_sensitive_coriolis_config(
-        endpoints=SENSITIVE_ENDPOINTS, credentials=SENSITIVE_CREDENTIALS
+        endpoints=SENSITIVE_ENDPOINTS,
+        coriolis_debug=True,
+        credentials=SENSITIVE_CREDENTIALS,
     )
 
     assert hash(SENSITIVE_ENDPOINTS) == endpoint_hash

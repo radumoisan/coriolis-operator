@@ -14,7 +14,6 @@ from coriolis_operator.transfer_cron import (
     TRANSFER_CRON_CONFIG_DIR,
     TRANSFER_CRON_CONFIG_MAP_KEYS,
     TRANSFER_CRON_IMAGE,
-    TRANSFER_CRON_LOG_DIR,
     TRANSFER_CRON_RUN_AS_ID,
 )
 
@@ -98,7 +97,6 @@ def test_transfer_cron_deployment_has_frozen_runtime_contract() -> None:
     assert container["volumeMounts"] == [
         {"name": "config", "mountPath": TRANSFER_CRON_CONFIG_DIR, "readOnly": True},
         {"name": "tmp", "mountPath": "/tmp"},
-        {"name": "logs", "mountPath": TRANSFER_CRON_LOG_DIR},
     ]
     assert pod["volumes"] == [
         {
@@ -130,7 +128,6 @@ def test_transfer_cron_deployment_has_frozen_runtime_contract() -> None:
             },
         },
         {"name": "tmp", "emptyDir": {"medium": "Memory"}},
-        {"name": "logs", "emptyDir": {}},
     ]
 
 
@@ -152,7 +149,6 @@ def test_transfer_cron_omits_unneeded_runtime_surfaces() -> None:
     assert {mount["name"] for mount in container["volumeMounts"]} == {
         "config",
         "tmp",
-        "logs",
     }
 
 

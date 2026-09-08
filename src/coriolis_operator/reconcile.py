@@ -22,7 +22,6 @@ from coriolis_operator.api import (
     API_IMAGE,
     API_IMAGE_PULL_SECRET_NAME,
     API_LOCKS_DIR,
-    API_LOG_DIR,
     API_PORT,
     API_PROTOCOL_PROBE,
     API_REPLICAS,
@@ -83,7 +82,6 @@ from coriolis_operator.conductor import (
     CONDUCTOR_CONFIG_MAP_KEYS,
     CONDUCTOR_IMAGE_PULL_SECRET_NAME,
     CONDUCTOR_LOCKS_DIR,
-    CONDUCTOR_LOG_DIR,
     CONDUCTOR_REPLICAS,
     CONDUCTOR_RUN_AS_ID,
     CONDUCTOR_TERMINATION_GRACE_PERIOD_SECONDS,
@@ -99,7 +97,6 @@ from coriolis_operator.deployer_manager import (
     DEPLOYER_MANAGER_CONFIG_DIR,
     DEPLOYER_MANAGER_IMAGE,
     DEPLOYER_MANAGER_IMAGE_PULL_SECRET_NAME,
-    DEPLOYER_MANAGER_LOG_DIR,
     DEPLOYER_MANAGER_REPLICAS,
     DEPLOYER_MANAGER_RUN_AS_ID,
     DEPLOYER_MANAGER_TERMINATION_GRACE_PERIOD_SECONDS,
@@ -170,7 +167,6 @@ from coriolis_operator.minion_manager import (
     MINION_MANAGER_CONFIG_MAP_KEYS,
     MINION_MANAGER_IMAGE,
     MINION_MANAGER_IMAGE_PULL_SECRET_NAME,
-    MINION_MANAGER_LOG_DIR,
     MINION_MANAGER_REPLICAS,
     MINION_MANAGER_RUN_AS_ID,
     MINION_MANAGER_TERMINATION_GRACE_PERIOD_SECONDS,
@@ -203,7 +199,6 @@ from coriolis_operator.scheduler import (
     SCHEDULER_CONFIG_MAP_KEYS,
     SCHEDULER_IMAGE,
     SCHEDULER_IMAGE_PULL_SECRET_NAME,
-    SCHEDULER_LOG_DIR,
     SCHEDULER_REPLICAS,
     SCHEDULER_RUN_AS_ID,
     SCHEDULER_TERMINATION_GRACE_PERIOD_SECONDS,
@@ -216,7 +211,6 @@ from coriolis_operator.transfer_cron import (
     TRANSFER_CRON_CONFIG_MAP_KEYS,
     TRANSFER_CRON_IMAGE,
     TRANSFER_CRON_IMAGE_PULL_SECRET_NAME,
-    TRANSFER_CRON_LOG_DIR,
     TRANSFER_CRON_REPLICAS,
     TRANSFER_CRON_RUN_AS_ID,
     TRANSFER_CRON_TERMINATION_GRACE_PERIOD_SECONDS,
@@ -240,9 +234,9 @@ from coriolis_operator.worker import (
     WORKER_EXPORT_DIR,
     WORKER_IMAGE,
     WORKER_IMAGE_PULL_SECRET_NAME,
-    WORKER_LOG_DIR,
     WORKER_REPLICAS,
     WORKER_TERMINATION_GRACE_PERIOD_SECONDS,
+    WORKER_VIXDISKLIB_TMP_DIR,
 )
 
 STATE_CONFIG_MAP_SUFFIX = "-operator-state"
@@ -585,7 +579,7 @@ def kubernetes_coriolis_render_inputs(
         bind_address="0.0.0.0",
         coriolis_port=7667,
         coriolis_config_dir="/etc/coriolis",
-        coriolis_vmware_vix_disklib_log_dir="/var/log/coriolis/vmware-root",
+        coriolis_vmware_vix_disklib_log_dir=WORKER_VIXDISKLIB_TMP_DIR,
         endpoints=SensitiveCoriolisEndpoints(
             rabbitmq_host=appliance_resource_name(appliance_name, "rabbitmq"),
             memcached_host=appliance_resource_name(appliance_name, "memcached"),
@@ -1524,7 +1518,6 @@ def build_api_deployment(
     volume_mounts = [
         {"name": "config", "mountPath": API_CONFIG_DIR, "readOnly": True},
         {"name": "tmp", "mountPath": "/tmp"},
-        {"name": "logs", "mountPath": API_LOG_DIR},
         {"name": "locks", "mountPath": API_LOCKS_DIR},
     ]
     container = {
@@ -1623,7 +1616,6 @@ def build_api_deployment(
                             },
                         },
                         {"name": "tmp", "emptyDir": {"medium": "Memory"}},
-                        {"name": "logs", "emptyDir": {}},
                         {"name": "locks", "emptyDir": {}},
                     ],
                 },
@@ -2233,7 +2225,6 @@ def build_conductor_deployment(
         "volumeMounts": [
             {"name": "config", "mountPath": CONDUCTOR_CONFIG_DIR, "readOnly": True},
             {"name": "tmp", "mountPath": "/tmp"},
-            {"name": "logs", "mountPath": CONDUCTOR_LOG_DIR},
             {"name": "locks", "mountPath": CONDUCTOR_LOCKS_DIR},
         ],
     }
@@ -2295,7 +2286,6 @@ def build_conductor_deployment(
                             },
                         },
                         {"name": "tmp", "emptyDir": {"medium": "Memory"}},
-                        {"name": "logs", "emptyDir": {}},
                         {"name": "locks", "emptyDir": {}},
                     ],
                 },
@@ -2384,7 +2374,6 @@ def build_scheduler_deployment(
         "volumeMounts": [
             {"name": "config", "mountPath": SCHEDULER_CONFIG_DIR, "readOnly": True},
             {"name": "tmp", "mountPath": "/tmp"},
-            {"name": "logs", "mountPath": SCHEDULER_LOG_DIR},
         ],
     }
     return {
@@ -2445,7 +2434,6 @@ def build_scheduler_deployment(
                             },
                         },
                         {"name": "tmp", "emptyDir": {"medium": "Memory"}},
-                        {"name": "logs", "emptyDir": {}},
                     ],
                 },
             },
@@ -2533,7 +2521,6 @@ def build_transfer_cron_deployment(
         "volumeMounts": [
             {"name": "config", "mountPath": TRANSFER_CRON_CONFIG_DIR, "readOnly": True},
             {"name": "tmp", "mountPath": "/tmp"},
-            {"name": "logs", "mountPath": TRANSFER_CRON_LOG_DIR},
         ],
     }
     return {
@@ -2592,7 +2579,6 @@ def build_transfer_cron_deployment(
                             },
                         },
                         {"name": "tmp", "emptyDir": {"medium": "Memory"}},
-                        {"name": "logs", "emptyDir": {}},
                     ],
                 },
             },
@@ -2684,7 +2670,6 @@ def build_minion_manager_deployment(
                 "readOnly": True,
             },
             {"name": "tmp", "mountPath": "/tmp"},
-            {"name": "logs", "mountPath": MINION_MANAGER_LOG_DIR},
         ],
     }
     return {
@@ -2745,7 +2730,6 @@ def build_minion_manager_deployment(
                             },
                         },
                         {"name": "tmp", "emptyDir": {"medium": "Memory"}},
-                        {"name": "logs", "emptyDir": {}},
                     ],
                 },
             },
@@ -2836,7 +2820,6 @@ def build_deployer_manager_deployment(
                 "readOnly": True,
             },
             {"name": "tmp", "mountPath": "/tmp"},
-            {"name": "logs", "mountPath": DEPLOYER_MANAGER_LOG_DIR},
         ],
     }
     return {
@@ -2886,7 +2869,6 @@ def build_deployer_manager_deployment(
                             },
                         },
                         {"name": "tmp", "emptyDir": {"medium": "Memory"}},
-                        {"name": "logs", "emptyDir": {}},
                     ],
                 },
             },
@@ -2975,7 +2957,7 @@ def build_worker_deployment(
         "volumeMounts": [
             {"name": "config", "mountPath": WORKER_CONFIG_DIR, "readOnly": True},
             {"name": "tmp", "mountPath": "/tmp"},
-            {"name": "logs", "mountPath": WORKER_LOG_DIR},
+            {"name": "vixdisklib-tmp", "mountPath": WORKER_VIXDISKLIB_TMP_DIR},
             {"name": "export", "mountPath": WORKER_EXPORT_DIR},
             {"name": "dev", "mountPath": "/dev"},
             {"name": "lib-modules", "mountPath": "/lib/modules", "readOnly": True},
@@ -3006,7 +2988,7 @@ def build_worker_deployment(
                             "secret": {"secretName": config_secret_name},
                         },
                         {"name": "tmp", "emptyDir": {"medium": "Memory"}},
-                        {"name": "logs", "emptyDir": {}},
+                        {"name": "vixdisklib-tmp", "emptyDir": {}},
                         {"name": "export", "emptyDir": {}},
                         {
                             "name": "dev",

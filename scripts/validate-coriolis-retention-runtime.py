@@ -5,8 +5,9 @@ This validator exercises the shortened physical-retention behaviour of an
 already-ready disposable CoriolisAppliance's Loki without touching any shared
 resource and without printing secret or payload values. Diagnostic mode
 temporarily patches the Loki ConfigMap; formal mode validates the released
-configuration while recreating only the CoriolisAppliance. Both modes use a
-short-lived read-only observer Pod to capture metadata-only chunk inventory.
+configuration derived from the CoriolisAppliance spec.logging while
+recreating only the CoriolisAppliance. Both modes use a short-lived read-only
+observer Pod to capture metadata-only chunk inventory.
 """
 
 from __future__ import annotations
@@ -27,13 +28,20 @@ import urllib.request
 from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass
 from pathlib import Path
+from types import MappingProxyType
 
 CONFIG_KEYS = ("retention_period", "compaction_interval", "retention_delete_delay")
+# Default released config for a CoriolisAppliance whose spec.logging requests
+# retentionHours: 1 with default compaction/delete-delay. The validator always
+# derives the operative expectation from the live CR spec; this constant only
+# documents the default mapping and anchors tests.
 RELEASED_CONFIG = {
     "retention_period": "1h",
     "compaction_interval": "15m",
     "retention_delete_delay": "2h",
 }
+DEFAULT_COMPACTION_INTERVAL_MINUTES = 15
+DEFAULT_RETENTION_DELETE_DELAY_MINUTES = 120
 DIAGNOSTIC_CONFIG = {
     "retention_period": "10m",
     "compaction_interval": "1m",
@@ -61,6 +69,9 @@ OBSERVER_SLEEP_SECONDS = 21600
 DEFAULT_TIMEOUT = 30
 DEFAULT_MAX_WAIT_MINUTES = 25
 POLL_INTERVAL = 5.0
+# kubectl context/namespace/resource names vary by provider; require a simple
+# printable identifier so failures never hinge on echoed arbitrary argv text.
+_IDENTIFIER_PATTERN = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._:@-]{0,252}$")
 # Caller-owned cleanup notice surfaced in --help and on failure.
 CLEANUP_NOTICE = (
     "DIAGNOSTIC-ONLY mode patches the Loki ConfigMap and never restores it. FORMAL "
@@ -152,6 +163,52 @@ def _duration_configs_equal(
         return False
 
 
+def _minute_duration(total_minutes: int) -> str:
+    if total_minutes % 60 == 0:
+        return f"{total_minutes // 60}h"
+    return f"{total_minutes}m"
+
+
+def _strict_positive_int(value: object, stage: str) -> int:
+    if isinstance(value, bool) or not isinstance(value, int) or value < 1:
+        raise ValidationFailure(stage)
+    return value
+
+
+def _released_config_from_spec(spec: object, stage: str) -> Mapping[str, str]:
+    """Convert a CR spec's logging block into the expected released Loki config.
+
+    Never echoes invalid values; failures carry only the fixed caller stage.
+    """
+    if not isinstance(spec, dict):
+        raise ValidationFailure(stage)
+    logging_spec = spec.get("logging")
+    if not isinstance(logging_spec, dict):
+        raise ValidationFailure(stage)
+    retention_hours = _strict_positive_int(logging_spec.get("retentionHours"), stage)
+    compaction_minutes = _strict_positive_int(
+        logging_spec.get(
+            "compactionIntervalMinutes", DEFAULT_COMPACTION_INTERVAL_MINUTES
+        ),
+        stage,
+    )
+    delete_delay_minutes = _strict_positive_int(
+        logging_spec.get(
+            "retentionDeleteDelayMinutes", DEFAULT_RETENTION_DELETE_DELAY_MINUTES
+        ),
+        stage,
+    )
+    if compaction_minutes > retention_hours * 60:
+        raise ValidationFailure(stage)
+    return MappingProxyType(
+        {
+            "retention_period": f"{retention_hours}h",
+            "compaction_interval": _minute_duration(compaction_minutes),
+            "retention_delete_delay": _minute_duration(delete_delay_minutes),
+        }
+    )
+
+
 def _parse_config_values(text: str) -> dict[str, str]:
     """Return the three retention keys' values from a Loki config text."""
     values: dict[str, str] = {}
@@ -210,13 +267,18 @@ def _observer_tools_command() -> str:
     return f'for t in {tools}; do command -v "$t" >/dev/null 2>&1 || exit 1; done'
 
 
-def _observer_overrides(app_name: str) -> dict[str, object]:
-    """Return the kubectl run overrides for the disposable read-only observer Pod."""
+def _observer_overrides(app_name: str, node_name: str) -> dict[str, object]:
+    """Return the kubectl run overrides for the node-pinned read-only observer.
+
+    The observer pins to the current Loki Pod's node because the Loki data
+    PVC is ReadWriteOnce; the node value is never reported by the validator.
+    """
     pod_name = f"{app_name}-retention-observer"
     return {
         "metadata": {"labels": {OBSERVER_LABEL_KEY: OBSERVER_LABEL_VALUE}},
         "spec": {
             "automountServiceAccountToken": False,
+            "nodeName": node_name,
             "imagePullSecrets": [{"name": OBSERVER_IMAGE_PULL_SECRET}],
             "securityContext": {
                 "runAsNonRoot": True,
@@ -351,6 +413,7 @@ class Validator:
         self.report = report
         self.tenant = ""
         self.credentials: _Credentials | None = None
+        self._expected_released: Mapping[str, str] | None = None
         self.config_key: str | None = None
         self._original_config_text = ""
         self._marker = ""
@@ -364,6 +427,7 @@ class Validator:
         self._old_cr_uid = ""
         self._cr_manifest: dict[str, object] | None = None
         self._formal_version = ""
+        self._loki_node = ""
         self._retained_secret: _ResourceIdentity | None = None
         self._retained_pvc: _ResourceIdentity | None = None
         self._retained_credentials: _Credentials | None = None
@@ -374,11 +438,28 @@ class Validator:
             DIAGNOSTIC_CONFIG["retention_delete_delay"]
         )
 
+    def _expected_released_config(self, stage: str) -> Mapping[str, str]:
+        if self._expected_released is None:
+            raise ValidationFailure(stage)
+        return self._expected_released
+
     @property
     def formal_retention_window(self) -> int:
-        return _parse_duration(RELEASED_CONFIG["retention_period"]) + _parse_duration(
-            RELEASED_CONFIG["retention_delete_delay"]
+        expected = self._expected_released_config("formal-retention")
+        return _parse_duration(expected["retention_period"]) + _parse_duration(
+            expected["retention_delete_delay"]
         )
+
+    def _assert_formal_wait_bound(self) -> None:
+        """Fail early, fixed-stage, when the caller bound cannot cover the window."""
+        expected = self._expected_released_config("formal-window")
+        window = (
+            _parse_duration(expected["retention_period"])
+            + _parse_duration(expected["retention_delete_delay"])
+            + _parse_duration(expected["compaction_interval"])
+        )
+        if self.max_wait_seconds <= window:
+            raise ValidationFailure("formal-window")
 
     def _kubectl(self, *arguments: str) -> list[str]:
         return [
@@ -440,6 +521,9 @@ class Validator:
         self.tenant = f"coriolis-{uid}"
         self._old_tenant = self.tenant
         self._old_cr_uid = uid
+        self._expected_released = _released_config_from_spec(
+            payload.get("spec"), "cr-uid"
+        )
 
     def _credentials_from_secret(
         self, payload: Mapping[str, object], stage: str
@@ -541,8 +625,9 @@ class Validator:
 
     def _validate_original_config(self) -> None:
         data = self._config_map("config-original")
+        expected = self._expected_released_config("config-original")
         config_key, config_text = self._locate_config_entry(data)
-        if _parse_config_values(config_text) != RELEASED_CONFIG:
+        if _parse_config_values(config_text) != expected:
             raise ValidationFailure("config-original")
         self.config_key = config_key
         self._original_config_text = config_text
@@ -596,12 +681,13 @@ class Validator:
 
     def _verify_release_config_api(self, stage: str) -> None:
         data = self._config_map(stage)
+        expected = self._expected_released_config(stage)
         config_key, config_text = self._locate_config_entry(data, stage)
         try:
             values = _parse_config_values(config_text)
         except ValueError:
             raise ValidationFailure(stage) from None
-        if values != RELEASED_CONFIG:
+        if values != expected:
             raise ValidationFailure(stage)
         self.config_key = config_key
 
@@ -649,16 +735,36 @@ class Validator:
             self.sleeper(self.poll_interval)
         raise ValidationFailure(stage)
 
+    def _read_loki_node(self) -> None:
+        """Store the current Ready Loki Pod's node for observer co-location."""
+        payload = self._kubectl_json("loki-node", "pod", f"{self.app_name}-loki-0")
+        ready = False
+        status = payload.get("status")
+        if isinstance(status, dict):
+            for condition in status.get("conditions") or []:
+                if isinstance(condition, dict) and condition.get("type") == "Ready":
+                    ready = condition.get("status") == "True"
+        if not ready:
+            raise ValidationFailure("loki-node")
+        spec = payload.get("spec")
+        node_name = spec.get("nodeName") if isinstance(spec, dict) else None
+        if not isinstance(node_name, str) or not node_name:
+            raise ValidationFailure("loki-node")
+        self._loki_node = node_name
+
     def _observer_command(self) -> list[str]:
         return self._kubectl(
             "run",
             self._observer_pod_name(),
             "--image=" + OBSERVER_IMAGE,
             "--restart=Never",
-            "--overrides=" + json.dumps(_observer_overrides(self.app_name)),
+            "--overrides="
+            + json.dumps(_observer_overrides(self.app_name, self._loki_node)),
         )
 
     def _create_observer(self) -> None:
+        if not self._loki_node:
+            raise ValidationFailure("observer-create")
         self._checked("observer-create", self._observer_command())
 
     def _wait_observer_ready(self) -> None:
@@ -717,8 +823,10 @@ class Validator:
             if self._port_open(local_port):
                 return
             if proc.poll() is not None:
+                self._close_port_forward()
                 raise ValidationFailure(stage)
             self.sleeper(self.poll_interval)
+        self._close_port_forward()
         raise ValidationFailure(stage)
 
     def _close_port_forward(self) -> None:
@@ -1117,7 +1225,9 @@ class Validator:
         eligible = self._pushed + self.formal_retention_window
         deadline = self._pushed + self.max_wait_seconds
         while self.wallclock() < deadline:
-            if not self._config_map_matches_exact(RELEASED_CONFIG):
+            if not self._config_map_matches_exact(
+                self._expected_released_config("config-reverted")
+            ):
                 raise ValidationFailure("config-reverted")
             if self.wallclock() >= eligible:
                 remaining = self._candidate_remaining(
@@ -1137,6 +1247,7 @@ class Validator:
         self._stage("config-api", self._verify_config_api)
         self._stage("pod-recreate", lambda: self._recreate_pod("pod-recreate"))
         self._stage("config-loaded", self._config_loaded)
+        self._stage("loki-node", self._read_loki_node)
         self._stage("observer-create", self._create_observer)
         self._stage("observer-ready", self._wait_observer_ready)
         self._stage("observer-tools", self._verify_observer_tools)
@@ -1168,6 +1279,7 @@ class Validator:
 
     def _run_formal_body(self) -> None:
         self._stage("cr-uid", self._read_cr_uid)
+        self._assert_formal_wait_bound()
         self._stage("secret", self._read_secret)
         self._stage("cr-manifest", self._capture_cr_manifest)
         self._stage(
@@ -1176,8 +1288,12 @@ class Validator:
         )
         self._stage(
             "config-release-loaded",
-            lambda: self._config_loaded(RELEASED_CONFIG, "config-release-loaded"),
+            lambda: self._config_loaded(
+                self._expected_released_config("config-release-loaded"),
+                "config-release-loaded",
+            ),
         )
+        self._stage("loki-node", self._read_loki_node)
         self._stage("observer-create", self._create_observer)
         self._stage("observer-ready", self._wait_observer_ready)
         self._stage("observer-tools", self._verify_observer_tools)
@@ -1215,7 +1331,8 @@ class Validator:
             self._stage(
                 "config-release-loaded-recreated",
                 lambda: self._config_loaded(
-                    RELEASED_CONFIG, "config-release-loaded-recreated"
+                    self._expected_released_config("config-release-loaded-recreated"),
+                    "config-release-loaded-recreated",
                 ),
             )
             self._stage(
@@ -1246,6 +1363,7 @@ class Validator:
         except Exception:
             failure = ValidationFailure("internal")
         finally:
+            self._close_port_forward()
             self._delete_observer()
         elapsed = self.clock() - started
         summary = "retention-formal" if self.mode == "formal" else "retention"
@@ -1300,6 +1418,13 @@ def main(argv: Sequence[str] | None = None) -> int:
         parser.error("--max-wait-minutes must be positive")
     if args.poll_interval <= 0:
         parser.error("--poll-interval must be positive")
+    for flag, value in (
+        ("--context", args.context),
+        ("--namespace", args.namespace),
+        ("--app-name", args.app_name),
+    ):
+        if not _IDENTIFIER_PATTERN.fullmatch(value):
+            parser.error(f"{flag} must be a simple identifier")
     return Validator(
         repository_root=Path(__file__).resolve().parents[1],
         context=args.context,

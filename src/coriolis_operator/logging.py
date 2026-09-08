@@ -29,6 +29,7 @@ from typing import Any
 import bcrypt
 from kubernetes.utils.quantity import parse_quantity  # type: ignore[import-untyped]
 
+from coriolis_operator.common import BOOTSTRAP_COMPONENT
 from coriolis_operator.ingress import IngressSettings
 from coriolis_operator.reconcile import (
     OwnedClassification,
@@ -68,6 +69,10 @@ NGINX_RUN_AS_ID = 101
 LOKI_PORT = 3100
 NGINX_PORT = 8080
 LOKI_TERMINATION_GRACE_PERIOD_SECONDS = 30
+
+DEFAULT_COMPACTION_INTERVAL_MINUTES = 15
+DEFAULT_RETENTION_DELETE_DELAY_MINUTES = 120
+DEFAULT_CORIOLIS_DEBUG = True
 
 LOKI_ENTRYPOINT = "/usr/bin/loki"
 LOKI_CONFIG_DIR = "/etc/loki"
@@ -128,7 +133,9 @@ ALLOY_APP_COLLECTION_COMPONENTS = (
     "rabbitmq",
     "memcached",
     "keystone",
-    "common-bootstrap",
+    "barbican-api",
+    "barbican-worker",
+    BOOTSTRAP_COMPONENT,
     "coriolis-conductor",
     "coriolis-scheduler",
     "coriolis-transfer-cron",
@@ -218,6 +225,9 @@ class LoggingSettings:
     """Complete, validated logging runtime settings for later manifest builders."""
 
     retention_hours: int
+    compaction_interval_minutes: int
+    retention_delete_delay_minutes: int
+    coriolis_debug: bool
     storage: LoggingStorageSettings
     resources: Mapping[str, LoggingResourceSettings]
 
@@ -306,6 +316,28 @@ def _validated_retention_hours(value: object) -> int:
     return value
 
 
+def _validated_optional_minutes(
+    values: Mapping[str, object], key: str, default: int
+) -> int:
+    if key not in values:
+        return default
+    value = values[key]
+    if type(value) is not int or value < 1:
+        raise _invalid_settings()
+    return value
+
+
+def _validated_optional_bool(
+    values: Mapping[str, object], key: str, default: bool
+) -> bool:
+    if key not in values:
+        return default
+    value = values[key]
+    if type(value) is not bool:
+        raise _invalid_settings()
+    return value
+
+
 def _validated_storage_class_name(value: object) -> str:
     storage_class_name = _required_string(value)
     if storage_class_name.strip() != storage_class_name or any(
@@ -354,6 +386,23 @@ def resolve_logging_settings(spec_logging: object) -> LoggingSettings:
     """Validate complete logging CR input without mutating caller mappings."""
     logging_values = _required_mapping(spec_logging)
     retention_hours = _validated_retention_hours(logging_values.get("retentionHours"))
+    compaction_interval_minutes = _validated_optional_minutes(
+        logging_values,
+        "compactionIntervalMinutes",
+        DEFAULT_COMPACTION_INTERVAL_MINUTES,
+    )
+    retention_delete_delay_minutes = _validated_optional_minutes(
+        logging_values,
+        "retentionDeleteDelayMinutes",
+        DEFAULT_RETENTION_DELETE_DELAY_MINUTES,
+    )
+    coriolis_debug = _validated_optional_bool(
+        logging_values,
+        "coriolisDebug",
+        DEFAULT_CORIOLIS_DEBUG,
+    )
+    if compaction_interval_minutes > retention_hours * 60:
+        raise _invalid_settings()
     storage_values = _required_mapping(logging_values.get("storage"))
     loki_storage = _required_mapping(storage_values.get("loki"))
     storage_class_name = _validated_storage_class_name(
@@ -368,6 +417,9 @@ def resolve_logging_settings(spec_logging: object) -> LoggingSettings:
 
     return LoggingSettings(
         retention_hours=retention_hours,
+        compaction_interval_minutes=compaction_interval_minutes,
+        retention_delete_delay_minutes=retention_delete_delay_minutes,
+        coriolis_debug=coriolis_debug,
         storage=LoggingStorageSettings(storage_class_name, size),
         resources=components,
     )
@@ -418,7 +470,20 @@ def logging_tenant(cr_uid: str) -> str:
     return f"coriolis-{_validated_tenant(cr_uid)}"
 
 
-def _render_loki_yaml(retention_hours: int) -> str:
+def _go_duration_from_minutes(minutes: int) -> str:
+    hours, remainder = divmod(minutes, 60)
+    if remainder == 0:
+        return f"{hours}h"
+    return f"{minutes}m"
+
+
+def _render_loki_yaml(settings: LoggingSettings) -> str:
+    compaction_interval = _go_duration_from_minutes(
+        settings.compaction_interval_minutes
+    )
+    retention_delete_delay = _go_duration_from_minutes(
+        settings.retention_delete_delay_minutes
+    )
     return f"""auth_enabled: true
 
 server:
@@ -444,7 +509,7 @@ common:
       rules_directory: {LOKI_DATA_DIR}/rules
 
 limits_config:
-  retention_period: {retention_hours}h
+  retention_period: {settings.retention_hours}h
 
 schema_config:
   configs:
@@ -458,9 +523,9 @@ schema_config:
 
 compactor:
   working_directory: {LOKI_DATA_DIR}/compactor
-  compaction_interval: 15m
+  compaction_interval: {compaction_interval}
   retention_enabled: true
-  retention_delete_delay: 2h
+  retention_delete_delay: {retention_delete_delay}
   delete_request_store: filesystem
   compactor_ring:
     kvstore:
@@ -473,7 +538,7 @@ analytics:
 
 def render_loki_config(*, settings: LoggingSettings) -> dict[str, str]:
     """Return the credential-free Loki ConfigMap values."""
-    return {"loki.yaml": _render_loki_yaml(settings.retention_hours)}
+    return {"loki.yaml": _render_loki_yaml(settings)}
 
 
 def _render_nginx_conf(tenant: str) -> str:

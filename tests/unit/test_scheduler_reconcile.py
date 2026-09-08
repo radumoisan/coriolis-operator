@@ -14,7 +14,6 @@ from coriolis_operator.scheduler import (
     SCHEDULER_CONFIG_DIR,
     SCHEDULER_CONFIG_MAP_KEYS,
     SCHEDULER_IMAGE,
-    SCHEDULER_LOG_DIR,
     SCHEDULER_RUN_AS_ID,
 )
 
@@ -98,7 +97,6 @@ def test_scheduler_deployment_has_frozen_runtime_contract() -> None:
     assert container["volumeMounts"] == [
         {"name": "config", "mountPath": SCHEDULER_CONFIG_DIR, "readOnly": True},
         {"name": "tmp", "mountPath": "/tmp"},
-        {"name": "logs", "mountPath": SCHEDULER_LOG_DIR},
     ]
     assert pod["volumes"] == [
         {
@@ -130,7 +128,6 @@ def test_scheduler_deployment_has_frozen_runtime_contract() -> None:
             },
         },
         {"name": "tmp", "emptyDir": {"medium": "Memory"}},
-        {"name": "logs", "emptyDir": {}},
     ]
 
 
@@ -157,7 +154,6 @@ def test_scheduler_explicitly_omits_unneeded_runtime_surfaces() -> None:
     assert {mount["name"] for mount in container["volumeMounts"]} == {
         "config",
         "tmp",
-        "logs",
     }
 
 

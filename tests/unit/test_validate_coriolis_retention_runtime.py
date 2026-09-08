@@ -46,6 +46,40 @@ compactor:
   retention_delete_delay: 5m
 """
 
+CUSTOM_RELEASED_YAML = """auth_enabled: true
+
+server:
+  http_listen_port: 3100
+
+limits_config:
+  retention_period: 2h
+
+compactor:
+  compaction_interval: 20m
+  retention_enabled: true
+  retention_delete_delay: 90m
+"""
+
+CUSTOM_LOGGING_SPEC: dict[str, object] = {
+    "version": "2603.4",
+    "logging": {
+        "retentionHours": 2,
+        "compactionIntervalMinutes": 20,
+        "retentionDeleteDelayMinutes": 90,
+    },
+}
+
+DEFAULT_LOGGING_SPEC: dict[str, object] = {
+    "version": "2603.4",
+    "logging": {"retentionHours": 1},
+}
+
+CUSTOM_RELEASED = {
+    "retention_period": "2h",
+    "compaction_interval": "20m",
+    "retention_delete_delay": "90m",
+}
+
 CONFIGMAP_JSON = json.dumps({"metadata": {}, "data": {"loki.yaml": RELEASED_YAML}})
 
 ALLOY_APP_COMPONENTS = frozenset(
@@ -54,7 +88,9 @@ ALLOY_APP_COMPONENTS = frozenset(
         "rabbitmq",
         "memcached",
         "keystone",
-        "common-bootstrap",
+        "barbican-api",
+        "barbican-worker",
+        "common-bootstrap-v3",
         "coriolis-conductor",
         "coriolis-scheduler",
         "coriolis-transfer-cron",
@@ -100,6 +136,23 @@ def _json_runner(calls: list[tuple[str, ...]], payload: object):
     )
 
 
+def _cr_payload(
+    spec: dict[str, object], uid: str = "cr-uid-value"
+) -> dict[str, object]:
+    return {
+        "apiVersion": "coriolis.cloudbase.it/v1alpha1",
+        "kind": "CoriolisAppliance",
+        "metadata": {"name": "acme", "namespace": "ns", "uid": uid},
+        "spec": spec,
+    }
+
+
+def _derive_default_expected(validator: runtime.Validator) -> None:
+    validator.runner = _json_runner([], _cr_payload(DEFAULT_LOGGING_SPEC))
+    validator._read_cr_uid()
+    assert validator._expected_released == runtime.RELEASED_CONFIG
+
+
 def test_config_replacement_preserves_surrounding_lines() -> None:
     replaced = runtime._replace_config_values(RELEASED_YAML, runtime.DIAGNOSTIC_CONFIG)
     assert replaced == DIAGNOSTIC_YAML
@@ -115,8 +168,134 @@ def test_config_replacement_rejects_unreplaced_key() -> None:
         runtime._replace_config_values(RELEASED_YAML, {"retention_period": "10m"})
 
 
+def test_released_config_from_spec_omitted_fields_use_defaults() -> None:
+    expected = runtime._released_config_from_spec(
+        {"logging": {"retentionHours": 1}}, "cr-uid"
+    )
+    assert expected == runtime.RELEASED_CONFIG
+
+
+def test_released_config_from_spec_custom_minute_values() -> None:
+    expected = runtime._released_config_from_spec(
+        {
+            "logging": {
+                "retentionHours": 1,
+                "compactionIntervalMinutes": 1,
+                "retentionDeleteDelayMinutes": 5,
+            }
+        },
+        "cr-uid",
+    )
+    assert expected == {
+        "retention_period": "1h",
+        "compaction_interval": "1m",
+        "retention_delete_delay": "5m",
+    }
+
+
+def test_released_config_from_spec_formats_whole_hours() -> None:
+    expected = runtime._released_config_from_spec(
+        {
+            "logging": {
+                "retentionHours": 3,
+                "compactionIntervalMinutes": 60,
+                "retentionDeleteDelayMinutes": 180,
+            }
+        },
+        "cr-uid",
+    )
+    assert expected == {
+        "retention_period": "3h",
+        "compaction_interval": "1h",
+        "retention_delete_delay": "3h",
+    }
+
+
+def test_released_config_from_spec_is_copy_safe() -> None:
+    expected = runtime._released_config_from_spec(DEFAULT_LOGGING_SPEC, "cr-uid")
+    with pytest.raises(TypeError):
+        expected["retention_period"] = "9h"  # type: ignore[index]
+
+
+@pytest.mark.parametrize(
+    "spec",
+    [
+        {},
+        {"logging": None},
+        {"logging": "not-a-mapping"},
+        {"logging": {}},
+        {"logging": {"retentionHours": None}},
+        {"logging": {"retentionHours": True}},
+        {"logging": {"retentionHours": "1"}},
+        {"logging": {"retentionHours": 1.0}},
+        {"logging": {"retentionHours": 0}},
+        {"logging": {"retentionHours": -2}},
+        {"logging": {"retentionHours": 1, "compactionIntervalMinutes": None}},
+        {"logging": {"retentionHours": 1, "compactionIntervalMinutes": True}},
+        {"logging": {"retentionHours": 1, "compactionIntervalMinutes": "15"}},
+        {"logging": {"retentionHours": 1, "compactionIntervalMinutes": 0}},
+        {"logging": {"retentionHours": 1, "compactionIntervalMinutes": 61}},
+        {"logging": {"retentionHours": 1, "retentionDeleteDelayMinutes": None}},
+        {"logging": {"retentionHours": 1, "retentionDeleteDelayMinutes": True}},
+        {"logging": {"retentionHours": 1, "retentionDeleteDelayMinutes": "120"}},
+        {"logging": {"retentionHours": 1, "retentionDeleteDelayMinutes": 0}},
+    ],
+)
+def test_released_config_from_spec_rejects_invalid_silently(
+    spec: dict[str, object],
+) -> None:
+    with pytest.raises(runtime.ValidationFailure) as error:
+        runtime._released_config_from_spec(spec, "cr-uid")
+    assert str(error.value) == "validation failed: cr-uid"
+
+
+def test_read_cr_uid_derives_expected_released_config(tmp_path: Path) -> None:
+    validator = _validator(repository_root=tmp_path)
+    calls: list[tuple[str, ...]] = []
+    validator.runner = _json_runner(calls, _cr_payload(CUSTOM_LOGGING_SPEC))
+    validator._read_cr_uid()
+    assert validator._expected_released == CUSTOM_RELEASED
+    assert len(calls) == 1
+
+
+def test_read_cr_uid_rejects_invalid_logging_without_second_read(
+    tmp_path: Path,
+) -> None:
+    validator = _validator(repository_root=tmp_path)
+    calls: list[tuple[str, ...]] = []
+    validator.runner = _json_runner(calls, _cr_payload({"version": "2603.4"}))
+    with pytest.raises(runtime.ValidationFailure, match="cr-uid"):
+        validator._read_cr_uid()
+    assert len(calls) == 1
+
+
+def test_original_config_accepts_spec_derived_values(tmp_path: Path) -> None:
+    validator = _validator(repository_root=tmp_path)
+    validator.runner = _json_runner([], _cr_payload(CUSTOM_LOGGING_SPEC))
+    validator._read_cr_uid()
+    validator.runner = _json_runner(
+        [], {"metadata": {}, "data": {"loki.yaml": CUSTOM_RELEASED_YAML}}
+    )
+    validator._validate_original_config()
+    assert validator.config_key == "loki.yaml"
+    assert validator._original_config_text == CUSTOM_RELEASED_YAML
+
+    calls: list[tuple[str, ...]] = []
+    validator.runner = _recording_runner(
+        calls, subprocess.CompletedProcess([], 0, "", "")
+    )
+    validator._patch_config()
+    patch_call = next(command for command in calls if "patch" in command)
+    patch = json.loads(patch_call[patch_call.index("--patch") + 1])
+    assert (
+        runtime._parse_config_values(patch["data"]["loki.yaml"])
+        == runtime.DIAGNOSTIC_CONFIG
+    )
+
+
 def test_original_config_rejects_unexpected_values() -> None:
     validator = _validator()
+    validator._expected_released = runtime.RELEASED_CONFIG
     validator.runner = _json_runner(
         [],
         {
@@ -131,10 +310,19 @@ def test_original_config_rejects_unexpected_values() -> None:
     with pytest.raises(runtime.ValidationFailure, match="config-original"):
         validator._validate_original_config()
 
+    validator_custom = _validator()
+    validator_custom._expected_released = CUSTOM_RELEASED
+    validator_custom.runner = _json_runner(
+        [], {"metadata": {}, "data": {"loki.yaml": RELEASED_YAML}}
+    )
+    with pytest.raises(runtime.ValidationFailure, match="config-original"):
+        validator_custom._validate_original_config()
+
 
 def test_patch_touches_only_configmap_data(tmp_path: Path) -> None:
     calls: list[tuple[str, ...]] = []
     validator = _validator(repository_root=tmp_path)
+    _derive_default_expected(validator)
     validator.runner = _json_runner(calls, json.loads(CONFIGMAP_JSON))
     validator._validate_original_config()
 
@@ -155,6 +343,7 @@ def test_patch_touches_only_configmap_data(tmp_path: Path) -> None:
 
 def test_config_map_is_diagnostic_and_reverted(tmp_path: Path) -> None:
     validator = _validator(repository_root=tmp_path)
+    _derive_default_expected(validator)
     validator.runner = _json_runner([], json.loads(CONFIGMAP_JSON))
     validator._validate_original_config()
 
@@ -611,9 +800,12 @@ def test_query_persisted_requires_positive(tmp_path: Path) -> None:
 
 
 def test_observer_overrides_security_and_readonly_mount() -> None:
-    overrides = runtime._observer_overrides("acme")
+    overrides = runtime._observer_overrides("acme", "node-alpha")
     spec = overrides["spec"]
     assert spec["automountServiceAccountToken"] is False
+    assert spec["nodeName"] == "node-alpha"
+    assert "affinity" not in spec
+    assert "nodeSelector" not in spec
     assert spec["imagePullSecrets"] == [{"name": runtime.OBSERVER_IMAGE_PULL_SECRET}]
     pod_sc = spec["securityContext"]
     assert pod_sc["runAsNonRoot"] is True
@@ -657,6 +849,7 @@ def test_observer_component_label_not_in_alloy_allowlist() -> None:
 
 def test_observer_command_is_scoped_run_pod(tmp_path: Path) -> None:
     validator = _validator(repository_root=tmp_path)
+    validator._loki_node = "node-alpha"
     command = validator._observer_command()
     assert command[:5] == ["kubectl", "--context", "ctx", "--namespace", "ns"]
     assert "run" in command
@@ -666,7 +859,81 @@ def test_observer_command_is_scoped_run_pod(tmp_path: Path) -> None:
     override_arg = next(arg for arg in command if arg.startswith("--overrides="))
     overrides = json.loads(override_arg[len("--overrides=") :])
     assert overrides["spec"]["containers"][0]["name"] == "acme-retention-observer"
+    assert overrides["spec"]["nodeName"] == "node-alpha"
     assert "loki-0" not in " ".join(command)
+
+
+def _loki_pod_payload(
+    *,
+    node_name: object = "node-alpha",
+    ready: bool = True,
+    include_spec: bool = True,
+) -> dict[str, object]:
+    payload: dict[str, object] = {
+        "metadata": {"name": "acme-loki-0", "uid": "loki-uid"},
+        "status": {
+            "conditions": [{"type": "Ready", "status": "True" if ready else "False"}]
+        },
+    }
+    if include_spec:
+        payload["spec"] = {"nodeName": node_name}
+    return payload
+
+
+def test_read_loki_node_pins_current_ready_loki_pod(tmp_path: Path) -> None:
+    validator = _validator(repository_root=tmp_path)
+    calls: list[tuple[str, ...]] = []
+    validator.runner = _json_runner(calls, _loki_pod_payload())
+    output: list[str] = []
+    validator.report = output.append
+    validator._read_loki_node()
+    assert validator._loki_node == "node-alpha"
+    scoped = calls[0]
+    assert scoped[:8] == (
+        "kubectl",
+        "--context",
+        "ctx",
+        "--namespace",
+        "ns",
+        "get",
+        "pod",
+        "acme-loki-0",
+    )
+
+
+@pytest.mark.parametrize(
+    "payload",
+    [
+        _loki_pod_payload(node_name=None),
+        _loki_pod_payload(node_name=""),
+        _loki_pod_payload(ready=False),
+        _loki_pod_payload(include_spec=False),
+        {"metadata": {"name": "acme-loki-0"}},
+    ],
+)
+def test_read_loki_node_rejects_missing_or_unready_silently(
+    tmp_path: Path, payload: dict[str, object]
+) -> None:
+    validator = _validator(repository_root=tmp_path)
+    validator.runner = _json_runner([], payload)
+    with pytest.raises(runtime.ValidationFailure, match="loki-node"):
+        validator._read_loki_node()
+    assert validator._loki_node == ""
+
+
+def test_create_observer_requires_pinned_node(tmp_path: Path) -> None:
+    validator = _validator(repository_root=tmp_path)
+    calls: list[tuple[str, ...]] = []
+    validator.runner = _recording_runner(
+        calls, subprocess.CompletedProcess([], 0, "", "")
+    )
+    with pytest.raises(runtime.ValidationFailure, match="observer-create"):
+        validator._create_observer()
+    assert calls == []
+
+    validator._loki_node = "node-alpha"
+    validator._create_observer()
+    assert any("run" in command for command in calls)
 
 
 def test_observer_tools_probe_is_silent_and_complete() -> None:
@@ -737,6 +1004,91 @@ def test_close_port_forward_resets_stored_process(tmp_path: Path) -> None:
     validator._close_port_forward()
 
 
+class _FakeForwardProc:
+    def __init__(self, exit_code: int | None = None) -> None:
+        self.exit_code = exit_code
+        self.terminated = False
+        self.waited = False
+        self.killed = False
+
+    def poll(self) -> int | None:
+        return self.exit_code
+
+    def terminate(self) -> None:
+        self.terminated = True
+
+    def wait(self, timeout: int) -> None:
+        self.waited = True
+
+    def kill(self) -> None:
+        self.killed = True
+
+
+def test_open_port_forward_timeout_reaps_child_before_raising(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    validator = _validator(repository_root=tmp_path, timeout=30)
+    now = [0.0]
+    validator.clock = lambda: now[0]
+    validator.sleeper = lambda _: now.__setitem__(0, now[0] + 1)
+    validator._free_local_port = lambda: 1234
+    validator._port_open = lambda port: False
+    proc = _FakeForwardProc()
+    monkeypatch.setattr(runtime.subprocess, "Popen", lambda *a, **k: proc)
+    with pytest.raises(runtime.ValidationFailure, match="config-loaded"):
+        validator._open_port_forward("config-loaded", "pod/acme-loki-0", 3100)
+    assert proc.terminated is True
+    assert proc.waited is True
+    assert validator._port_forward_proc is None
+
+
+def test_open_port_forward_dead_child_is_reaped_before_raising(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    validator = _validator(repository_root=tmp_path, timeout=30)
+    now = [0.0]
+    validator.clock = lambda: now[0]
+    validator.sleeper = lambda _: now.__setitem__(0, now[0] + 1)
+    validator._free_local_port = lambda: 1234
+    validator._port_open = lambda port: False
+    proc = _FakeForwardProc(exit_code=1)
+    monkeypatch.setattr(runtime.subprocess, "Popen", lambda *a, **k: proc)
+    with pytest.raises(runtime.ValidationFailure, match="port-forward"):
+        validator._open_port_forward("port-forward", "svc/acme-gateway", 8080)
+    assert proc.terminated is True
+    assert validator._port_forward_proc is None
+
+
+def test_open_port_forward_success_keeps_child(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    validator = _validator(repository_root=tmp_path, timeout=30)
+    validator._free_local_port = lambda: 1234
+    validator._port_open = lambda port: port == 1234
+    proc = _FakeForwardProc()
+    monkeypatch.setattr(runtime.subprocess, "Popen", lambda *a, **k: proc)
+    validator._open_port_forward("port-forward", "svc/acme-gateway", 8080)
+    assert validator._port_forward_proc is proc
+    assert proc.terminated is False
+
+
+def test_run_closes_port_forward_before_observer_cleanup(tmp_path: Path) -> None:
+    validator = _validator(repository_root=tmp_path, report=lambda message: None)
+    events: list[str] = []
+    proc = _FakeForwardProc()
+    proc.terminate = lambda: events.append("terminate")  # type: ignore[method-assign]
+    proc.wait = lambda timeout: events.append("wait")  # type: ignore[method-assign]
+
+    def body() -> None:
+        validator._port_forward_proc = proc
+
+    validator._run_body = body
+    validator._delete_observer = lambda: events.append("delete-observer")
+    assert validator.run() == 0
+    assert events == ["terminate", "wait", "delete-observer"]
+    assert validator._port_forward_proc is None
+
+
 def test_run_body_sequences_flush_materialize_persist(tmp_path: Path) -> None:
     validator = _validator(repository_root=tmp_path)
     calls: list[str] = []
@@ -748,6 +1100,7 @@ def test_run_body_sequences_flush_materialize_persist(tmp_path: Path) -> None:
         "_verify_config_api",
         "_recreate_pod",
         "_config_loaded",
+        "_read_loki_node",
         "_create_observer",
         "_wait_observer_ready",
         "_verify_observer_tools",
@@ -801,6 +1154,7 @@ def test_run_body_sequences_flush_materialize_persist(tmp_path: Path) -> None:
         < calls.index("_verify_config_api")
         < calls.index("_recreate_pod")
         < calls.index("_config_loaded")
+        < calls.index("_read_loki_node")
         < calls.index("_create_observer")
         < calls.index("_wait_observer_ready")
         < calls.index("_verify_observer_tools")
@@ -850,6 +1204,34 @@ def test_cli_requires_run_acknowledgement(monkeypatch: pytest.MonkeyPatch) -> No
         runtime.main(["--run", "--context", "c", "--namespace", "n", "--app-name", "a"])
         == 0
     )
+
+
+@pytest.mark.parametrize(
+    ("flag", "value"),
+    [
+        ("--context", "bad context"),
+        ("--context", ""),
+        ("--namespace", "ns/../x"),
+        ("--app-name", "app;rm"),
+        ("--app-name", "$evil"),
+    ],
+)
+def test_cli_rejects_invalid_identifiers_with_fixed_text(
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+    flag: str,
+    value: str,
+) -> None:
+    monkeypatch.setattr(
+        runtime.Validator, "run", lambda self: pytest.fail("must not run")
+    )
+    argv = ["--run", "--context", "c", "--namespace", "n", "--app-name", "a"]
+    argv[argv.index(flag) + 1] = value
+    with pytest.raises(SystemExit) as error:
+        runtime.main(argv)
+    assert error.value.code == 2
+    captured = capsys.readouterr()
+    assert "must be a simple identifier" in captured.err
 
 
 def test_retention_window_derives_from_diagnostic_values() -> None:
@@ -907,7 +1289,14 @@ def test_capture_cr_manifest_strips_status_and_managed_metadata(tmp_path: Path) 
             "managedFields": [{"manager": "operator"}],
             "labels": {"unwanted": "metadata"},
         },
-        "spec": {"version": "2603.4", "logging": {"retentionHours": 1}},
+        "spec": {
+            "version": "2603.4",
+            "logging": {
+                "retentionHours": 2,
+                "compactionIntervalMinutes": 20,
+                "retentionDeleteDelayMinutes": 90,
+            },
+        },
         "status": {"acceptedVersion": "2603.4"},
     }
     validator.runner = _json_runner([], payload)
@@ -917,13 +1306,21 @@ def test_capture_cr_manifest_strips_status_and_managed_metadata(tmp_path: Path) 
         "apiVersion": "coriolis.cloudbase.it/v1alpha1",
         "kind": "CoriolisAppliance",
         "metadata": {"name": "acme", "namespace": "ns"},
-        "spec": {"version": "2603.4", "logging": {"retentionHours": 1}},
+        "spec": {
+            "version": "2603.4",
+            "logging": {
+                "retentionHours": 2,
+                "compactionIntervalMinutes": 20,
+                "retentionDeleteDelayMinutes": 90,
+            },
+        },
     }
     assert validator._formal_version == "2603.4"
 
 
 def test_formal_release_config_is_exact_and_loaded_semantically(tmp_path: Path) -> None:
     validator = _validator(repository_root=tmp_path, mode="formal")
+    _derive_default_expected(validator)
     validator.runner = _json_runner(
         [], {"metadata": {}, "data": {"loki.yaml": RELEASED_YAML}}
     )
@@ -937,7 +1334,30 @@ def test_formal_release_config_is_exact_and_loaded_semantically(tmp_path: Path) 
     validator._open_port_forward = lambda *a: None
     validator._close_port_forward = lambda: None
     validator._http = lambda *a, **k: (200, loaded.encode())
-    validator._config_loaded(runtime.RELEASED_CONFIG, "config-release-loaded")
+    validator._config_loaded(
+        validator._expected_released_config("config-release-loaded"),
+        "config-release-loaded",
+    )
+
+
+def test_verify_release_config_api_uses_spec_derived_values(
+    tmp_path: Path,
+) -> None:
+    validator = _validator(repository_root=tmp_path, mode="formal")
+    validator.runner = _json_runner([], _cr_payload(CUSTOM_LOGGING_SPEC))
+    validator._read_cr_uid()
+
+    validator.runner = _json_runner(
+        [], {"metadata": {}, "data": {"loki.yaml": CUSTOM_RELEASED_YAML}}
+    )
+    validator._verify_release_config_api("config-release")
+    assert validator.config_key == "loki.yaml"
+
+    validator.runner = _json_runner(
+        [], {"metadata": {}, "data": {"loki.yaml": RELEASED_YAML}}
+    )
+    with pytest.raises(runtime.ValidationFailure, match="config-release"):
+        validator._verify_release_config_api("config-release")
 
 
 def test_create_cr_uses_sanitized_manifest_only_on_stdin(tmp_path: Path) -> None:
@@ -1088,6 +1508,7 @@ def test_formal_queries_and_three_hour_retention_window(tmp_path: Path) -> None:
     validator = _validator(
         repository_root=tmp_path, mode="formal", max_wait_minutes=240
     )
+    _derive_default_expected(validator)
     validator._marker = "marker"
     validator._pushed = 100.0
     validator._old_tenant = "coriolis-old"
@@ -1108,9 +1529,13 @@ def test_formal_queries_and_three_hour_retention_window(tmp_path: Path) -> None:
 
     now = [100.0 + validator.formal_retention_window]
     validator.wallclock = lambda: now[0]
-    validator._config_map_matches_exact = lambda expected: (
-        expected == runtime.RELEASED_CONFIG
-    )
+    compared: list[object] = []
+
+    def matches_exact(expected: object) -> bool:
+        compared.append(expected)
+        return expected == validator._expected_released_config("config-reverted")
+
+    validator._config_map_matches_exact = matches_exact
     observed_tenants: list[str | None] = []
     validator._candidate_remaining = lambda candidates, tenant=None: (
         observed_tenants.append(tenant) or 0
@@ -1118,19 +1543,75 @@ def test_formal_queries_and_three_hour_retention_window(tmp_path: Path) -> None:
     validator._direct_query_count = lambda tenant, stage: 0
     validator._wait_and_assert_formal_retention()
     assert observed_tenants == ["coriolis-old"]
+    assert compared and all(
+        expected == validator._expected_released for expected in compared
+    )
+
+
+def test_formal_retention_window_and_reverted_polling_use_custom_spec(
+    tmp_path: Path,
+) -> None:
+    validator = _validator(
+        repository_root=tmp_path, mode="formal", max_wait_minutes=240
+    )
+    validator.runner = _json_runner([], _cr_payload(CUSTOM_LOGGING_SPEC))
+    validator._read_cr_uid()
+    validator._marker = "marker"
+    validator._pushed = 100.0
+    validator._old_tenant = "coriolis-old"
+    validator._candidates = (runtime.InventoryEntry("a", 1, 1, _sha("a")),)
+    assert validator.formal_retention_window == 2 * 60 * 60 + 90 * 60
+
+    now = [100.0 + validator.formal_retention_window]
+    validator.wallclock = lambda: now[0]
+    validator._config_map_matches_exact = lambda expected: expected == CUSTOM_RELEASED
+    validator._candidate_remaining = lambda candidates, tenant=None: 0
+    validator._direct_query_count = lambda tenant, stage: 0
+    validator._wait_and_assert_formal_retention()
+
+    validator._config_map_matches_exact = lambda expected: False
+    with pytest.raises(runtime.ValidationFailure, match="config-reverted"):
+        validator._wait_and_assert_formal_retention()
+
+
+def test_formal_wait_bound_rejects_insufficient_max_wait(tmp_path: Path) -> None:
+    validator = _validator(
+        repository_root=tmp_path, mode="formal", max_wait_minutes=180
+    )
+    _derive_default_expected(validator)
+    with pytest.raises(runtime.ValidationFailure, match="formal-window"):
+        validator._assert_formal_wait_bound()
+
+
+def test_formal_wait_bound_accepts_window_plus_compaction_margin(
+    tmp_path: Path,
+) -> None:
+    validator = _validator(
+        repository_root=tmp_path, mode="formal", max_wait_minutes=240
+    )
+    _derive_default_expected(validator)
+    validator._assert_formal_wait_bound()
+
+    custom = _validator(repository_root=tmp_path, mode="formal", max_wait_minutes=231)
+    custom.runner = _json_runner([], _cr_payload(CUSTOM_LOGGING_SPEC))
+    custom._read_cr_uid()
+    custom._assert_formal_wait_bound()
 
 
 def test_formal_run_body_keeps_release_config_unpatched_and_orders_stages(
     tmp_path: Path,
 ) -> None:
     validator = _validator(repository_root=tmp_path, mode="formal")
+    _derive_default_expected(validator)
     calls: list[str] = []
     for name in (
         "_read_cr_uid",
+        "_assert_formal_wait_bound",
         "_read_secret",
         "_capture_cr_manifest",
         "_verify_release_config_api",
         "_config_loaded",
+        "_read_loki_node",
         "_create_observer",
         "_wait_observer_ready",
         "_verify_observer_tools",
@@ -1159,6 +1640,9 @@ def test_formal_run_body_keeps_release_config_unpatched_and_orders_stages(
 
     validator._run_formal_body()
 
+    assert calls[:2] == ["_read_cr_uid", "_assert_formal_wait_bound"]
+    assert calls.index("_read_loki_node") < calls.index("_create_observer")
+    assert calls.index("_create_observer") < calls.index("_open_port_forward")
     first_open = calls.index("_open_port_forward")
     pre = calls.index("_capture_pre_inventory")
     push = calls.index("_push_marker")

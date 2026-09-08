@@ -9,7 +9,6 @@ from coriolis_operator.api import (
     API_CONFIG_MAP_KEYS,
     API_IMAGE,
     API_LOCKS_DIR,
-    API_LOG_DIR,
     API_PORT,
     API_PROTOCOL_PROBE,
     API_RUN_AS_ID,
@@ -99,7 +98,6 @@ def test_api_manifests_have_frozen_runtime_contract() -> None:
     assert container["volumeMounts"] == [
         {"name": "config", "mountPath": API_CONFIG_DIR, "readOnly": True},
         {"name": "tmp", "mountPath": "/tmp"},
-        {"name": "logs", "mountPath": API_LOG_DIR},
         {"name": "locks", "mountPath": API_LOCKS_DIR},
     ]
     assert pod["volumes"] == [
@@ -132,7 +130,6 @@ def test_api_manifests_have_frozen_runtime_contract() -> None:
             },
         },
         {"name": "tmp", "emptyDir": {"medium": "Memory"}},
-        {"name": "logs", "emptyDir": {}},
         {"name": "locks", "emptyDir": {}},
     ]
     for probe_name, period, failure in (

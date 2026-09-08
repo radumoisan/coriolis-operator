@@ -13,6 +13,9 @@ spec:
       clusterIssuer: letsencrypt
   logging:
     retentionHours: 24
+    compactionIntervalMinutes: 15
+    retentionDeleteDelayMinutes: 120
+    coriolisDebug: true
     storage:
       loki:
         storageClassName: local-path

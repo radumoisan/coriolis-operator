@@ -88,6 +88,9 @@ from coriolis_operator.reconcile import (
 def _valid_settings() -> dict[str, object]:
     return {
         "retentionHours": 24,
+        "compactionIntervalMinutes": 30,
+        "retentionDeleteDelayMinutes": 90,
+        "coriolisDebug": False,
         "storage": {"loki": {"storageClassName": "loki-storage", "size": "10Gi"}},
         "resources": {
             "loki": {
@@ -114,6 +117,9 @@ def test_resolve_logging_settings_resolves_explicit_values_without_mutation() ->
     settings = resolve_logging_settings(_valid_settings())
 
     assert settings.retention_hours == 24
+    assert settings.compaction_interval_minutes == 30
+    assert settings.retention_delete_delay_minutes == 90
+    assert settings.coriolis_debug is False
     assert settings.storage.storage_class_name == "loki-storage"
     assert settings.storage.size == "10Gi"
     assert settings.resources["loki"].requests_cpu == "250m"
@@ -148,6 +154,69 @@ def test_resolve_logging_settings_returns_frozen_immutable_values() -> None:
         settings.resources = {  # type: ignore[misc]
             "loki": settings.resources["loki"]
         }
+
+
+def test_resolve_logging_settings_defaults_omitted_lifecycle_fields() -> None:
+    logging = _valid_settings()
+    del logging["compactionIntervalMinutes"]  # type: ignore[attr-defined]
+    del logging["retentionDeleteDelayMinutes"]  # type: ignore[attr-defined]
+    del logging["coriolisDebug"]  # type: ignore[attr-defined]
+    settings = resolve_logging_settings(logging)
+
+    assert settings.compaction_interval_minutes == 15
+    assert settings.retention_delete_delay_minutes == 120
+    assert settings.coriolis_debug is True
+
+
+@pytest.mark.parametrize(
+    ("field", "value"),
+    [
+        ("compactionIntervalMinutes", True),
+        ("compactionIntervalMinutes", 0),
+        ("compactionIntervalMinutes", -15),
+        ("compactionIntervalMinutes", 1.5),
+        ("compactionIntervalMinutes", "15"),
+        ("compactionIntervalMinutes", None),
+        ("retentionDeleteDelayMinutes", True),
+        ("retentionDeleteDelayMinutes", 0),
+        ("retentionDeleteDelayMinutes", -120),
+        ("retentionDeleteDelayMinutes", 1.5),
+        ("retentionDeleteDelayMinutes", "2h"),
+        ("retentionDeleteDelayMinutes", None),
+        ("coriolisDebug", "true"),
+        ("coriolisDebug", 1),
+        ("coriolisDebug", 0),
+        ("coriolisDebug", None),
+    ],
+)
+def test_resolve_logging_settings_rejects_invalid_lifecycle_fields(
+    field: str,
+    value: object,
+) -> None:
+    logging = _valid_settings()
+    logging[field] = value
+
+    with pytest.raises(ValueError, match="^invalid logging settings$"):
+        resolve_logging_settings(logging)
+
+
+def test_resolve_logging_settings_rejects_oversized_compaction_interval() -> None:
+    logging = _valid_settings()
+    logging["retentionHours"] = 1
+    logging["compactionIntervalMinutes"] = 61
+
+    with pytest.raises(ValueError, match="^invalid logging settings$"):
+        resolve_logging_settings(logging)
+
+
+def test_resolve_logging_settings_allows_compaction_interval_up_to_retention() -> None:
+    logging = _valid_settings()
+    logging["retentionHours"] = 1
+    logging["compactionIntervalMinutes"] = 60
+
+    settings = resolve_logging_settings(logging)
+
+    assert settings.compaction_interval_minutes == 60
 
 
 @pytest.mark.parametrize(
@@ -241,9 +310,16 @@ def test_resolve_logging_settings_rejects_missing_requests_or_limits(
             resolve_logging_settings(logging)
 
 
-def _settings(retention_hours: int = 24) -> LoggingSettings:
+def _settings(
+    retention_hours: int = 24,
+    compaction_interval_minutes: int = 15,
+    retention_delete_delay_minutes: int = 120,
+) -> LoggingSettings:
     return LoggingSettings(
         retention_hours=retention_hours,
+        compaction_interval_minutes=compaction_interval_minutes,
+        retention_delete_delay_minutes=retention_delete_delay_minutes,
+        coriolis_debug=True,
         storage=LoggingStorageSettings("loki-storage", "10Gi"),
         resources={
             "loki": LoggingResourceSettings("250m", "512Mi", "1", "1Gi"),
@@ -439,6 +515,34 @@ def test_render_loki_config_reflects_retention_hours_only() -> None:
     rendered = render_loki_config(settings=_settings(retention_hours=168))["loki.yaml"]
     assert "  retention_period: 168h\n" in rendered
     assert "  retention_period: 24h\n" not in rendered
+
+
+def test_render_loki_config_uses_validated_lifecycle_minutes() -> None:
+    rendered = render_loki_config(
+        settings=_settings(
+            retention_hours=168,
+            compaction_interval_minutes=45,
+            retention_delete_delay_minutes=180,
+        )
+    )["loki.yaml"]
+
+    assert "  compaction_interval: 45m\n" in rendered
+    assert "  retention_delete_delay: 3h\n" in rendered
+    assert "  compaction_interval: 15m\n" not in rendered
+    assert "  retention_delete_delay: 2h\n" not in rendered
+
+
+def test_render_loki_config_formats_whole_hours_from_minutes() -> None:
+    rendered = render_loki_config(
+        settings=_settings(
+            retention_hours=72,
+            compaction_interval_minutes=60,
+            retention_delete_delay_minutes=120,
+        )
+    )["loki.yaml"]
+
+    assert "  compaction_interval: 1h\n" in rendered
+    assert "  retention_delete_delay: 2h\n" in rendered
 
 
 def test_render_gateway_config_has_exact_locations_auth_and_header() -> None:
@@ -747,6 +851,30 @@ def _alloy_render() -> str:
     )
 
 
+def test_alloy_app_collection_components_match_current_workloads() -> None:
+    assert ALLOY_APP_COLLECTION_COMPONENTS == (
+        "mariadb",
+        "rabbitmq",
+        "memcached",
+        "keystone",
+        "barbican-api",
+        "barbican-worker",
+        "common-bootstrap-v3",
+        "coriolis-conductor",
+        "coriolis-scheduler",
+        "coriolis-transfer-cron",
+        "coriolis-minion-manager",
+        "coriolis-deployer-manager",
+        "coriolis-worker",
+        "coriolis-api",
+        "coriolis-web",
+    )
+    assert "common-bootstrap" not in ALLOY_APP_COLLECTION_COMPONENTS
+    assert "memcached" in ALLOY_APP_COLLECTION_COMPONENTS
+    for self_collected in LOGGING_RESOURCE_COMPONENTS:
+        assert self_collected not in ALLOY_APP_COLLECTION_COMPONENTS
+
+
 def test_render_alloy_config_restricts_namespace_and_app_allowlist() -> None:
     config = _alloy_render()
 
@@ -757,6 +885,14 @@ def test_render_alloy_config_restricts_namespace_and_app_allowlist() -> None:
         + ", ".join(ALLOY_APP_COLLECTION_COMPONENTS)
         + ")"
     ) in config
+    assert (
+        "coriolis.cloudbase.it/component in (mariadb, rabbitmq, memcached, keystone, "
+        "barbican-api, barbican-worker, common-bootstrap-v3, coriolis-conductor, "
+        "coriolis-scheduler, coriolis-transfer-cron, coriolis-minion-manager, "
+        "coriolis-deployer-manager, coriolis-worker, coriolis-api, coriolis-web)"
+    ) in config
+    assert "common-bootstrap," not in config
+    assert "common-bootstrap)" not in config
     for component in ALLOY_APP_COLLECTION_COMPONENTS:
         assert component in config
     for excluded in ("loki", "gateway", "alloy", "adaptor"):
@@ -1171,6 +1307,17 @@ def test_build_adaptor_deployment_env_contract_is_non_sensitive() -> None:
         "HOME": "/tmp",
         "PYTHONDONTWRITEBYTECODE": "1",
     }
+    assert env[f"{ADAPTOR_ENV_PREFIX}COMPONENTS"] == (
+        "mariadb,rabbitmq,memcached,keystone,barbican-api,barbican-worker,"
+        "common-bootstrap-v3,coriolis-conductor,coriolis-scheduler,"
+        "coriolis-transfer-cron,coriolis-minion-manager,coriolis-deployer-manager,"
+        "coriolis-worker,coriolis-api,coriolis-web"
+    )
+    adaptor_components = env[f"{ADAPTOR_ENV_PREFIX}COMPONENTS"].split(",")
+    assert adaptor_components == list(ALLOY_APP_COLLECTION_COMPONENTS)
+    assert "common-bootstrap" not in adaptor_components
+    for self_collected in LOGGING_RESOURCE_COMPONENTS:
+        assert self_collected not in adaptor_components
     assert f"{ADAPTOR_ENV_PREFIX}WRITE_PASSWORD" not in env
     assert all(entry.keys() == {"name", "value"} for entry in container["env"])
     assert all(

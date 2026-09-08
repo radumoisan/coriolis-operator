@@ -213,11 +213,14 @@ def render_sensitive_coriolis_config(
     *,
     endpoints: SensitiveCoriolisEndpoints,
     credentials: SensitiveCoriolisCredentials,
+    coriolis_debug: bool,
 ) -> SensitiveCoriolisConfig:
     """Return credential-redacted Secret values for the packaged Coriolis config."""
     if type(endpoints) is not SensitiveCoriolisEndpoints:
         raise ValueError(_INVALID_SENSITIVE_INPUT_MESSAGE)
     if type(credentials) is not SensitiveCoriolisCredentials:
+        raise ValueError(_INVALID_SENSITIVE_INPUT_MESSAGE)
+    if type(coriolis_debug) is not bool:
         raise ValueError(_INVALID_SENSITIVE_INPUT_MESSAGE)
 
     rabbitmq_host = _validate_sensitive_string(endpoints.rabbitmq_host)
@@ -248,8 +251,7 @@ def render_sensitive_coriolis_config(
                 "rabbitmq_password": rabbitmq_password,
                 "rabbitmq_host": rabbitmq_host,
                 "rabbitmq_port": 5672,
-                "coriolis_debug": True,
-                "coriolis_log_dir": "/var/log/coriolis",
+                "coriolis_debug": coriolis_debug,
                 "coriolis_export_providers": _EXPORT_PROVIDERS,
                 "coriolis_import_providers": _IMPORT_PROVIDERS,
                 "coriolis_providers": _PROVIDERS,

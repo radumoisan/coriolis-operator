@@ -7,7 +7,6 @@ from coriolis_operator.minion_manager import (
     MINION_MANAGER_CONFIG_DIR,
     MINION_MANAGER_CONFIG_MAP_KEYS,
     MINION_MANAGER_IMAGE,
-    MINION_MANAGER_LOG_DIR,
     MINION_MANAGER_RUN_AS_ID,
 )
 from coriolis_operator.reconcile import (
@@ -98,7 +97,6 @@ def test_minion_manager_deployment_has_frozen_runtime_contract() -> None:
     assert container["volumeMounts"] == [
         {"name": "config", "mountPath": MINION_MANAGER_CONFIG_DIR, "readOnly": True},
         {"name": "tmp", "mountPath": "/tmp"},
-        {"name": "logs", "mountPath": MINION_MANAGER_LOG_DIR},
     ]
     assert pod["volumes"] == [
         {
@@ -130,7 +128,6 @@ def test_minion_manager_deployment_has_frozen_runtime_contract() -> None:
             },
         },
         {"name": "tmp", "emptyDir": {"medium": "Memory"}},
-        {"name": "logs", "emptyDir": {}},
     ]
 
 
@@ -152,7 +149,6 @@ def test_minion_manager_omits_unneeded_runtime_surfaces() -> None:
     assert {mount["name"] for mount in container["volumeMounts"]} == {
         "config",
         "tmp",
-        "logs",
     }
 
 

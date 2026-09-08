@@ -16,7 +16,6 @@ API_ARGS = (
     "--config-file=/etc/coriolis/coriolis.conf",
 )
 API_CONFIG_DIR = "/etc/coriolis"
-API_LOG_DIR = "/var/log/coriolis"
 API_LOCKS_DIR = "/opt/coriolis/locks"
 API_CONFIG_MAP_KEYS = (
     "coriolis-api.wsgi",

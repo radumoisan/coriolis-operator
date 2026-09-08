@@ -2349,6 +2349,7 @@ def reconcile_appliance(
             owner=owner,
             values=render_sensitive_coriolis_config(
                 endpoints=inputs.endpoints,
+                coriolis_debug=_logging_settings.coriolis_debug,
                 credentials=SensitiveCoriolisCredentials(
                     rabbitmq_password=preflight.credentials[
                         infrastructure_credentials_name

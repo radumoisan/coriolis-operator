@@ -90,7 +90,6 @@ from coriolis_operator.api import (  # type: ignore[import-untyped]
     API_CONFIG_DIR,
     API_IMAGE,
     API_LOCKS_DIR,
-    API_LOG_DIR,
     API_PORT,
     API_PROTOCOL_PROBE,
     API_RUN_AS_ID,
@@ -114,7 +113,6 @@ from coriolis_operator.deployer_manager import (  # type: ignore[import-untyped]
     DEPLOYER_MANAGER_COMMAND,
     DEPLOYER_MANAGER_CONFIG_DIR,
     DEPLOYER_MANAGER_IMAGE,
-    DEPLOYER_MANAGER_LOG_DIR,
     DEPLOYER_MANAGER_RUN_AS_ID,
 )
 from coriolis_operator.keystone import (  # type: ignore[import-untyped]
@@ -153,6 +151,9 @@ from coriolis_operator.rabbitmq import (  # type: ignore[import-untyped]
     RABBITMQ_RUNTIME_DIR,
     RABBITMQ_SECRET_DIR,
     render_rabbitmq_config,
+)
+from coriolis_operator.worker import (  # type: ignore[import-untyped]
+    WORKER_VIXDISKLIB_TMP_DIR,
 )
 
 CONDUCTOR_IMAGE = (
@@ -843,6 +844,7 @@ def create_evidence_files(
                 database_host=mariadb_hostname,
                 keystone_host="keystone",
             ),
+            coriolis_debug=True,
             credentials=SensitiveCoriolisCredentials(
                 rabbitmq_password=rabbitmq_password,
                 coriolis_database_password=coriolis_password,
@@ -856,7 +858,7 @@ def create_evidence_files(
                 bind_address="0.0.0.0",
                 coriolis_port=API_PORT,
                 coriolis_config_dir=API_CONFIG_DIR,
-                coriolis_vmware_vix_disklib_log_dir="/var/log/coriolis/vmware-root",
+                coriolis_vmware_vix_disklib_log_dir=WORKER_VIXDISKLIB_TMP_DIR,
                 endpoints=SensitiveCoriolisEndpoints(
                     rabbitmq_host="rabbitmq",
                     memcached_host="memcached",
@@ -1976,8 +1978,6 @@ class Validator:
             "--tmpfs",
             "/tmp:rw,noexec,nosuid,size=64m",
             "--tmpfs",
-            f"{API_LOG_DIR}:rw,noexec,nosuid,size=64m,uid={CONDUCTOR_RUN_AS_ID},gid={CONDUCTOR_RUN_AS_ID},mode=0700",
-            "--tmpfs",
             f"{API_LOCKS_DIR}:rw,noexec,nosuid,size=16m,uid={CONDUCTOR_RUN_AS_ID},gid={CONDUCTOR_RUN_AS_ID},mode=0700",
             "--mount",
             f"type=volume,src={self.resources.coriolis_config_volume},dst={API_CONFIG_DIR},readonly",
@@ -2010,8 +2010,6 @@ class Validator:
             "PYTHONDONTWRITEBYTECODE=1",
             "--tmpfs",
             "/tmp:rw,noexec,nosuid,size=64m",
-            "--tmpfs",
-            f"{API_LOG_DIR}:rw,noexec,nosuid,size=64m,uid={API_RUN_AS_ID},gid={API_RUN_AS_ID},mode=0700",
             "--tmpfs",
             f"{API_LOCKS_DIR}:rw,noexec,nosuid,size=16m,uid={API_RUN_AS_ID},gid={API_RUN_AS_ID},mode=0700",
             "--mount",
@@ -2057,8 +2055,6 @@ class Validator:
             "PYTHONDONTWRITEBYTECODE=1",
             "--tmpfs",
             "/tmp:rw,noexec,nosuid,size=64m",
-            "--tmpfs",
-            f"{API_LOG_DIR}:rw,noexec,nosuid,size=64m,uid={SCHEDULER_RUN_AS_ID},gid={SCHEDULER_RUN_AS_ID},mode=0700",
             "--mount",
             f"type=volume,src={self.resources.coriolis_config_volume},dst={API_CONFIG_DIR},readonly",
             "--entrypoint",
@@ -2088,8 +2084,6 @@ class Validator:
             "PYTHONDONTWRITEBYTECODE=1",
             "--tmpfs",
             "/tmp:rw,noexec,nosuid,size=64m",
-            "--tmpfs",
-            f"{API_LOG_DIR}:rw,noexec,nosuid,size=64m,uid={TRANSFER_CRON_RUN_AS_ID},gid={TRANSFER_CRON_RUN_AS_ID},mode=0700",
             "--mount",
             f"type=volume,src={self.resources.coriolis_config_volume},dst={API_CONFIG_DIR},readonly",
             "--entrypoint",
@@ -2119,8 +2113,6 @@ class Validator:
             "PYTHONDONTWRITEBYTECODE=1",
             "--tmpfs",
             "/tmp:rw,noexec,nosuid,size=64m",
-            "--tmpfs",
-            f"{API_LOG_DIR}:rw,noexec,nosuid,size=64m,uid={MINION_MANAGER_RUN_AS_ID},gid={MINION_MANAGER_RUN_AS_ID},mode=0700",
             "--mount",
             f"type=volume,src={self.resources.coriolis_config_volume},dst={API_CONFIG_DIR},readonly",
             "--entrypoint",
@@ -2150,8 +2142,6 @@ class Validator:
             "PYTHONDONTWRITEBYTECODE=1",
             "--tmpfs",
             "/tmp:rw,noexec,nosuid,size=64m",
-            "--tmpfs",
-            f"{DEPLOYER_MANAGER_LOG_DIR}:rw,noexec,nosuid,size=64m,uid={DEPLOYER_MANAGER_RUN_AS_ID},gid={DEPLOYER_MANAGER_RUN_AS_ID},mode=0700",
             "--mount",
             f"type=volume,src={self.resources.coriolis_config_volume},"
             f"dst={DEPLOYER_MANAGER_CONFIG_DIR},readonly",
@@ -2220,7 +2210,7 @@ class Validator:
             "--tmpfs",
             "/tmp:rw,noexec,nosuid,size=64m",
             "--tmpfs",
-            f"{API_LOG_DIR}:rw,noexec,nosuid,size=64m",
+            f"{WORKER_VIXDISKLIB_TMP_DIR}:rw,noexec,nosuid,size=64m",
             "--tmpfs",
             "/opt/coriolis/export:rw,noexec,nosuid,size=64m",
             "--mount",
@@ -2263,8 +2253,6 @@ class Validator:
             "PYTHONDONTWRITEBYTECODE=1",
             "--tmpfs",
             "/tmp:rw,noexec,nosuid,size=64m",
-            "--tmpfs",
-            f"{API_LOG_DIR}:rw,noexec,nosuid,size=64m,uid={CONDUCTOR_RUN_AS_ID},gid={CONDUCTOR_RUN_AS_ID},mode=0700",
             "--mount",
             f"type=volume,src={self.resources.coriolis_config_volume},dst={API_CONFIG_DIR},readonly",
             "--entrypoint",
@@ -2427,7 +2415,7 @@ class Validator:
         ):
             raise ValidationFailure(stage)
         tmpfs = host_config.get("Tmpfs") or {}
-        if set(tmpfs) != {"/tmp", API_LOG_DIR, "/opt/coriolis/export"}:
+        if set(tmpfs) != {"/tmp", WORKER_VIXDISKLIB_TMP_DIR, "/opt/coriolis/export"}:
             raise ValidationFailure(stage)
         networks = (container.get("NetworkSettings") or {}).get("Networks") or {}
         if set(networks) != {self.resources.network}:
@@ -2683,7 +2671,7 @@ class Validator:
                 CONDUCTOR_COMMAND[0],
                 CONDUCTOR_COMMAND[1:],
                 run_as_id=CONDUCTOR_RUN_AS_ID,
-                writable_paths=("/tmp", API_LOG_DIR, API_LOCKS_DIR),
+                writable_paths=("/tmp", API_LOCKS_DIR),
             ),
         )
         self._stage(
@@ -2695,7 +2683,7 @@ class Validator:
                 SCHEDULER_COMMAND[0],
                 SCHEDULER_COMMAND[1:],
                 run_as_id=SCHEDULER_RUN_AS_ID,
-                writable_paths=("/tmp", API_LOG_DIR),
+                writable_paths=("/tmp",),
             ),
         )
         self._stage(
@@ -2707,7 +2695,7 @@ class Validator:
                 TRANSFER_CRON_COMMAND[0],
                 TRANSFER_CRON_COMMAND[1:],
                 run_as_id=TRANSFER_CRON_RUN_AS_ID,
-                writable_paths=("/tmp", API_LOG_DIR),
+                writable_paths=("/tmp",),
             ),
         )
         self._stage(
@@ -2719,7 +2707,7 @@ class Validator:
                 MINION_MANAGER_COMMAND[0],
                 MINION_MANAGER_COMMAND[1:],
                 run_as_id=MINION_MANAGER_RUN_AS_ID,
-                writable_paths=("/tmp", API_LOG_DIR),
+                writable_paths=("/tmp",),
             ),
         )
         self._stage(
@@ -2731,7 +2719,7 @@ class Validator:
                 DEPLOYER_MANAGER_COMMAND,
                 DEPLOYER_MANAGER_ARGS,
                 run_as_id=DEPLOYER_MANAGER_RUN_AS_ID,
-                writable_paths=("/tmp", DEPLOYER_MANAGER_LOG_DIR),
+                writable_paths=("/tmp",),
             ),
         )
         self._stage(
@@ -2743,7 +2731,7 @@ class Validator:
                 API_COMMAND,
                 API_ARGS,
                 run_as_id=API_RUN_AS_ID,
-                writable_paths=("/tmp", API_LOG_DIR, API_LOCKS_DIR),
+                writable_paths=("/tmp", API_LOCKS_DIR),
             ),
         )
         self._stage("gate-api-unauthenticated", self._gate_api_unauthenticated)

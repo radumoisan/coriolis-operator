@@ -172,6 +172,17 @@ spec:
                     retentionHours:
                       type: integer
                       minimum: 1
+                    compactionIntervalMinutes:
+                      type: integer
+                      minimum: 1
+                      default: 15
+                    retentionDeleteDelayMinutes:
+                      type: integer
+                      minimum: 1
+                      default: 120
+                    coriolisDebug:
+                      type: boolean
+                      default: true
                     storage:
                       type: object
                       required:

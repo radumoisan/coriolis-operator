@@ -8,7 +8,6 @@ from coriolis_operator.conductor import (
     CONDUCTOR_CONFIG_DIR,
     CONDUCTOR_CONFIG_MAP_KEYS,
     CONDUCTOR_LOCKS_DIR,
-    CONDUCTOR_LOG_DIR,
     CONDUCTOR_RUN_AS_ID,
 )
 from coriolis_operator.reconcile import (
@@ -92,7 +91,6 @@ def test_conductor_deployment_has_frozen_runtime_contract() -> None:
     assert container["volumeMounts"] == [
         {"name": "config", "mountPath": CONDUCTOR_CONFIG_DIR, "readOnly": True},
         {"name": "tmp", "mountPath": "/tmp"},
-        {"name": "logs", "mountPath": CONDUCTOR_LOG_DIR},
         {"name": "locks", "mountPath": CONDUCTOR_LOCKS_DIR},
     ]
     assert pod["volumes"] == [
@@ -125,7 +123,6 @@ def test_conductor_deployment_has_frozen_runtime_contract() -> None:
             },
         },
         {"name": "tmp", "emptyDir": {"medium": "Memory"}},
-        {"name": "logs", "emptyDir": {}},
         {"name": "locks", "emptyDir": {}},
     ]
 

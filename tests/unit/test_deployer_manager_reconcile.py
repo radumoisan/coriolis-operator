@@ -6,7 +6,6 @@ from coriolis_operator.deployer_manager import (
     DEPLOYER_MANAGER_COMPONENT,
     DEPLOYER_MANAGER_CONFIG_DIR,
     DEPLOYER_MANAGER_IMAGE,
-    DEPLOYER_MANAGER_LOG_DIR,
     DEPLOYER_MANAGER_RUN_AS_ID,
 )
 from coriolis_operator.reconcile import (
@@ -97,7 +96,6 @@ def test_deployer_manager_deployment_has_frozen_runtime_contract() -> None:
     assert container["volumeMounts"] == [
         {"name": "config", "mountPath": DEPLOYER_MANAGER_CONFIG_DIR, "readOnly": True},
         {"name": "tmp", "mountPath": "/tmp"},
-        {"name": "logs", "mountPath": DEPLOYER_MANAGER_LOG_DIR},
     ]
     assert pod["volumes"] == [
         {
@@ -120,7 +118,6 @@ def test_deployer_manager_deployment_has_frozen_runtime_contract() -> None:
             },
         },
         {"name": "tmp", "emptyDir": {"medium": "Memory"}},
-        {"name": "logs", "emptyDir": {}},
     ]
 
 
@@ -140,9 +137,8 @@ def test_deployer_manager_omits_unneeded_runtime_surfaces() -> None:
     assert {mount["name"] for mount in container["volumeMounts"]} == {
         "config",
         "tmp",
-        "logs",
     }
-    assert {volume["name"] for volume in pod["volumes"]} == {"config", "tmp", "logs"}
+    assert {volume["name"] for volume in pod["volumes"]} == {"config", "tmp"}
 
 
 def test_deployer_manager_deployment_uses_label_safe_name_and_selector() -> None:

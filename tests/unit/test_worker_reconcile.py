@@ -76,7 +76,7 @@ def test_worker_deployment_has_frozen_runtime_contract() -> None:
     assert container["volumeMounts"] == [
         {"name": "config", "mountPath": "/etc/coriolis", "readOnly": True},
         {"name": "tmp", "mountPath": "/tmp"},
-        {"name": "logs", "mountPath": "/var/log/coriolis"},
+        {"name": "vixdisklib-tmp", "mountPath": "/var/log/coriolis/vmware-root"},
         {"name": "export", "mountPath": "/opt/coriolis/export"},
         {"name": "dev", "mountPath": "/dev"},
         {"name": "lib-modules", "mountPath": "/lib/modules", "readOnly": True},
@@ -84,7 +84,7 @@ def test_worker_deployment_has_frozen_runtime_contract() -> None:
     assert pod["volumes"] == [
         {"name": "config", "secret": {"secretName": "example-coriolis-config-secret"}},
         {"name": "tmp", "emptyDir": {"medium": "Memory"}},
-        {"name": "logs", "emptyDir": {}},
+        {"name": "vixdisklib-tmp", "emptyDir": {}},
         {"name": "export", "emptyDir": {}},
         {"name": "dev", "hostPath": {"path": "/dev", "type": "Directory"}},
         {

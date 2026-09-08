@@ -12,7 +12,6 @@ SCHEDULER_TERMINATION_GRACE_PERIOD_SECONDS = 30
 SCHEDULER_COMMAND = "/usr/local/bin/coriolis-scheduler"
 SCHEDULER_ARGS = ("--config-file=/etc/coriolis/coriolis.conf",)
 SCHEDULER_CONFIG_DIR = "/etc/coriolis"
-SCHEDULER_LOG_DIR = "/var/log/coriolis"
 SCHEDULER_CONFIG_MAP_KEYS = (
     "coriolis-api.wsgi",
     "wsgi-coriolis.conf",

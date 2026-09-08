@@ -48,6 +48,7 @@ def test_evidence_files_are_private_and_stage_runtime_config(
     assert (paths.coriolis / "coriolis_rpc_probe.py").exists()
     assert (paths.coriolis / "coriolis.conf").read_text() == (
         runtime.render_sensitive_coriolis_config(
+            coriolis_debug=True,
             endpoints=runtime.SensitiveCoriolisEndpoints(
                 rabbitmq_host="rabbitmq",
                 memcached_host="memcached",
@@ -128,7 +129,7 @@ def test_application_constants_match_frozen_facts() -> None:
     assert runtime.DEPLOYER_MANAGER_ARGS == (
         "--config-file=/etc/coriolis/coriolis.conf",
     )
-    assert runtime.DEPLOYER_MANAGER_LOG_DIR == "/var/log/coriolis"
+    assert runtime.WORKER_VIXDISKLIB_TMP_DIR == "/var/log/coriolis/vmware-root"
     assert runtime.SCHEDULER_RUN_AS_ID == 42434
     assert runtime.TRANSFER_CRON_RUN_AS_ID == 42434
     assert runtime.MINION_MANAGER_RUN_AS_ID == 42434
@@ -488,7 +489,8 @@ def test_scheduler_runtime_arguments_harden_no_ports_and_no_locks(
         f"dst={runtime.API_CONFIG_DIR},readonly"
     ) in rendered
     assert "/tmp:rw,noexec,nosuid,size=64m" in rendered
-    assert f"{runtime.API_LOG_DIR}:rw,noexec,nosuid,size=64m" in rendered
+    assert "/var/log/coriolis" not in rendered
+    assert args.count("--tmpfs") == 1
     assert args[args.index("--entrypoint") + 1] == runtime.SCHEDULER_COMMAND[0]
     assert args[args.index(runtime.SCHEDULER_IMAGE) + 1 :] == list(
         runtime.SCHEDULER_COMMAND[1:]
@@ -515,7 +517,8 @@ def test_transfer_cron_runtime_arguments_harden_no_ports_and_no_locks(
         f"type=volume,src={validator.resources.coriolis_config_volume},"
         f"dst={runtime.API_CONFIG_DIR},readonly"
     ) in rendered
-    assert f"{runtime.API_LOG_DIR}:rw,noexec,nosuid,size=64m" in rendered
+    assert "/var/log/coriolis" not in rendered
+    assert args.count("--tmpfs") == 1
     assert args[args.index("--entrypoint") + 1] == runtime.TRANSFER_CRON_COMMAND[0]
     assert args[args.index(runtime.TRANSFER_CRON_IMAGE) + 1 :] == list(
         runtime.TRANSFER_CRON_COMMAND[1:]
@@ -543,14 +546,15 @@ def test_minion_manager_runtime_arguments_harden_no_ports_and_no_locks(
         f"dst={runtime.API_CONFIG_DIR},readonly"
     ) in rendered
     assert "/tmp:rw,noexec,nosuid,size=64m" in rendered
-    assert f"{runtime.API_LOG_DIR}:rw,noexec,nosuid,size=64m" in rendered
+    assert "/var/log/coriolis" not in rendered
+    assert args.count("--tmpfs") == 1
     assert args[args.index("--entrypoint") + 1] == runtime.MINION_MANAGER_COMMAND[0]
     assert args[args.index(runtime.MINION_MANAGER_IMAGE) + 1 :] == list(
         runtime.MINION_MANAGER_COMMAND[1:]
     )
 
 
-def test_deployer_manager_runtime_arguments_allow_tmp_and_log_writes(
+def test_deployer_manager_runtime_arguments_allow_tmp_write_only(
     tmp_path: Path,
 ) -> None:
     validator = _validator(tmp_path)
@@ -570,12 +574,9 @@ def test_deployer_manager_runtime_arguments_allow_tmp_and_log_writes(
         f"type=volume,src={validator.resources.coriolis_config_volume},"
         f"dst={runtime.DEPLOYER_MANAGER_CONFIG_DIR},readonly"
     ) in rendered
-    assert args.count("--tmpfs") == 2
+    assert args.count("--tmpfs") == 1
     assert "/tmp:rw,noexec,nosuid,size=64m" in rendered
-    assert (
-        f"{runtime.DEPLOYER_MANAGER_LOG_DIR}:rw,noexec,nosuid,size=64m,"
-        "uid=42434,gid=42434,mode=0700"
-    ) in rendered
+    assert "/var/log/coriolis" not in rendered
     assert args[args.index("--entrypoint") + 1] == runtime.DEPLOYER_MANAGER_COMMAND
     assert args[args.index(runtime.DEPLOYER_MANAGER_IMAGE) + 1 :] == list(
         runtime.DEPLOYER_MANAGER_ARGS
@@ -603,7 +604,7 @@ def test_worker_runtime_arguments_are_privileged_and_registration_only(
         f"dst={runtime.API_CONFIG_DIR},readonly"
     ) in rendered
     assert args.count("--tmpfs") == 3
-    for path in ("/tmp", runtime.API_LOG_DIR, "/opt/coriolis/export"):
+    for path in ("/tmp", runtime.WORKER_VIXDISKLIB_TMP_DIR, "/opt/coriolis/export"):
         assert path in rendered
     assert args[args.index("--entrypoint") + 1] == runtime.WORKER_COMMAND[0]
     assert args[args.index(runtime.WORKER_IMAGE) + 1 :] == list(
@@ -651,7 +652,7 @@ def _worker_inspect_payload(
                     "Tmpfs": tmpfs
                     or {
                         "/tmp": "rw,noexec,nosuid,size=64m",
-                        runtime.API_LOG_DIR: "rw,noexec,nosuid,size=64m",
+                        runtime.WORKER_VIXDISKLIB_TMP_DIR: "rw,noexec,nosuid,size=64m",
                         "/opt/coriolis/export": "rw,noexec,nosuid,size=64m",
                     },
                 },
@@ -684,7 +685,16 @@ def test_worker_inspector_accepts_exact_privileged_contract(tmp_path: Path) -> N
             None,
             None,
         ),
-        (True, None, None, {"/tmp": "rw", runtime.API_LOG_DIR: "rw"}, None),
+        (
+            True,
+            None,
+            None,
+            {
+                "/tmp": "rw",
+                runtime.WORKER_VIXDISKLIB_TMP_DIR: "rw",
+            },
+            None,
+        ),
         (True, None, None, None, ["/host:/container"]),
     ],
 )
@@ -741,7 +751,7 @@ def _inspect_payload(
                     "Tmpfs": tmpfs
                     or {
                         "/tmp": "rw,noexec,nosuid,size=64m",
-                        runtime.API_LOG_DIR: "rw,noexec,nosuid,size=64m",
+                        runtime.WORKER_VIXDISKLIB_TMP_DIR: "rw,noexec,nosuid,size=64m",
                     },
                 },
             }
@@ -765,7 +775,7 @@ def test_inspect_runtime_parameterizes_run_as_and_writable_paths(
         runtime.SCHEDULER_COMMAND[0],
         runtime.SCHEDULER_COMMAND[1:],
         run_as_id=42434,
-        writable_paths=("/tmp", runtime.API_LOG_DIR),
+        writable_paths=("/tmp", runtime.WORKER_VIXDISKLIB_TMP_DIR),
     )
 
     with pytest.raises(runtime.ValidationFailure):
@@ -776,7 +786,7 @@ def test_inspect_runtime_parameterizes_run_as_and_writable_paths(
             runtime.SCHEDULER_COMMAND[0],
             runtime.SCHEDULER_COMMAND[1:],
             run_as_id=99999,
-            writable_paths=("/tmp", runtime.API_LOG_DIR),
+            writable_paths=("/tmp", runtime.WORKER_VIXDISKLIB_TMP_DIR),
         )
 
     with pytest.raises(runtime.ValidationFailure):
@@ -787,7 +797,11 @@ def test_inspect_runtime_parameterizes_run_as_and_writable_paths(
             runtime.SCHEDULER_COMMAND[0],
             runtime.SCHEDULER_COMMAND[1:],
             run_as_id=42434,
-            writable_paths=("/tmp", runtime.API_LOG_DIR, runtime.API_LOCKS_DIR),
+            writable_paths=(
+                "/tmp",
+                runtime.WORKER_VIXDISKLIB_TMP_DIR,
+                runtime.API_LOCKS_DIR,
+            ),
         )
 
 
@@ -805,7 +819,7 @@ def test_inspect_runtime_parameterizes_run_as_and_writable_paths(
             None,
             {
                 "/tmp": "rw,noexec,nosuid,size=64m",
-                runtime.API_LOG_DIR: "rw,noexec,nosuid,size=64m",
+                runtime.WORKER_VIXDISKLIB_TMP_DIR: "rw,noexec,nosuid,size=64m",
                 runtime.API_LOCKS_DIR: "rw,noexec,nosuid,size=64m",
             },
         ),
@@ -835,7 +849,7 @@ def test_inspect_runtime_rejects_extra_runtime_surfaces(
             runtime.SCHEDULER_COMMAND[0],
             runtime.SCHEDULER_COMMAND[1:],
             run_as_id=42434,
-            writable_paths=("/tmp", runtime.API_LOG_DIR),
+            writable_paths=("/tmp", runtime.WORKER_VIXDISKLIB_TMP_DIR),
         )
 
 

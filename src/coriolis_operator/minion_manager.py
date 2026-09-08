@@ -12,7 +12,6 @@ MINION_MANAGER_TERMINATION_GRACE_PERIOD_SECONDS = 15
 MINION_MANAGER_COMMAND = "/usr/local/bin/coriolis-minion-manager"
 MINION_MANAGER_ARGS = ("--config-file=/etc/coriolis/coriolis.conf",)
 MINION_MANAGER_CONFIG_DIR = "/etc/coriolis"
-MINION_MANAGER_LOG_DIR = "/var/log/coriolis"
 MINION_MANAGER_CONFIG_MAP_KEYS = (
     "coriolis-api.wsgi",
     "wsgi-coriolis.conf",

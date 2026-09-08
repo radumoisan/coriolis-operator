@@ -15,5 +15,5 @@ WORKER_ARGS = (
     "--config-file=/etc/coriolis/coriolis.conf",
 )
 WORKER_CONFIG_DIR = "/etc/coriolis"
-WORKER_LOG_DIR = "/var/log/coriolis"
+WORKER_VIXDISKLIB_TMP_DIR = "/var/log/coriolis/vmware-root"
 WORKER_EXPORT_DIR = "/opt/coriolis/export"
